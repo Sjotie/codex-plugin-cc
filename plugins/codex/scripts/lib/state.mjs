@@ -93,13 +93,21 @@ function acquireLock(cwd) {
       if (err.code !== "EEXIST") throw err;
       // Lock exists — check if the owner is still alive.
       try {
-        const pid = parseInt(fs.readFileSync(lockFile, "utf8").trim(), 10);
-        if (pid && !isProcessAlive(pid)) {
-          fs.unlinkSync(lockFile);
+        const content = fs.readFileSync(lockFile, "utf8").trim();
+        const pid = parseInt(content, 10);
+        // Treat NaN, 0, or dead PID as stale/corrupt.
+        if (!pid || !isProcessAlive(pid)) {
+          // Re-read before unlinking: another process may have already
+          // reclaimed this lock with a fresh PID since our first read.
+          const recheck = fs.readFileSync(lockFile, "utf8").trim();
+          if (recheck === content) {
+            fs.unlinkSync(lockFile);
+          }
           continue;
         }
       } catch {
-        // Cannot read PID — wait and retry.
+        // Lock file was removed between checks — retry immediately.
+        continue;
       }
       const sleepEnd = Date.now() + LOCK_RETRY_DELAY_MS;
       while (Date.now() < sleepEnd) {

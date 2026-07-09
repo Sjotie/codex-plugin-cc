@@ -167,6 +167,30 @@ test("stale lock from dead process is automatically reclaimed", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Test 3b: corrupt/empty lock file is treated as stale and reclaimed.
+// ---------------------------------------------------------------------------
+test("corrupt lock file (empty or non-numeric) is treated as stale", () => {
+  const workspace = makeTempDir();
+  const lockFile = path.join(resolveStateDir(workspace), LOCK_FILE_NAME);
+
+  fs.mkdirSync(resolveStateDir(workspace), { recursive: true });
+
+  // Case 1: empty lock file (process crashed before writing PID).
+  fs.writeFileSync(lockFile, "", "utf8");
+  upsertJob(workspace, { id: "job-corrupt-empty", status: "running" });
+  let jobs = listJobs(workspace);
+  assert.equal(jobs.length, 1, "Should succeed with empty lock file");
+  assert.equal(fs.existsSync(lockFile), false, "Empty lock should be removed");
+
+  // Case 2: non-numeric content (corrupted).
+  fs.writeFileSync(lockFile, "garbage", "utf8");
+  upsertJob(workspace, { id: "job-corrupt-garbage", status: "running" });
+  jobs = listJobs(workspace);
+  assert.equal(jobs.length, 2, "Should succeed with corrupt lock file");
+  assert.equal(fs.existsSync(lockFile), false, "Corrupt lock should be removed");
+});
+
+// ---------------------------------------------------------------------------
 // Test 4: atomic write — state.json is never partially written.
 // ---------------------------------------------------------------------------
 test("saveState writes atomically (no temp files remain)", () => {
