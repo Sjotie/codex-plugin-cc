@@ -70,6 +70,12 @@ function resolveLockFile(cwd) {
   return path.join(resolveStateDir(cwd), LOCK_FILE_NAME);
 }
 
+function sleepSync(ms) {
+  // Synchronous sleep without burning CPU: Atomics.wait blocks the thread
+  // until the timeout elapses (the buffer is never notified).
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function isProcessAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -109,10 +115,7 @@ function acquireLock(cwd) {
         // Lock file was removed between checks — retry immediately.
         continue;
       }
-      const sleepEnd = Date.now() + LOCK_RETRY_DELAY_MS;
-      while (Date.now() < sleepEnd) {
-        /* spin-wait; short duration, avoids timer overhead */
-      }
+      sleepSync(LOCK_RETRY_DELAY_MS);
     }
   }
   return false;
