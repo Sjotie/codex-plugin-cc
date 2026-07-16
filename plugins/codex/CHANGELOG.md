@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.7-sjotie.2 (fork)
+
+- upstream PR #471 commit a6e501a: `task --write` now runs Codex with
+  `danger-full-access` (full filesystem + network) instead of
+  `workspace-write`, so write tasks can reach localhost services and
+  browser tooling. Deliberate opt-in by Sjoerd; read-only default unchanged.
+
 ## 1.0.7-sjotie.1 (fork)
 
 Fork of openai/codex-plugin-cc v1.0.6 with reviewed community PRs merged, aimed
