@@ -6,13 +6,31 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
+import { binaryAvailable } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
 export const BROKER_SHUTDOWN_ACCEPTED = "accepted";
 const BROKER_STATE_FILE = "broker.json";
+const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
+const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 const BROKER_SHUTDOWN_TIMEOUT_MS = 1000;
+
+export function resolveBrokerRuntimeIdentity(cwd, env = process.env) {
+  const codex = binaryAvailable("codex", ["--version"], { cwd, env });
+  return {
+    pluginVersion: PLUGIN_MANIFEST.version ?? "0.0.0",
+    codexVersion: codex.available ? codex.detail : null
+  };
+}
+
+export function isBrokerRuntimeCurrent(session, runtime) {
+  return (
+    session?.runtime?.pluginVersion === runtime.pluginVersion &&
+    session?.runtime?.codexVersion === runtime.codexVersion
+  );
+}
 
 export function createBrokerSessionDir(prefix = "cxc-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -190,8 +208,19 @@ export async function isBrokerSessionReady(session, timeoutMs = 150) {
 
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
+  const runtime = resolveBrokerRuntimeIdentity(cwd, options.env);
   if (existing && (await isBrokerSessionReady(existing))) {
-    return existing;
+    if (isBrokerRuntimeCurrent(existing, runtime)) {
+      return existing;
+    }
+    // The plugin or codex CLI was upgraded since this broker spawned, so its
+    // long-lived app-server child still runs the old version (upstream #468).
+    // Ask it to shut down; while it is busy serving another client, keep
+    // using it and defer the refresh instead of killing an active stream.
+    const shutdownOutcome = await sendBrokerShutdown(existing.endpoint);
+    if (shutdownOutcome !== BROKER_SHUTDOWN_ACCEPTED) {
+      return existing;
+    }
   }
 
   if (existing) {
@@ -242,7 +271,8 @@ export async function ensureBrokerSession(cwd, options = {}) {
     pidFile,
     logFile,
     sessionDir,
-    pid: child.pid ?? null
+    pid: child.pid ?? null,
+    runtime
   };
   saveBrokerSession(cwd, session);
   return session;

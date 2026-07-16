@@ -634,6 +634,17 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
+function normalizeResumeThreadId(value) {
+  if (value == null) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    throw new Error("--resume-thread requires a non-empty thread id.");
+  }
+  return trimmed;
+}
+
 function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, resumeThreadId, jobId }) {
   return {
     cwd,
@@ -809,7 +820,7 @@ async function handleTask(argv) {
   const prompt = readTaskPrompt(cwd, options, positionals);
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
-  const resumeThreadId = options["resume-thread"] || null;
+  const resumeThreadId = normalizeResumeThreadId(options["resume-thread"]);
   const fresh = Boolean(options.fresh);
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
