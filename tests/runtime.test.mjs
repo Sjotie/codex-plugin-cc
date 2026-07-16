@@ -3046,3 +3046,111 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
   assert.equal(payload.sessionRuntime.mode, "shared");
   assert.equal(payload.sessionRuntime.endpoint, "unix:/tmp/fake-broker.sock");
 });
+
+test("broker terminates itself when its app-server child exits", { skip: process.platform === "win32" }, async (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = buildEnv(binDir);
+  delete env[BROKER_ENDPOINT_ENV];
+  const taskResult = run("node", [SCRIPT, "task", "exercise broker child-exit cleanup"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(taskResult.status, 0, taskResult.stderr);
+
+  const brokerSession = loadBrokerSession(repo);
+  assert.ok(brokerSession?.pid);
+  t.after(() => {
+    try {
+      terminateProcessTree(brokerSession.pid);
+    } catch {}
+  });
+
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.ok(fakeState.appServerPid, "fake codex app-server should have recorded its pid");
+  // Kill only the app-server child; the broker must notice and terminate
+  // itself instead of lingering as a zombie that accepts doomed connections.
+  process.kill(fakeState.appServerPid, "SIGKILL");
+
+  await waitFor(() => {
+    try {
+      process.kill(brokerSession.pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  });
+
+  assert.equal(fs.existsSync(brokerSession.pidFile), false);
+  const target = parseBrokerEndpoint(brokerSession.endpoint);
+  if (target.kind === "unix") {
+    assert.equal(fs.existsSync(target.path), false);
+  }
+});
+
+test("ensureBrokerSession refreshes an idle broker after a plugin or codex upgrade", async (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = buildEnv(binDir);
+  delete env[BROKER_ENDPOINT_ENV];
+  const firstTask = run("node", [SCRIPT, "task", "boot the shared broker"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(firstTask.status, 0, firstTask.stderr);
+
+  const firstSession = loadBrokerSession(repo);
+  assert.ok(firstSession?.pid);
+  assert.ok(firstSession.runtime?.pluginVersion, "broker session should record its runtime identity");
+  t.after(() => {
+    try {
+      terminateProcessTree(firstSession.pid);
+    } catch {}
+  });
+
+  // Simulate a plugin/codex upgrade: the stored runtime no longer matches.
+  saveBrokerSession(repo, {
+    ...firstSession,
+    runtime: { pluginVersion: "0.0.1", codexVersion: "codex 0.0.1" }
+  });
+
+  const secondTask = run("node", [SCRIPT, "task", "runs on a refreshed broker"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(secondTask.status, 0, secondTask.stderr);
+
+  const secondSession = loadBrokerSession(repo);
+  assert.ok(secondSession?.pid);
+  t.after(() => {
+    try {
+      terminateProcessTree(secondSession.pid);
+    } catch {}
+  });
+
+  assert.notEqual(secondSession.pid, firstSession.pid, "stale broker should be replaced");
+  assert.notEqual(secondSession.runtime?.pluginVersion, "0.0.1");
+
+  // The old broker accepted the shutdown request and exited.
+  await waitFor(() => {
+    try {
+      process.kill(firstSession.pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  });
+});
