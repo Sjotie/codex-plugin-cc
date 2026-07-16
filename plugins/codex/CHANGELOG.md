@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.7-sjotie.4 (fork)
+
+- model tiers revised: gpt-5.6-sol medium is now the default (its thoroughness
+  is the point), sol high for large implementation work, luna medium stays for
+  dirt-cheap quick exploration. Terra dropped from the tiers.
+
 ## 1.0.7-sjotie.3 (fork)
 
 - codex-rescue agent now selects the Codex model itself (explicit user choice

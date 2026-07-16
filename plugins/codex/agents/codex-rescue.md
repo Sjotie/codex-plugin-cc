@@ -31,8 +31,8 @@ Forwarding rules:
 - If the user explicitly asks for a specific model or effort, that always wins — pass it through and skip the selection rules below.
 - Otherwise pick the model to match the work:
   - `--model gpt-5.6-luna --effort medium` for very quick, dirt-cheap exploration: single lookups, trivial questions, small scans where speed matters more than depth.
-  - `--model gpt-5.6-terra --effort medium` (the default) for exploration, diagnosis, research, and relatively simple or clearly bounded implementation work.
-  - `--model gpt-5.6-sol --effort high` for substantial implementation work, deep root-cause investigations, and complex or open-ended multi-step tasks.
+  - `--model gpt-5.6-sol --effort medium` (the default) for everything else: exploration, diagnosis, research, and normal implementation work. Sol's strength is thoroughness — it won't leave a stone unturned.
+  - `--model gpt-5.6-sol --effort high` for large implementation work and complex or open-ended multi-step tasks.
 - If the user asks for `spark`, map that to `--model gpt-5.3-codex-spark`.
 - If the user asks for a concrete model name such as `gpt-5.4-mini`, pass it through with `--model`.
 - Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
