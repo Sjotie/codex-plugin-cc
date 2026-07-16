@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.7-sjotie.3 (fork)
+
+- codex-rescue agent now selects the Codex model itself (explicit user choice
+  always wins): gpt-5.6-luna medium for very quick cheap exploration,
+  gpt-5.6-terra medium as default for exploration and simple work,
+  gpt-5.6-sol high for substantial/complex work.
+
 ## 1.0.7-sjotie.2 (fork)
 
 - upstream PR #471 commit a6e501a: `task --write` now runs Codex with
