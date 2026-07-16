@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.7-sjotie.1 (fork)
+
+Fork of openai/codex-plugin-cc v1.0.6 with reviewed community PRs merged, aimed
+at running multiple concurrent Codex tasks across Claude Code sessions:
+
+- upstream PR #475: `task --resume-thread <id>` for explicit thread resume
+  (plus id validation adopted from PR #344)
+- upstream PR #460: state.json file lock + atomic writes (busy-spin replaced
+  with `Atomics.wait` sleep)
+- upstream PR #497 (commits f168a47 + 7fc8eff): dead-worker reconciliation
+  (running jobs with a dead pid become failed), cancellation persisted before
+  kill, `task --cwd` validation
+- upstream PR #491: broker preserved across session exits (refcount +
+  busy-shutdown rejection + turn completion race = ghost-task fix, idle
+  self-reap)
+- upstream PR #453: broker terminates when its app-server child exits
+  (reapplied on top of #491)
+- upstream PR #501: accept MCP elicitation requests
+- version-based stale-broker refresh after plugin/codex upgrades (minimal
+  reimplementation of that part of PR #471; busy brokers defer the refresh)
+
+Deliberately skipped: #344 (silent env-var sandbox escalation), #492 (collapses
+per-worktree isolation), #490/#457 (subsumed by #491), rest of #471.
+
 ## 1.0.0
 
 - Initial version of the Codex plugin for Claude Code
