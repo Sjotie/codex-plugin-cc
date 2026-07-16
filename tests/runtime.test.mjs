@@ -225,7 +225,9 @@ test("task uses an explicit workspace cwd from an unrelated invocation directory
 
   assert.equal(result.status, 0, result.stderr);
   const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
-  assert.equal(path.resolve(fakeState.threads[0].cwd), path.resolve(repo));
+  // realpath both sides: on macOS the temp dir lives behind the /var ->
+  // /private/var symlink, which path.resolve does not dereference.
+  assert.equal(fs.realpathSync(path.resolve(fakeState.threads[0].cwd)), fs.realpathSync(path.resolve(repo)));
 });
 
 test("task rejects a nonexistent explicit workspace cwd", () => {
