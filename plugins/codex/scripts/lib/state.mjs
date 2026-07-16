@@ -78,15 +78,6 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function acquireLock(cwd) {
   ensureStateDir(cwd);
   const lockFile = resolveLockFile(cwd);
