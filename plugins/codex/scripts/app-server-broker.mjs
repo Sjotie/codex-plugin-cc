@@ -317,6 +317,17 @@ async function main() {
   });
 
   server.on("listening", () => scheduleIdleShutdown(server));
+  // The broker proxies every request to the single app-server child spawned
+  // above. If that child exits, request() writes to a closed stdin and its
+  // promise never resolves, so a caller hangs forever while ensureBrokerSession
+  // keeps reusing the still-listening socket. Terminate so the next connect
+  // spawns a fresh, working broker. (Upstream PR #453, reapplied on PR #491.)
+  appClient.exitPromise.then(() => {
+    if (!shutdownPromise) {
+      shutdown(server).finally(() => process.exit(1));
+    }
+  });
+
   server.listen(listenTarget.path);
 }
 
