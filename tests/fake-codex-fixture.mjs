@@ -247,7 +247,32 @@ function taskPayload(prompt, resume) {
   return "Handled the requested task.\\nTask prompt accepted.";
 }
 
-const args = process.argv.slice(2);
+// Parse the global \`-c/--config key=value\` overrides that codex accepts BEFORE
+// the subcommand (\`codex [OPTIONS] <COMMAND>\`). The real plugin now spawns
+// \`codex -c mcp_servers.claude-peers-convex.enabled=false app-server\`, so the
+// fake CLI must strip and record those leading globals instead of treating
+// \`-c\` as an unknown subcommand.
+const rawArgs = process.argv.slice(2);
+const configOverrides = [];
+let argCursor = 0;
+while (argCursor < rawArgs.length) {
+  const token = rawArgs[argCursor];
+  if (token === "-c" || token === "--config") {
+    const value = rawArgs[argCursor + 1];
+    if (value !== undefined) {
+      configOverrides.push(value);
+      argCursor += 2;
+      continue;
+    }
+  }
+  if (typeof token === "string" && (token.startsWith("-c=") || token.startsWith("--config="))) {
+    configOverrides.push(token.slice(token.indexOf("=") + 1));
+    argCursor += 1;
+    continue;
+  }
+  break;
+}
+const args = rawArgs.slice(argCursor);
 if (args[0] === "--version") {
   console.log("codex-cli test");
   process.exit(0);
@@ -273,6 +298,8 @@ if (args[0] !== "app-server") {
 const bootState = loadState();
 bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
 bootState.appServerPid = process.pid;
+bootState.appServerConfigOverrides = configOverrides;
+bootState.appServerPeersDisable = process.env.PEERS_DISABLE ?? null;
 saveState(bootState);
 
 const rl = readline.createInterface({ input: process.stdin });

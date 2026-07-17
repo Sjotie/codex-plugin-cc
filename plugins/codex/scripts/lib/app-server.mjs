@@ -22,6 +22,28 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
+// Keep the peer-network MCP out of every app-server child. The background
+// rescue/companion runtime spawns these Codex children to run subagent work,
+// and subagents must NOT join the claude-peers-convex network (Homebase policy
+// SEQ-25/31). Defense-in-depth: the `-c` override disables the server via the
+// codex CLI, and PEERS_DISABLE=1 makes the peers-MCP server itself refuse to
+// register even if the override is ever bypassed.
+export const PEERS_MCP_DISABLE_OVERRIDE = "mcp_servers.claude-peers-convex.enabled=false";
+
+// `-c/--config` is a GLOBAL codex flag and must precede the subcommand
+// (`codex [OPTIONS] <COMMAND>`), so it goes before "app-server".
+export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "app-server"];
+
+/**
+ * Build the environment for a spawned app-server child, layering the peers
+ * opt-out flag on top of the provided base environment.
+ * @param {NodeJS.ProcessEnv} [baseEnv]
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function buildAppServerChildEnv(baseEnv = process.env) {
+  return { ...baseEnv, PEERS_DISABLE: "1" };
+}
+
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
   title: "Codex Plugin",
@@ -222,9 +244,9 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    this.proc = spawn("codex", ["app-server"], {
+    this.proc = spawn("codex", APP_SERVER_SPAWN_ARGS, {
       cwd: this.cwd,
-      env: this.options.env ?? process.env,
+      env: buildAppServerChildEnv(this.options.env ?? process.env),
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
       windowsHide: true

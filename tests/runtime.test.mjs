@@ -230,6 +230,34 @@ test("task uses an explicit workspace cwd from an unrelated invocation directory
   assert.equal(fs.realpathSync(path.resolve(fakeState.threads[0].cwd)), fs.realpathSync(path.resolve(repo)));
 });
 
+test("app-server spawn disables the peers MCP via a config override and PEERS_DISABLE=1", () => {
+  const repo = makeTempDir();
+  const invocationDir = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "-C", repo, "inspect the target workspace"], {
+    cwd: invocationDir,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  // The subagent-spawned codex child must not join the claude-peers-convex
+  // network (Homebase SEQ-25/31): both the CLI override and the env opt-out
+  // must reach the spawned app-server.
+  assert.ok(
+    fakeState.appServerConfigOverrides.includes("mcp_servers.claude-peers-convex.enabled=false"),
+    `expected peers MCP override in ${JSON.stringify(fakeState.appServerConfigOverrides)}`
+  );
+  assert.equal(fakeState.appServerPeersDisable, "1");
+});
+
 test("task rejects a nonexistent explicit workspace cwd", () => {
   const invocationDir = makeTempDir();
   const missingDir = path.join(invocationDir, "missing-workspace");
