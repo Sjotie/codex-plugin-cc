@@ -1,15 +1,36 @@
 import fs from "node:fs";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
+import { isFailedJobStatus, isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob, writeJobFile } from "./state.mjs";
+import {
+  getConfig,
+  listJobs,
+  readJobFile,
+  resolveJobFile,
+  UNREPORTED_PROCESS_EXIT_MESSAGE,
+  upsertJob,
+  writeJobFile
+} from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
+const DEFAULT_WAIT_POLL_INTERVAL_MS = 1000;
+const DEFAULT_WAIT_REGISTRATION_GRACE_MS = 2000;
 export const CANCELLATION_TERMINATION_FAILED_MESSAGE =
   "Cancellation requested but process termination failed; retry /codex:cancel.";
+
+function validateExactJobId(jobId) {
+  if (typeof jobId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(jobId)) {
+    throw new Error(`Invalid job id "${jobId}".`);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -116,6 +137,7 @@ function inferLegacyJobPhase(job, progressPreview = []) {
     case "cancelled":
       return "cancelled";
     case "failed":
+    case "error":
       return "failed";
     case "completed":
       return "done";
@@ -167,12 +189,12 @@ export function enrichJob(job, options = {}) {
     ...job,
     kindLabel: getJobTypeLabel(job),
     progressPreview:
-      job.status === "queued" || job.status === "running" || job.status === "failed"
+      isWaitingJobStatus(job.status) || isFailedJobStatus(job.status)
         ? readJobProgressPreview(job.logFile, maxProgressLines)
         : [],
     elapsed: formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? null),
     duration:
-      job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+      isTerminalJobStatus(job.status)
         ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
         : null
   };
@@ -185,10 +207,134 @@ export function enrichJob(job, options = {}) {
 
 export function readStoredJob(workspaceRoot, jobId) {
   const jobFile = resolveJobFile(workspaceRoot, jobId);
-  if (!fs.existsSync(jobFile)) {
-    return null;
+  try {
+    return readJobFile(jobFile);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
   }
-  return readJobFile(jobFile);
+}
+
+function hydrateIndexedJob(workspaceRoot, indexedJob) {
+  try {
+    const storedJob = readStoredJob(workspaceRoot, indexedJob.id);
+    return storedJob ? { ...indexedJob, ...storedJob } : indexedJob;
+  } catch {
+    return indexedJob;
+  }
+}
+
+function hydrateIndexedJobs(workspaceRoot, jobs) {
+  return jobs.map((job) => hydrateIndexedJob(workspaceRoot, job));
+}
+
+function persistUnreportedProcessExit(workspaceRoot, jobId, storedJob) {
+  const completedAt = new Date().toISOString();
+  const failedJob = {
+    ...storedJob,
+    id: jobId,
+    status: "failed",
+    phase: "failed",
+    pid: null,
+    completedAt,
+    updatedAt: completedAt,
+    errorMessage: UNREPORTED_PROCESS_EXIT_MESSAGE
+  };
+  writeJobFile(workspaceRoot, jobId, failedJob);
+  upsertJob(workspaceRoot, failedJob);
+  return failedJob;
+}
+
+export async function waitForTerminalJob(workspaceRoot, jobId, options = {}) {
+  validateExactJobId(jobId);
+  const timeoutMs = options.timeoutMs == null ? null : Math.max(0, Number(options.timeoutMs));
+  const pollIntervalMs = Math.max(10, Number(options.pollIntervalMs ?? DEFAULT_WAIT_POLL_INTERVAL_MS));
+  const registrationGraceMs = Math.max(
+    0,
+    Number(options.registrationGraceMs ?? DEFAULT_WAIT_REGISTRATION_GRACE_MS)
+  );
+  if (
+    (timeoutMs != null && !Number.isFinite(timeoutMs)) ||
+    !Number.isFinite(pollIntervalMs) ||
+    !Number.isFinite(registrationGraceMs)
+  ) {
+    throw new Error("Wait timing options must be finite non-negative numbers.");
+  }
+  const jobFile = resolveJobFile(workspaceRoot, jobId);
+  const deadline = timeoutMs == null ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
+  let missingSince = Date.now();
+  let lastJob = null;
+  let lastReadError = null;
+
+  while (true) {
+    try {
+      let storedJob;
+      try {
+        storedJob = readJobFile(jobFile);
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+        storedJob = null;
+      }
+      if (storedJob) {
+        if (
+          isWaitingJobStatus(storedJob.status) &&
+          Number.isInteger(storedJob.pid) &&
+          storedJob.pid > 0 &&
+          !isProcessAlive(storedJob.pid)
+        ) {
+          storedJob = persistUnreportedProcessExit(workspaceRoot, jobId, storedJob);
+        }
+        lastJob = storedJob;
+        lastReadError = null;
+        missingSince = null;
+
+        if (isTerminalJobStatus(storedJob.status)) {
+          if (
+            storedJob.status === "cancelled" &&
+            Number.isInteger(storedJob.pid) &&
+            storedJob.pid > 0 &&
+            isProcessAlive(storedJob.pid)
+          ) {
+            // Cancellation is written before process termination. Wait until
+            // it settles to pid:null or rolls back to a waiting status.
+          } else {
+            return { outcome: "terminal", job: storedJob };
+          }
+        } else if (!isWaitingJobStatus(storedJob.status)) {
+          return { outcome: "invalid-status", job: storedJob };
+        }
+      } else if (missingSince == null) {
+        missingSince = Date.now();
+      }
+    } catch (error) {
+      lastReadError = error;
+      if (missingSince == null) {
+        missingSince = Date.now();
+      }
+    }
+
+    const now = Date.now();
+    if (missingSince != null && now - missingSince >= registrationGraceMs) {
+      return {
+        outcome: lastReadError ? "unreadable" : "not-found",
+        job: lastJob,
+        error: lastReadError
+      };
+    }
+    if (now >= deadline) {
+      return { outcome: "timeout", job: lastJob, timeoutMs };
+    }
+
+    const nextDeadline = Math.min(
+      deadline,
+      missingSince == null ? Number.POSITIVE_INFINITY : missingSince + registrationGraceMs
+    );
+    await sleep(Math.min(pollIntervalMs, Math.max(0, nextDeadline - now)));
+  }
 }
 
 export function settleCancellationAfterTermination(
@@ -258,19 +404,21 @@ function matchJobReference(jobs, reference, predicate = () => true) {
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
+  const jobs = sortJobsNewestFirst(
+    filterJobsForCurrentSession(hydrateIndexedJobs(workspaceRoot, listJobs(workspaceRoot)), options)
+  );
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
   const running = jobs
-    .filter((job) => job.status === "queued" || job.status === "running")
+    .filter((job) => isWaitingJobStatus(job.status))
     .map((job) => enrichJob(job, { maxProgressLines }));
 
-  const latestFinishedRaw = jobs.find((job) => job.status !== "queued" && job.status !== "running") ?? null;
+  const latestFinishedRaw = jobs.find((job) => isTerminalJobStatus(job.status)) ?? null;
   const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw, { maxProgressLines }) : null;
 
   const recent = (options.all ? jobs : jobs.slice(0, maxJobs))
-    .filter((job) => job.status !== "queued" && job.status !== "running" && job.id !== latestFinished?.id)
+    .filter((job) => isTerminalJobStatus(job.status) && job.id !== latestFinished?.id)
     .map((job) => enrichJob(job, { maxProgressLines }));
 
   return {
@@ -286,7 +434,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const jobs = sortJobsNewestFirst(hydrateIndexedJobs(workspaceRoot, listJobs(workspaceRoot)));
   const selected = matchJobReference(jobs, reference);
   if (!selected) {
     throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.`);
@@ -300,18 +448,19 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
 
 export function resolveResultJob(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(reference ? listJobs(workspaceRoot) : filterJobsForCurrentSession(listJobs(workspaceRoot)));
+  const hydratedJobs = hydrateIndexedJobs(workspaceRoot, listJobs(workspaceRoot));
+  const jobs = sortJobsNewestFirst(reference ? hydratedJobs : filterJobsForCurrentSession(hydratedJobs));
   const selected = matchJobReference(
     jobs,
     reference,
-    (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+    (job) => isTerminalJobStatus(job.status)
   );
 
   if (selected) {
     return { workspaceRoot, job: selected };
   }
 
-  const active = matchJobReference(jobs, reference, (job) => job.status === "queued" || job.status === "running");
+  const active = matchJobReference(jobs, reference, (job) => isWaitingJobStatus(job.status));
   if (active) {
     throw new Error(`Job ${active.id} is still ${active.status}. Check /codex:status and try again once it finishes.`);
   }
@@ -326,7 +475,7 @@ export function resolveResultJob(cwd, reference) {
 export function resolveCancelableJob(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
-  const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const activeJobs = jobs.filter((job) => isWaitingJobStatus(job.status));
 
   if (reference) {
     const selected = matchJobReference(activeJobs, reference);

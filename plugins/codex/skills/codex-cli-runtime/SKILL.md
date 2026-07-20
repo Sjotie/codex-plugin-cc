@@ -14,7 +14,7 @@ Primary helper:
 Execution rules:
 - The rescue subagent is a forwarder, not an orchestrator. Its only job is to invoke `task` once and return that stdout unchanged.
 - Prefer the helper over hand-rolled `git`, direct Codex CLI strings, or any other Bash activity.
-- Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel` from `codex:codex-rescue`.
+- Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, `wait`, or `cancel` separately from `codex:codex-rescue`.
 - Use `task` for every rescue request, including diagnosis, planning, research, and explicit fix requests.
 - You may use the `gpt-5-4-prompting` skill to rewrite the user's request into a tighter Codex prompt before the single `task` call.
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
@@ -25,6 +25,7 @@ Execution rules:
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
+- Use foreground `task` for short work. For work sent to the detached worker, invoke `task --background --wait`; this arms the runtime's job-JSON wait before the subagent can become idle and returns only after a terminal status.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
@@ -38,6 +39,8 @@ Command selection:
 Safety rules:
 - Default to write-capable Codex work in `codex:codex-rescue` unless the user explicitly asks for read-only behavior.
 - Preserve the user's task text as-is apart from stripping routing flags.
-- Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
+- Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own.
+- Do not promise future monitoring. An idle subagent has no active poll. Only say the result is being awaited while the single blocking Bash call is still running.
+- Absence from a `running` array never proves completion: queued and registration-lagged jobs can be absent too. Completion means the job JSON says `completed`, `failed`, `error`, or `cancelled`.
 - Return the stdout of the `task` command exactly as-is.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- Preserve stdout even when a failed, errored, or cancelled task gives the command a non-zero exit status. If Codex was never invoked and there is no stdout, return nothing.

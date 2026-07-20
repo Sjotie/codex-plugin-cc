@@ -39,10 +39,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task-resume-candidate -
 Operating rules:
 
 - The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...` and return that command's stdout as-is.
-- Pass `--cwd <dir>` explicitly for the intended workspace root. For work expected to exceed a few minutes, have the subagent add the task command's own `--background` flag so a caller timeout cannot terminate it.
+- Pass `--cwd <dir>` explicitly for the intended workspace root. For work expected to exceed a few minutes, have the subagent add the task command's own `--background --wait` flags. The worker then survives independently while the same Bash call remains blocked on the terminal job JSON and forwards the stored result.
 - Return the Codex companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of its own.
+- Never accept a promise to poll later from an agent that has already returned. Never interpret absence from `running[]` as completion; queued and registration-lagged jobs can be absent too.
 - Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort.
 - Leave the model unset unless the user explicitly asks for one. If they ask for `spark`, map it to `gpt-5.3-codex-spark`.
 - Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.

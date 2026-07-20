@@ -15,3 +15,4 @@ If the user did not pass a job ID:
 If the user did pass a job ID:
 - Present the full command output to the user.
 - Do not summarize or condense it.
+- Do not infer completion from absence in the active-jobs table. Queued work may not appear in a running-only view; use `/codex:wait <job-id>` when terminal completion and the stored result are required.

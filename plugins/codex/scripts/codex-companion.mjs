@@ -37,12 +37,15 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  enrichJob,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
   settleCancellationAfterTermination,
-  sortJobsNewestFirst
+  sortJobsNewestFirst,
+  waitForTerminalJob
 } from "./lib/job-control.mjs";
+import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -62,7 +65,8 @@ import {
   renderJobStatusReport,
   renderSetupReport,
   renderStatusReport,
-  renderTaskResult
+  renderTaskResult,
+  renderWaitResult
 } from "./lib/render.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -81,9 +85,10 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--cwd <dir>] [--resume-last|--resume|--resume-thread <id>|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--wait] [--write] [--cwd <dir>] [--resume-last|--resume|--resume-thread <id>|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
+      "  node scripts/codex-companion.mjs wait <job-id> [--timeout <seconds>|--timeout-ms <ms>] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
     ].join("\n")
@@ -320,10 +325,6 @@ function renderStatusPayload(report, asJson) {
   return asJson ? report : renderStatusReport(report);
 }
 
-function isActiveJobStatus(status) {
-  return status === "queued" || status === "running";
-}
-
 function getCurrentClaudeSessionId() {
   return process.env[SESSION_ID_ENV] ?? null;
 }
@@ -342,8 +343,7 @@ function findLatestResumableTaskJob(jobs) {
       (job) =>
         job.jobClass === "task" &&
         job.threadId &&
-        job.status !== "queued" &&
-        job.status !== "running"
+        isTerminalJobStatus(job.status)
     ) ?? null
   );
 }
@@ -351,19 +351,88 @@ function findLatestResumableTaskJob(jobs) {
 async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
   const pollIntervalMs = Math.max(100, Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS);
-  const deadline = Date.now() + timeoutMs;
-  let snapshot = buildSingleJobSnapshot(cwd, reference);
+  const snapshot = buildSingleJobSnapshot(cwd, reference);
+  const outcome = await waitForTerminalJob(snapshot.workspaceRoot, snapshot.job.id, {
+    timeoutMs,
+    pollIntervalMs
+  });
 
-  while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
-    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
-    snapshot = buildSingleJobSnapshot(cwd, reference);
+  if (outcome.outcome !== "terminal" && outcome.outcome !== "timeout") {
+    throw new Error(`Job ${snapshot.job.id} could not be awaited: ${outcome.outcome}.`);
   }
 
   return {
-    ...snapshot,
-    waitTimedOut: isActiveJobStatus(snapshot.job.status),
+    workspaceRoot: snapshot.workspaceRoot,
+    job: enrichJob(outcome.job ?? snapshot.job),
+    waitTimedOut: outcome.outcome === "timeout",
     timeoutMs
   };
+}
+
+function parseNonNegativeNumber(value, optionName, multiplier = 1) {
+  if (value == null) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${optionName} must be a non-negative number.`);
+  }
+  return parsed * multiplier;
+}
+
+function resolveWaitTimeoutMs(options) {
+  if (options.timeout != null && options["timeout-ms"] != null) {
+    throw new Error("Choose either --timeout (seconds) or --timeout-ms (milliseconds).");
+  }
+  if (options.timeout != null) {
+    return parseNonNegativeNumber(options.timeout, "--timeout", 1000);
+  }
+  return parseNonNegativeNumber(options["timeout-ms"], "--timeout-ms");
+}
+
+function outputWaitOutcome(outcome, jobId, options = {}) {
+  if (outcome.outcome === "terminal") {
+    const job = enrichJob(outcome.job);
+    const payload = { job, storedJob: outcome.job };
+    outputCommandResult(payload, renderWaitResult(job, outcome.job), options.json);
+    process.exitCode = WAIT_EXIT_CODES[job.status] ?? WAIT_EXIT_CODES.invalid;
+    return;
+  }
+
+  if (outcome.outcome === "timeout") {
+    const job = enrichJob(outcome.job ?? { id: jobId, status: "unknown" });
+    const payload = {
+      job,
+      storedJob: outcome.job,
+      waitTimedOut: true,
+      timeoutMs: outcome.timeoutMs
+    };
+    if (options.json) {
+      outputResult(payload, true);
+    } else {
+      process.stderr.write(`Timed out waiting for ${jobId} to reach a terminal status.\n`);
+    }
+    process.exitCode = WAIT_EXIT_CODES.timeout;
+    return;
+  }
+
+  if (outcome.outcome === "invalid-status") {
+    process.stderr.write(`Job ${jobId} has unsupported non-terminal status "${outcome.job?.status ?? "unknown"}".\n`);
+  } else if (outcome.outcome === "unreadable") {
+    const detail = outcome.error instanceof Error ? `: ${outcome.error.message}` : "";
+    process.stderr.write(`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`);
+  } else {
+    process.stderr.write(`No job file appeared for "${jobId}" within the registration grace period.\n`);
+  }
+  process.exitCode = WAIT_EXIT_CODES.invalid;
+}
+
+async function waitForJobAndOutput(cwd, jobId, options = {}) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const outcome = await waitForTerminalJob(workspaceRoot, jobId, {
+    timeoutMs: options.timeoutMs
+  });
+  outputWaitOutcome(outcome, jobId, options);
 }
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
@@ -371,7 +440,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const sessionId = getCurrentClaudeSessionId();
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
-  const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
+  const activeTask = visibleJobs.find((job) => job.jobClass === "task" && isWaitingJobStatus(job.status));
   if (activeTask) {
     throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
   }
@@ -807,7 +876,7 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file", "resume-thread"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "wait"],
     aliasMap: {
       m: "model"
     }
@@ -850,6 +919,10 @@ async function handleTask(argv) {
       jobId: job.id
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
+    if (options.wait) {
+      await waitForJobAndOutput(cwd, job.id, { json: options.json });
+      return;
+    }
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
     return;
   }
@@ -960,6 +1033,25 @@ async function handleStatus(argv) {
 
   const report = buildStatusSnapshot(cwd, { all: options.all });
   outputResult(renderStatusPayload(report, options.json), options.json);
+}
+
+async function handleWait(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "timeout", "timeout-ms"],
+    booleanOptions: ["json"]
+  });
+
+  if (positionals.length !== 1) {
+    throw new Error("`wait` requires exactly one job id.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const timeoutMs = resolveWaitTimeoutMs(options);
+
+  await waitForJobAndOutput(cwd, positionals[0], {
+    json: options.json,
+    timeoutMs
+  });
 }
 
 function handleResult(argv) {
@@ -1129,6 +1221,9 @@ async function main() {
       break;
     case "status":
       await handleStatus(argv);
+      break;
+    case "wait":
+      await handleWait(argv);
       break;
     case "result":
       handleResult(argv);

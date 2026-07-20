@@ -42,6 +42,39 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
   throw new Error("Timed out waiting for condition.");
 }
 
+function runAsync(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (status, signal) => {
+      resolve({ status, signal, stdout, stderr });
+    });
+  });
+}
+
+async function createDeadPid() {
+  const exitedWorker = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const deadPid = exitedWorker.pid;
+  await new Promise((resolve, reject) => {
+    exitedWorker.once("error", reject);
+    exitedWorker.once("exit", resolve);
+  });
+  return deadPid;
+}
+
 test("setup reports ready when fake codex is installed and authenticated", () => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -1144,6 +1177,31 @@ test("task --background enqueues a detached worker and exposes per-job status", 
   assert.match(resultPayload.storedJob.rendered, /Handled the requested task/);
 });
 
+test("task --background --wait stays attached until the stored result is terminal", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "slow-task");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run(
+    "node",
+    [SCRIPT, "task", "--background", "--wait", "--json", "investigate the failing test"],
+    {
+      cwd: repo,
+      env: buildEnv(binDir)
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.match(payload.job.id, /^task-/);
+  assert.equal(payload.job.status, "completed");
+  assert.match(payload.storedJob.rendered, /Handled the requested task/);
+});
+
 test("review rejects focus text because it is native-review only", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -1467,6 +1525,193 @@ test("status preserves adversarial review kind labels", () => {
   assert.match(result.stdout, /Codex session ID: thr_adv_done/);
 });
 
+test("wait follows an unregistered job through queued and running to completed", async () => {
+  const workspace = makeTempDir();
+  writeJobFile(workspace, "task-transition", { id: "task-transition", status: "queued" });
+  const startedAt = Date.now();
+
+  const waiting = runAsync(
+    "node",
+    [
+      SCRIPT,
+      "wait",
+      "task-transition",
+      "--json",
+      "--timeout-ms",
+      "6000"
+    ],
+    { cwd: workspace }
+  );
+  let waitSettled = false;
+  waiting.then(() => {
+    waitSettled = true;
+  });
+
+  // Keep each non-terminal state present across a full default 1s poll cycle.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.equal(waitSettled, false, "wait must remain attached while the stored job is queued");
+  writeJobFile(workspace, "task-transition", { id: "task-transition", status: "running" });
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.equal(waitSettled, false, "wait must remain attached while the stored job is running");
+  writeJobFile(workspace, "task-transition", {
+    id: "task-transition",
+    status: "completed",
+    result: { rawOutput: "Finished from the tracker." },
+    rendered: "Finished from the tracker.\n"
+  });
+
+  const result = await waiting;
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.job.status, "completed");
+  assert.equal(payload.storedJob.result.rawOutput, "Finished from the tracker.");
+  assert.ok(Date.now() - startedAt >= 2200);
+});
+
+test("wait returns the stored failed result with a failing exit code", () => {
+  const workspace = makeTempDir();
+  writeJobFile(workspace, "task-failed", {
+    id: "task-failed",
+    status: "failed",
+    result: { rawOutput: "Tests failed." },
+    rendered: "Tests failed.\n"
+  });
+
+  const result = run("node", [SCRIPT, "wait", "task-failed", "--json"], { cwd: workspace });
+
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.job.status, "failed");
+  assert.equal(payload.storedJob.result.rawOutput, "Tests failed.");
+});
+
+for (const { status, exitCode, rawOutput } of [
+  { status: "error", exitCode: 1, rawOutput: "Codex runtime crashed." },
+  { status: "cancelled", exitCode: 130, rawOutput: "Cancelled after partial progress." }
+]) {
+  test(`wait returns stored ${status} output with exit code ${exitCode}`, () => {
+    const workspace = makeTempDir();
+    const jobId = `task-${status}-wait`;
+    writeJobFile(workspace, jobId, {
+      id: jobId,
+      status,
+      result: { rawOutput },
+      rendered: `${rawOutput}\n`
+    });
+
+    const result = run("node", [SCRIPT, "wait", jobId, "--json"], { cwd: workspace });
+
+    assert.equal(result.status, exitCode, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.job.status, status);
+    assert.equal(payload.storedJob.status, status);
+    assert.equal(payload.storedJob.result.rawOutput, rawOutput);
+  });
+}
+
+test("wait does not report cancelled until process termination has settled", () => {
+  const workspace = makeTempDir();
+  writeJobFile(workspace, "task-cancelling-wait", {
+    id: "task-cancelling-wait",
+    status: "cancelled",
+    pid: process.pid,
+    result: { rawOutput: "Cancellation is still being delivered." }
+  });
+
+  const result = run(
+    "node",
+    [SCRIPT, "wait", "task-cancelling-wait", "--json", "--timeout-ms", "25"],
+    { cwd: workspace }
+  );
+
+  assert.equal(result.status, 124, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.job.status, "cancelled");
+  assert.equal(payload.waitTimedOut, true);
+});
+
+test("wait times out with a dedicated exit code while the job is running", () => {
+  const workspace = makeTempDir();
+  writeJobFile(workspace, "task-live-wait", {
+    id: "task-live-wait",
+    status: "running"
+  });
+
+  const result = run(
+    "node",
+    [SCRIPT, "wait", "task-live-wait", "--json", "--timeout-ms", "25"],
+    { cwd: workspace }
+  );
+
+  assert.equal(result.status, 124, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.job.status, "running");
+  assert.equal(payload.waitTimedOut, true);
+});
+
+test("wait rejects an unknown job after the registration grace period", () => {
+  const workspace = makeTempDir();
+
+  const result = run(
+    "node",
+    [SCRIPT, "wait", "task-unknown"],
+    { cwd: workspace }
+  );
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /No job file appeared for "task-unknown"/);
+  assert.equal(result.stdout, "");
+});
+
+test("wait reconciles a dead background worker to failed instead of hanging", async () => {
+  const workspace = makeTempDir();
+  const deadPid = await createDeadPid();
+  const job = {
+    id: "task-dead-wait",
+    status: "queued",
+    phase: "queued",
+    pid: deadPid
+  };
+  writeJobFile(workspace, job.id, job);
+  upsertJob(workspace, job);
+
+  const result = run("node", [SCRIPT, "wait", job.id, "--json", "--timeout-ms", "500"], {
+    cwd: workspace
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.job.status, "failed");
+  assert.equal(payload.job.errorMessage, "Process exited without reporting.");
+  assert.equal(payload.storedJob.status, "failed");
+});
+
+for (const status of ["queued", "running"]) {
+  test(`wait reconciles a dead ${status} job file without a state index`, async () => {
+    const workspace = makeTempDir();
+    const stateDir = resolveStateDir(workspace);
+    const deadPid = await createDeadPid();
+    const jobId = `task-dead-${status}-unindexed`;
+    writeJobFile(workspace, jobId, {
+      id: jobId,
+      status,
+      phase: status,
+      pid: deadPid
+    });
+    assert.equal(fs.existsSync(path.join(stateDir, "state.json")), false);
+
+    const result = run("node", [SCRIPT, "wait", jobId, "--json", "--timeout-ms", "1500"], {
+      cwd: workspace
+    });
+
+    assert.equal(result.status, 1, result.stderr);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.job.status, "failed");
+    assert.equal(payload.job.errorMessage, "Process exited without reporting.");
+    assert.equal(payload.storedJob.status, "failed");
+  });
+}
+
 test("status --wait times out cleanly when a job is still active", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
@@ -1525,6 +1770,56 @@ test("status --wait times out cleanly when a job is still active", () => {
   assert.equal(payload.job.id, "task-live");
   assert.equal(payload.job.status, "running");
   assert.equal(payload.waitTimedOut, true);
+});
+
+test("status and result preserve a terminal job file when the state index is stale", async () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  const deadPid = await createDeadPid();
+  const jobId = "task-terminal-stale-index";
+  const staleIndexedJob = {
+    id: jobId,
+    status: "running",
+    phase: "running",
+    title: "Codex Task",
+    jobClass: "task",
+    pid: deadPid,
+    createdAt: "2026-03-18T15:30:00.000Z",
+    startedAt: "2026-03-18T15:30:01.000Z",
+    updatedAt: "2026-03-18T15:30:02.000Z"
+  };
+  const terminalStoredJob = {
+    ...staleIndexedJob,
+    status: "completed",
+    phase: "done",
+    pid: null,
+    completedAt: "2026-03-18T15:31:00.000Z",
+    updatedAt: "2026-03-18T15:31:00.000Z",
+    result: { rawOutput: "Terminal output must remain authoritative." },
+    rendered: "Terminal output must remain authoritative.\n"
+  };
+  writeJobFile(workspace, jobId, terminalStoredJob);
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs: [staleIndexedJob] }, null, 2)}\n`,
+    "utf8"
+  );
+
+  const statusResult = run("node", [SCRIPT, "status", jobId, "--json"], { cwd: workspace });
+  assert.equal(statusResult.status, 0, statusResult.stderr);
+  assert.equal(JSON.parse(statusResult.stdout).job.status, "completed");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(jobsDir, `${jobId}.json`), "utf8")).status, "completed");
+
+  const result = run("node", [SCRIPT, "result", jobId, "--json"], { cwd: workspace });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.job.status, "completed");
+  assert.equal(payload.storedJob.status, "completed");
+  assert.equal(payload.storedJob.result.rawOutput, "Terminal output must remain authoritative.");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(jobsDir, `${jobId}.json`), "utf8")).status, "completed");
 });
 
 test("status and resume candidates mark a running job with a dead pid as failed", async () => {

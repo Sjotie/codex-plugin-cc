@@ -11,7 +11,7 @@ they already have.
 
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:wait`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
 
 ## Requirements
 
@@ -194,6 +194,23 @@ Use it to:
 - see the latest completed job
 - confirm whether a task is still running
 
+### `/codex:wait`
+
+Blocks until one job reaches a terminal status and then prints its stored result.
+It reads the job's own JSON status, so queued or registration-lagged work is not
+mistaken for completion merely because it is absent from a running-jobs list.
+
+Examples:
+
+```bash
+/codex:wait task-abc123
+/codex:wait task-abc123 --timeout 300
+```
+
+Terminal statuses are `completed`, `failed`, `error`, and `cancelled`. The
+command exits with 0 for completion, 1 for failed/error, 2 for an unknown job,
+124 for timeout, and 130 for cancellation.
+
 ### `/codex:result`
 
 Shows the final stored Codex output for a finished job.
@@ -261,6 +278,7 @@ Then check in with:
 
 ```bash
 /codex:status
+/codex:wait task-abc123
 /codex:result
 ```
 

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
@@ -12,7 +13,7 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
-const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting.";
+export const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting.";
 
 const LOCK_FILE_NAME = "state.lock";
 const LOCK_RETRY_DELAY_MS = 50;
@@ -242,12 +243,42 @@ export function upsertJob(cwd, jobPatch) {
   });
 }
 
-function reconcileRunningJobs(cwd, state) {
+function reconcileActiveJobs(cwd, state) {
   const completedAt = nowIso();
   const staleJobs = [];
+  let changed = false;
   const jobs = state.jobs.map((job) => {
-    if (job.status !== "running" || !Number.isInteger(job.pid) || job.pid <= 0 || isProcessAlive(job.pid)) {
+    if (
+      !isWaitingJobStatus(job.status) ||
+      !Number.isInteger(job.pid) ||
+      job.pid <= 0 ||
+      isProcessAlive(job.pid)
+    ) {
       return job;
+    }
+
+    const jobFile = resolveJobFile(cwd, job.id);
+    if (fs.existsSync(jobFile)) {
+      try {
+        const storedJob = readJobFile(jobFile);
+        if (isTerminalJobStatus(storedJob.status)) {
+          changed = true;
+          return {
+            ...job,
+            status: storedJob.status,
+            phase: storedJob.phase ?? storedJob.status,
+            pid: storedJob.pid ?? null,
+            completedAt: storedJob.completedAt ?? job.completedAt,
+            updatedAt: storedJob.updatedAt ?? storedJob.completedAt ?? job.updatedAt,
+            ...(Object.hasOwn(storedJob, "threadId") ? { threadId: storedJob.threadId } : {}),
+            ...(Object.hasOwn(storedJob, "turnId") ? { turnId: storedJob.turnId } : {}),
+            ...(Object.hasOwn(storedJob, "summary") ? { summary: storedJob.summary } : {}),
+            ...(Object.hasOwn(storedJob, "errorMessage") ? { errorMessage: storedJob.errorMessage } : {})
+          };
+        }
+      } catch {
+        // Fall through: an unreadable non-canonical job file cannot prove completion.
+      }
     }
 
     const failedJob = {
@@ -259,11 +290,12 @@ function reconcileRunningJobs(cwd, state) {
       updatedAt: completedAt,
       errorMessage: UNREPORTED_PROCESS_EXIT_MESSAGE
     };
+    changed = true;
     staleJobs.push(failedJob);
     return failedJob;
   });
 
-  if (staleJobs.length === 0) {
+  if (!changed) {
     return state.jobs;
   }
 
@@ -291,7 +323,7 @@ function reconcileRunningJobs(cwd, state) {
 
 export function listJobs(cwd) {
   const state = loadState(cwd);
-  return reconcileRunningJobs(cwd, state);
+  return reconcileActiveJobs(cwd, state);
 }
 
 export function setConfig(cwd, key, value) {
