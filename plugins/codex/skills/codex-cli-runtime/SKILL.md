@@ -25,7 +25,7 @@ Execution rules:
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
-- Use foreground `task` for short work. For work sent to the detached worker, invoke `task --background --wait`; this arms the runtime's job-JSON wait before the subagent can become idle and returns only after a terminal status.
+- Use foreground `task` for short work. Before any detached task, load and follow `codex:await-task`; that skill is the sole source of truth for how the task is awaited.
 - If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
@@ -40,7 +40,5 @@ Safety rules:
 - Default to write-capable Codex work in `codex:codex-rescue` unless the user explicitly asks for read-only behavior.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own.
-- Do not promise future monitoring. An idle subagent has no active poll. Only say the result is being awaited while the single blocking Bash call is still running.
-- Absence from a `running` array never proves completion: queued and registration-lagged jobs can be absent too. Completion means the job JSON says `completed`, `failed`, `error`, or `cancelled`.
 - Return the stdout of the `task` command exactly as-is.
 - Preserve stdout even when a failed, errored, or cancelled task gives the command a non-zero exit status. If Codex was never invoked and there is no stdout, return nothing.

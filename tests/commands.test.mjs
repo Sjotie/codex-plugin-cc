@@ -131,13 +131,13 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /thin forwarding wrapper/i);
   assert.match(agent, /prefer foreground for a small, clearly bounded rescue request/i);
   assert.match(agent, /If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution/i);
-  assert.match(agent, /expected to exceed a few minutes.*`--background --wait`/i);
+  assert.match(agent, /load and follow `codex:await-task`/i);
+  assert.match(agent, /sole source of truth for waiting, monitoring claims, and completion semantics/i);
+  assert.match(agent, /skills:[\s\S]*- await-task/);
   assert.match(agent, /pass `--cwd <dir>` explicitly/i);
   assert.match(agent, /Use exactly one `Bash` call/i);
   assert.match(agent, /Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, `wait`, or `cancel` separately/i);
-  assert.match(agent, /Never claim that you will monitor, poll, or forward a result later unless the blocking Bash call is still running/i);
-  assert.match(agent, /Never infer completion because a task is absent from a `running` list/i);
   assert.match(agent, /If the user explicitly asks for a specific model or effort, that always wins/i);
   assert.match(agent, /`--model gpt-5\.6-sol --effort medium` \(the default\)/i);
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
@@ -158,7 +158,8 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(runtimeSkill, /Strip it before calling `task`/i);
   assert.match(runtimeSkill, /`--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`/i);
   assert.match(runtimeSkill, /Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own/i);
-  assert.match(runtimeSkill, /Absence from a `running` array never proves completion/i);
+  assert.match(runtimeSkill, /load and follow `codex:await-task`/i);
+  assert.match(runtimeSkill, /sole source of truth for how the task is awaited/i);
   assert.match(runtimeSkill, /Preserve stdout even when a failed, errored, or cancelled task gives the command a non-zero exit status/i);
   assert.match(readme, /`codex:codex-rescue` subagent/i);
   assert.match(readme, /if you do not pass `--model` or `--effort`, Codex chooses its own defaults/i);
@@ -176,6 +177,51 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(readme, /### `\/codex:wait`/);
   assert.match(readme, /### `\/codex:result`/);
   assert.match(readme, /### `\/codex:cancel`/);
+});
+
+test("await-task is the canonical reusable background-task waiting contract", () => {
+  const skillDirectories = fs
+    .readdirSync(path.join(PLUGIN_ROOT, "skills"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  assert.ok(skillDirectories.includes("await-task"));
+
+  const awaitTask = read("skills/await-task/SKILL.md");
+  const agent = read("agents/codex-rescue.md");
+  const rescue = read("commands/rescue.md");
+  const runtimeSkill = read("skills/codex-cli-runtime/SKILL.md");
+  const resultHandling = read("skills/codex-result-handling/SKILL.md");
+
+  assert.match(awaitTask, /^name:\s*await-task$/m);
+  assert.match(awaitTask, /^description:.*main session.*subagent.*background Codex task\.$/m);
+  assert.match(awaitTask, /^user-invocable:\s*false$/m);
+  assert.match(awaitTask, /canonical waiting contract for every Claude session or subagent/i);
+  assert.match(awaitTask, /CLAUDE_PLUGIN_DATA/);
+  assert.match(awaitTask, /~\/.claude\/plugins\/data\/codex-openai-codex/);
+  assert.match(awaitTask, /first 16 hexadecimal characters of the SHA-256/i);
+  assert.match(awaitTask, /jobs\/<task-id>\.json/);
+  assert.match(awaitTask, /Terminal: `completed`, `failed`, `error`, and settled `cancelled`/);
+  assert.match(awaitTask, /Waiting: `queued`, `running`, and an absent job file during the short registration grace period/);
+  assert.match(awaitTask, /Absence from a `running` list is never completion evidence/i);
+  assert.match(awaitTask, /checks the registered PID during every poll and reconciles a dead worker to `failed`/i);
+  assert.match(awaitTask, /codex-companion\.mjs" wait <task-id> \[--timeout <seconds>\]/);
+  assert.match(awaitTask, /task --background --wait --cwd <workspace-root>/);
+  assert.match(awaitTask, /until output=/);
+  assert.match(awaitTask, /wait "\$task_id" --timeout 45 --json/);
+  assert.match(awaitTask, /Bash\(\.\.\., run_in_background: true\)/);
+  assert.match(awaitTask, /Never claim to be monitoring, polling, babysitting, or forwarding later unless/i);
+
+  for (const source of [agent, rescue, runtimeSkill, resultHandling]) {
+    assert.match(source, /codex:await-task/);
+  }
+  assert.match(resultHandling, /do not independently infer whether the task is complete/i);
+
+  for (const source of [agent, runtimeSkill, resultHandling]) {
+    assert.doesNotMatch(source, /Absence from a `running` (?:array|list) never proves completion/i);
+    assert.doesNotMatch(source, /only treat `completed`, `failed`, `error`, or `cancelled`/i);
+    assert.doesNotMatch(source, /idle subagent will keep polling/i);
+  }
 });
 
 test("transfer, wait, result, and cancel commands are exposed as deterministic runtime entrypoints", () => {
