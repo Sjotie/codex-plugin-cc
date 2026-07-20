@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.7-sjotie.6 (fork)
+
+- added the internal `codex:await-task` skill as the canonical waiting contract
+  for any main session or subagent accompanying a Codex background task
+- rescue/runtime/result guidance now loads that skill instead of duplicating
+  job-state, truthful-monitoring, and result-forwarding instructions
+- documented the state-path derivation and a pre-armed Claude background wait
+  loop while keeping the companion CLI as the only status-state implementation
+- made each wait poll reuse the status runtime's worker-liveness reconciliation,
+  so a queued or running job with a dead PID fails within one poll interval
+
 ## 1.0.7-sjotie.5 (fork)
 
 - added a job-JSON-backed `wait` command with explicit terminal statuses,
