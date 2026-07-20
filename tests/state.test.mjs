@@ -5,7 +5,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { makeTempDir } from "./helpers.mjs";
-import { resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
+import {
+  reconcileJobWorkerState,
+  resolveJobFile,
+  resolveJobLogFile,
+  resolveStateDir,
+  resolveStateFile,
+  saveState,
+  writeJobFile
+} from "../plugins/codex/scripts/lib/state.mjs";
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
@@ -38,6 +46,32 @@ test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
       process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
     }
   }
+});
+
+test("dead-worker reconciliation preserves the complete canonical terminal job", () => {
+  const workspace = makeTempDir();
+  const jobId = "task-terminal-race";
+  const terminalJob = {
+    id: jobId,
+    status: "completed",
+    phase: "done",
+    pid: null,
+    completedAt: "2026-07-20T15:00:00.000Z",
+    result: { rawOutput: "Preserve this result." },
+    rendered: "Preserve this result.\n"
+  };
+  writeJobFile(workspace, jobId, terminalJob);
+
+  const reconciliation = reconcileJobWorkerState(workspace, {
+    id: jobId,
+    status: "running",
+    phase: "verifying",
+    pid: 2_147_483_647
+  });
+
+  assert.equal(reconciliation.outcome, "terminal");
+  assert.deepEqual(reconciliation.storedJob, terminalJob);
+  assert.equal(reconciliation.job.status, "completed");
 });
 
 test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", () => {

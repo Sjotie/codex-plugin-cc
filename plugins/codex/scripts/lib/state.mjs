@@ -243,45 +243,45 @@ export function upsertJob(cwd, jobPatch) {
   });
 }
 
-function reconcileActiveJobs(cwd, state) {
-  const completedAt = nowIso();
-  const staleJobs = [];
-  let changed = false;
-  const jobs = state.jobs.map((job) => {
-    if (
-      !isWaitingJobStatus(job.status) ||
-      !Number.isInteger(job.pid) ||
-      job.pid <= 0 ||
-      isProcessAlive(job.pid)
-    ) {
-      return job;
-    }
+export function reconcileJobWorkerState(cwd, job) {
+  if (
+    !isWaitingJobStatus(job.status) ||
+    !Number.isInteger(job.pid) ||
+    job.pid <= 0 ||
+    isProcessAlive(job.pid)
+  ) {
+    return { outcome: "unchanged", job };
+  }
 
-    const jobFile = resolveJobFile(cwd, job.id);
-    if (fs.existsSync(jobFile)) {
-      try {
-        const storedJob = readJobFile(jobFile);
-        if (isTerminalJobStatus(storedJob.status)) {
-          changed = true;
-          return {
-            ...job,
-            status: storedJob.status,
-            phase: storedJob.phase ?? storedJob.status,
-            pid: storedJob.pid ?? null,
-            completedAt: storedJob.completedAt ?? job.completedAt,
-            updatedAt: storedJob.updatedAt ?? storedJob.completedAt ?? job.updatedAt,
-            ...(Object.hasOwn(storedJob, "threadId") ? { threadId: storedJob.threadId } : {}),
-            ...(Object.hasOwn(storedJob, "turnId") ? { turnId: storedJob.turnId } : {}),
-            ...(Object.hasOwn(storedJob, "summary") ? { summary: storedJob.summary } : {}),
-            ...(Object.hasOwn(storedJob, "errorMessage") ? { errorMessage: storedJob.errorMessage } : {})
-          };
+  const jobFile = resolveJobFile(cwd, job.id);
+  try {
+    const storedJob = readJobFile(jobFile);
+    if (isTerminalJobStatus(storedJob.status)) {
+      return {
+        outcome: "terminal",
+        storedJob,
+        job: {
+          ...job,
+          status: storedJob.status,
+          phase: storedJob.phase ?? storedJob.status,
+          pid: storedJob.pid ?? null,
+          completedAt: storedJob.completedAt ?? job.completedAt,
+          updatedAt: storedJob.updatedAt ?? storedJob.completedAt ?? job.updatedAt,
+          ...(Object.hasOwn(storedJob, "threadId") ? { threadId: storedJob.threadId } : {}),
+          ...(Object.hasOwn(storedJob, "turnId") ? { turnId: storedJob.turnId } : {}),
+          ...(Object.hasOwn(storedJob, "summary") ? { summary: storedJob.summary } : {}),
+          ...(Object.hasOwn(storedJob, "errorMessage") ? { errorMessage: storedJob.errorMessage } : {})
         }
-      } catch {
-        // Fall through: an unreadable non-canonical job file cannot prove completion.
-      }
+      };
     }
+  } catch {
+    // Fall through: an absent or unreadable job file cannot prove completion.
+  }
 
-    const failedJob = {
+  const completedAt = nowIso();
+  return {
+    outcome: "failed",
+    job: {
       ...job,
       status: "failed",
       phase: "failed",
@@ -289,10 +289,24 @@ function reconcileActiveJobs(cwd, state) {
       completedAt,
       updatedAt: completedAt,
       errorMessage: UNREPORTED_PROCESS_EXIT_MESSAGE
-    };
+    }
+  };
+}
+
+function reconcileActiveJobs(cwd, state) {
+  const staleJobs = [];
+  let changed = false;
+  const jobs = state.jobs.map((job) => {
+    const reconciliation = reconcileJobWorkerState(cwd, job);
+    if (reconciliation.outcome === "unchanged") {
+      return job;
+    }
+
     changed = true;
-    staleJobs.push(failedJob);
-    return failedJob;
+    if (reconciliation.outcome === "failed") {
+      staleJobs.push(reconciliation.job);
+    }
+    return reconciliation.job;
   });
 
   if (!changed) {
@@ -302,9 +316,6 @@ function reconcileActiveJobs(cwd, state) {
   const nextState = saveState(cwd, { ...state, jobs });
   for (const job of staleJobs) {
     const jobFile = resolveJobFile(cwd, job.id);
-    if (!fs.existsSync(jobFile)) {
-      continue;
-    }
     try {
       writeJobFile(cwd, job.id, {
         ...readJobFile(jobFile),
@@ -315,7 +326,7 @@ function reconcileActiveJobs(cwd, state) {
         errorMessage: job.errorMessage
       });
     } catch {
-      // The state record is still authoritative when a per-job file is unreadable.
+      // An absent or unreadable per-job file does not prevent the index reconciliation.
     }
   }
   return nextState.jobs;

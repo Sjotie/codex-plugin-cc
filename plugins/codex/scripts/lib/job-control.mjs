@@ -7,8 +7,8 @@ import {
   getConfig,
   listJobs,
   readJobFile,
+  reconcileJobWorkerState,
   resolveJobFile,
-  UNREPORTED_PROCESS_EXIT_MESSAGE,
   upsertJob,
   writeJobFile
 } from "./state.mjs";
@@ -230,23 +230,6 @@ function hydrateIndexedJobs(workspaceRoot, jobs) {
   return jobs.map((job) => hydrateIndexedJob(workspaceRoot, job));
 }
 
-function persistUnreportedProcessExit(workspaceRoot, jobId, storedJob) {
-  const completedAt = new Date().toISOString();
-  const failedJob = {
-    ...storedJob,
-    id: jobId,
-    status: "failed",
-    phase: "failed",
-    pid: null,
-    completedAt,
-    updatedAt: completedAt,
-    errorMessage: UNREPORTED_PROCESS_EXIT_MESSAGE
-  };
-  writeJobFile(workspaceRoot, jobId, failedJob);
-  upsertJob(workspaceRoot, failedJob);
-  return failedJob;
-}
-
 export async function waitForTerminalJob(workspaceRoot, jobId, options = {}) {
   validateExactJobId(jobId);
   const timeoutMs = options.timeoutMs == null ? null : Math.max(0, Number(options.timeoutMs));
@@ -280,13 +263,14 @@ export async function waitForTerminalJob(workspaceRoot, jobId, options = {}) {
         storedJob = null;
       }
       if (storedJob) {
-        if (
-          isWaitingJobStatus(storedJob.status) &&
-          Number.isInteger(storedJob.pid) &&
-          storedJob.pid > 0 &&
-          !isProcessAlive(storedJob.pid)
-        ) {
-          storedJob = persistUnreportedProcessExit(workspaceRoot, jobId, storedJob);
+        const reconciliation = reconcileJobWorkerState(workspaceRoot, storedJob);
+        if (reconciliation.outcome === "failed") {
+          storedJob = reconciliation.job;
+          writeJobFile(workspaceRoot, jobId, storedJob);
+          upsertJob(workspaceRoot, storedJob);
+        } else if (reconciliation.outcome === "terminal") {
+          storedJob = reconciliation.storedJob;
+          upsertJob(workspaceRoot, reconciliation.job);
         }
         lastJob = storedJob;
         lastReadError = null;

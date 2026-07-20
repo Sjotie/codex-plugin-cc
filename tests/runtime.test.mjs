@@ -1663,14 +1663,14 @@ test("wait rejects an unknown job after the registration grace period", () => {
   assert.equal(result.stdout, "");
 });
 
-test("wait reconciles a dead background worker to failed instead of hanging", async () => {
+test("wait reconciles a running job with a non-existent worker pid to failed within one poll", () => {
   const workspace = makeTempDir();
-  const deadPid = await createDeadPid();
+  const nonExistentPid = 2_147_483_647;
   const job = {
     id: "task-dead-wait",
-    status: "queued",
-    phase: "queued",
-    pid: deadPid
+    status: "running",
+    phase: "running",
+    pid: nonExistentPid
   };
   writeJobFile(workspace, job.id, job);
   upsertJob(workspace, job);
