@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.7-sjotie.5 (fork)
+
+- added a job-JSON-backed `wait` command with explicit terminal statuses,
+  registration grace, timeouts, stored result output, and meaningful exit codes
+- background rescue tasks now use `task --background --wait`, so the forwarding
+  subagent keeps a real blocking mechanism alive instead of promising later polls
+- status/result/resume rendering now uses explicit terminal-state semantics;
+  absence from a running-jobs list is never treated as completion
+
 ## 1.0.7-sjotie.4 (fork)
 
 - model tiers revised: gpt-5.6-sol medium is now the default (its thoroughness
