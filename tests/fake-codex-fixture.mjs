@@ -112,6 +112,22 @@ function buildConfigReadResult() {
   }
 }
 
+function availableChatGptModels() {
+  return ["gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.6-luna", "gpt-5.6-sol"];
+}
+
+function rejectUnavailableChatGptModel(model) {
+  if (
+    BEHAVIOR === "chatgpt-rejects-unavailable-model" &&
+    model &&
+    !availableChatGptModels().includes(model)
+  ) {
+    throw new Error(
+      "The '" + model + "' model is not supported when using Codex with a ChatGPT account."
+    );
+  }
+}
+
 function send(message) {
   process.stdout.write(JSON.stringify(message) + "\\n");
 }
@@ -333,6 +349,16 @@ rl.on("line", (line) => {
         send({ id: message.id, result: buildConfigReadResult() });
         break;
 
+      case "model/list":
+        send({
+          id: message.id,
+          result: {
+            data: availableChatGptModels().map((model) => ({ id: model, model })),
+            nextCursor: null
+          }
+        });
+        break;
+
       case "thread/start": {
         if (BEHAVIOR === "auth-run-fails") {
           throw new Error("authentication expired; run codex login");
@@ -340,8 +366,12 @@ rl.on("line", (line) => {
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
+        rejectUnavailableChatGptModel(message.params.model);
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
-        state.lastThreadStart = { sandbox: message.params.sandbox ?? null };
+        state.lastThreadStart = {
+          model: message.params.model ?? null,
+          sandbox: message.params.sandbox ?? null
+        };
         saveState(state);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
@@ -374,10 +404,14 @@ rl.on("line", (line) => {
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/resume.persistFullHistory requires experimentalApi capability");
         }
+        rejectUnavailableChatGptModel(message.params.model);
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
         saveState(state);
-        state.lastThreadResume = { sandbox: message.params.sandbox ?? null };
+        state.lastThreadResume = {
+          model: message.params.model ?? null,
+          sandbox: message.params.sandbox ?? null
+        };
         saveState(state);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         break;
@@ -469,6 +503,7 @@ rl.on("line", (line) => {
       }
 
 	      case "turn/start": {
+	        rejectUnavailableChatGptModel(message.params.model);
 	        const thread = ensureThread(state, message.params.threadId);
 	        const prompt = (message.params.input || [])
           .filter((item) => item.type === "text")

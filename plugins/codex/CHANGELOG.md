@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.7-sjotie.7 (fork)
+
+- rescue forwarding now leaves model and effort unset unless the user explicitly
+  selects them, so resumed threads keep their existing supported model
+- explicit model overrides are checked against the active ChatGPT account's
+  app-server model catalog; unavailable overrides fall back to the account
+  default instead of failing `thread/start`, `thread/resume`, or `turn/start`
+- added first-run-versus-resume regression coverage for the unsupported
+  `gpt-5.6-codex` override that previously produced an immediate HTTP 400
+
 ## 1.0.7-sjotie.6 (fork)
 
 - added the internal `codex:await-task` skill as the canonical waiting contract

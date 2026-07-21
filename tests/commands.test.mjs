@@ -138,8 +138,9 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /Use exactly one `Bash` call/i);
   assert.match(agent, /Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, `wait`, or `cancel` separately/i);
-  assert.match(agent, /If the user explicitly asks for a specific model or effort, that always wins/i);
-  assert.match(agent, /`--model gpt-5\.6-sol --effort medium` \(the default\)/i);
+  assert.match(agent, /If the user explicitly asks for a specific model or effort, pass it through/i);
+  assert.match(agent, /leave both `--model` and `--effort` unset/i);
+  assert.match(agent, /do not replace the existing thread model with a guessed slug/i);
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
@@ -151,8 +152,9 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(runtimeSkill, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, `wait`, or `cancel` separately/i);
   assert.match(runtimeSkill, /use the `gpt-5-4-prompting` skill to rewrite the user's request into a tighter Codex prompt/i);
   assert.match(runtimeSkill, /That prompt drafting is the only Claude-side work allowed/i);
-  assert.match(runtimeSkill, /An explicit user model or effort always wins/i);
-  assert.match(runtimeSkill, /`--model gpt-5\.6-sol --effort medium` as the default/i);
+  assert.match(runtimeSkill, /Pass through an explicit user model or effort/i);
+  assert.match(runtimeSkill, /leave both unset so Codex uses the defaults supported by the active account/i);
+  assert.match(runtimeSkill, /never replace the existing thread model with a guessed slug/i);
   assert.match(runtimeSkill, /Map `spark` to `--model gpt-5\.3-codex-spark`/i);
   assert.match(runtimeSkill, /If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only/i);
   assert.match(runtimeSkill, /Strip it before calling `task`/i);

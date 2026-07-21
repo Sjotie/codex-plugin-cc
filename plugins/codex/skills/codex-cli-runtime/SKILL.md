@@ -18,8 +18,8 @@ Execution rules:
 - Use `task` for every rescue request, including diagnosis, planning, research, and explicit fix requests.
 - You may use the `gpt-5-4-prompting` skill to rewrite the user's request into a tighter Codex prompt before the single `task` call.
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
-- An explicit user model or effort always wins; otherwise select per the tiers below.
-- Model tiers (pick per task): `--model gpt-5.6-luna --effort medium` for very quick cheap exploration; `--model gpt-5.6-sol --effort medium` as the default for everything else; `--model gpt-5.6-sol --effort high` for large implementation work and complex multi-step tasks.
+- Pass through an explicit user model or effort. Otherwise leave both unset so Codex uses the defaults supported by the active account; on resume, never replace the existing thread model with a guessed slug.
+- The runtime validates explicit model overrides against the active ChatGPT account and falls back to its default when unavailable.
 - Map `spark` to `--model gpt-5.3-codex-spark`.
 - Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 

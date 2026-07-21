@@ -619,6 +619,59 @@ test("task --resume-last resumes the latest persisted task thread", () => {
   assert.equal(result.stdout, "Resumed the prior run.\nFollow-up prompt accepted.\n");
 });
 
+test("task resume falls back to the ChatGPT default when the requested model is unavailable", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "chatgpt-rejects-unavailable-model");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const firstRun = run(
+    "node",
+    [SCRIPT, "task", "--model", "gpt-5.6-sol", "initial task"],
+    { cwd: repo, env: buildEnv(binDir) }
+  );
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  let fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadStart.model, "gpt-5.6-sol");
+  assert.equal(fakeState.lastTurnStart.model, "gpt-5.6-sol");
+
+  const resumed = run(
+    "node",
+    [SCRIPT, "task", "--resume-last", "--model", "gpt-5.6-codex", "follow up"],
+    { cwd: repo, env: buildEnv(binDir) }
+  );
+
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stderr, /using the account default/i);
+  fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadResume.model, null);
+  assert.equal(fakeState.lastTurnStart.model, null);
+});
+
+test("task preserves explicit models for non-ChatGPT accounts", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "api-key-account-only");
+  initGitRepo(repo);
+
+  const result = run(
+    "node",
+    [SCRIPT, "task", "--model", "vendor/private-model", "initial task"],
+    { cwd: repo, env: buildEnv(binDir) }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadStart.model, "vendor/private-model");
+  assert.equal(fakeState.lastTurnStart.model, "vendor/private-model");
+});
+
 test("task --resume-thread resumes the specified thread", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

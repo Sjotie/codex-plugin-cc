@@ -92,6 +92,67 @@ function buildTurnInput(prompt) {
   return [{ type: "text", text: prompt, text_elements: [] }];
 }
 
+async function listAvailableChatGptModels(client) {
+  const models = new Set();
+  const seenCursors = new Set();
+  let cursor = null;
+
+  do {
+    const response = await client.request("model/list", {
+      cursor,
+      includeHidden: true,
+      limit: 100
+    });
+    for (const entry of response?.data ?? []) {
+      if (typeof entry?.id === "string" && entry.id) {
+        models.add(entry.id);
+      }
+      if (typeof entry?.model === "string" && entry.model) {
+        models.add(entry.model);
+      }
+    }
+
+    const nextCursor = typeof response?.nextCursor === "string" && response.nextCursor
+      ? response.nextCursor
+      : null;
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  } while (cursor);
+
+  return models;
+}
+
+async function resolveCompatibleRunModel(client, requestedModel, onProgress = null) {
+  if (!requestedModel) {
+    return null;
+  }
+
+  try {
+    const accountResponse = await client.request("account/read", { refreshToken: false });
+    if (accountResponse?.account?.type !== "chatgpt") {
+      return requestedModel;
+    }
+
+    const availableModels = await listAvailableChatGptModels(client);
+    if (availableModels.size === 0 || availableModels.has(requestedModel)) {
+      return requestedModel;
+    }
+
+    emitProgress(
+      onProgress,
+      `Requested model ${requestedModel} is unavailable for this ChatGPT account; using the account default.`,
+      "starting"
+    );
+    return null;
+  } catch {
+    // Compatibility discovery must not make older app-server versions unusable.
+    return requestedModel;
+  }
+}
+
 function shorten(text, limit = 72) {
   const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
   if (!normalized) {
@@ -1114,11 +1175,12 @@ export async function runAppServerTurn(cwd, options = {}) {
 
   return withAppServer(cwd, async (client) => {
     let threadId;
+    const model = await resolveCompatibleRunModel(client, options.model, options.onProgress);
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
       const response = await resumeThread(client, options.resumeThreadId, cwd, {
-        model: options.model,
+        model,
         sandbox: options.sandbox,
         ephemeral: false
       });
@@ -1126,7 +1188,7 @@ export async function runAppServerTurn(cwd, options = {}) {
     } else {
       emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
       const response = await startThread(client, cwd, {
-        model: options.model,
+        model,
         sandbox: options.sandbox,
         ephemeral: options.persistThread ? false : true,
         threadName: options.persistThread ? options.threadName : options.threadName ?? null
@@ -1150,7 +1212,7 @@ export async function runAppServerTurn(cwd, options = {}) {
         client.request("turn/start", {
           threadId,
           input: buildTurnInput(prompt),
-          model: options.model ?? null,
+          model,
           effort: options.effort ?? null,
           outputSchema: options.outputSchema ?? null
         }),
