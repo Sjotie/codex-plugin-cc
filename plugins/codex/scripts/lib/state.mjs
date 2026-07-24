@@ -243,6 +243,62 @@ export function upsertJob(cwd, jobPatch) {
   });
 }
 
+export function updateJobRecord(cwd, jobId, mutate) {
+  return withStateLock(cwd, () => {
+    const jobFile = resolveJobFile(cwd, jobId);
+    let existing = null;
+    try {
+      existing = readJobFile(jobFile);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    const nextJob = mutate(existing);
+    if (nextJob == null) {
+      return existing;
+    }
+
+    writeJobFile(cwd, jobId, nextJob);
+    const state = loadState(cwd);
+    const timestamp = nowIso();
+    const existingIndex = state.jobs.findIndex((job) => job.id === jobId);
+    if (existingIndex === -1) {
+      state.jobs.unshift({
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        ...nextJob
+      });
+    } else {
+      state.jobs[existingIndex] = {
+        ...state.jobs[existingIndex],
+        ...nextJob,
+        updatedAt: timestamp
+      };
+    }
+    saveStateLocked(cwd, state);
+    return nextJob;
+  });
+}
+
+export function assignJobWorkerPid(cwd, jobId, pid) {
+  let assigned = false;
+  const job = updateJobRecord(cwd, jobId, (existing) => {
+    if (!existing || isTerminalJobStatus(existing.status)) {
+      return null;
+    }
+    assigned = true;
+    return {
+      ...existing,
+      status: existing.phase === "spawning" ? "queued" : existing.status,
+      phase: existing.phase === "spawning" ? "queued" : existing.phase,
+      pid
+    };
+  });
+  return { assigned, job };
+}
+
 export function reconcileJobWorkerState(cwd, job) {
   if (
     !isWaitingJobStatus(job.status) ||

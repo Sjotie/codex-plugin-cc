@@ -21,7 +21,12 @@ import {
   settleCancellationAfterTermination
 } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
-import { resolveStateDir, upsertJob, writeJobFile } from "../plugins/codex/scripts/lib/state.mjs";
+import {
+  assignJobWorkerPid,
+  resolveStateDir,
+  upsertJob,
+  writeJobFile
+} from "../plugins/codex/scripts/lib/state.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1045,6 +1050,79 @@ test("task forwards model selection and reasoning effort to app-server turn/star
   assert.equal(fakeState.lastTurnStart.effort, "low");
 });
 
+test("task visibly falls back to the ChatGPT account default for an unavailable model", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--model", "gpt-5.6", "review the data"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Requested model gpt-5\.6 is unavailable.*using the account default/i);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadStart.model, null);
+  assert.equal(fakeState.lastTurnStart.model, null);
+});
+
+test("task leaves model and effort unset when the caller did not explicitly select them", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "review the data"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /Requested model .* is unavailable/i);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadStart.model, null);
+  assert.equal(fakeState.lastTurnStart.model, null);
+  assert.equal(fakeState.lastTurnStart.effort, null);
+});
+
+test("resume preserves the account-supported thread model when an override is unavailable", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const first = run("node", [SCRIPT, "task", "initial review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(first.status, 0, first.stderr);
+
+  const resumed = run("node", [SCRIPT, "task", "--resume", "--model", "gpt-5.6", "continue"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stderr, /Requested model gpt-5\.6 is unavailable.*using the account default/i);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastThreadResume.model, null);
+  assert.equal(fakeState.lastTurnStart.model, null);
+});
+
 test("task logs reasoning summaries and assistant messages to the job log", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -1739,6 +1817,59 @@ test("wait reconciles a running job with a non-existent worker pid to failed wit
   assert.equal(payload.storedJob.status, "failed");
 });
 
+test("a tracked process exit immediately persists a terminal failure report", () => {
+  const workspace = makeTempDir();
+  const trackedJobsModule = path.join(PLUGIN_ROOT, "scripts", "lib", "tracked-jobs.mjs");
+  const source = [
+    `import { runTrackedJob } from ${JSON.stringify(trackedJobsModule)};`,
+    `await runTrackedJob({ id: "task-process-exit", workspaceRoot: ${JSON.stringify(workspace)} }, async () => {`,
+    "  process.exit(23);",
+    "});"
+  ].join("\n");
+
+  const result = run("node", ["--input-type=module", "--eval", source], { cwd: workspace });
+
+  assert.equal(result.status, 23, result.stderr);
+  const stored = JSON.parse(
+    fs.readFileSync(path.join(resolveStateDir(workspace), "jobs", "task-process-exit.json"), "utf8")
+  );
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.phase, "failed");
+  assert.equal(stored.pid, null);
+  assert.match(stored.errorMessage, /exited with code 23 before reporting a terminal result/i);
+});
+
+test("a terminated tracked process persists the received signal as its terminal report", async () => {
+  const workspace = makeTempDir();
+  const trackedJobsModule = path.join(PLUGIN_ROOT, "scripts", "lib", "tracked-jobs.mjs");
+  const source = [
+    `import { runTrackedJob } from ${JSON.stringify(trackedJobsModule)};`,
+    `await runTrackedJob({ id: "task-process-signal", workspaceRoot: ${JSON.stringify(workspace)} }, async () => {`,
+    "  await new Promise(() => { setInterval(() => {}, 1000); });",
+    "});"
+  ].join("\n");
+  const child = spawn("node", ["--input-type=module", "--eval", source], {
+    cwd: workspace,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  const jobFile = path.join(resolveStateDir(workspace), "jobs", "task-process-signal.json");
+  await waitFor(() => fs.existsSync(jobFile));
+  child.kill("SIGTERM");
+  const outcome = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (status, signal) => resolve({ status, signal }));
+  });
+
+  assert.equal(outcome.signal, null);
+  assert.notEqual(outcome.status, 0);
+  const stored = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.phase, "failed");
+  assert.equal(stored.pid, null);
+  assert.match(stored.errorMessage, /received SIGTERM before reporting a terminal result/i);
+});
+
 for (const status of ["queued", "running"]) {
   test(`wait reconciles a dead ${status} job file without a state index`, async () => {
     const workspace = makeTempDir();
@@ -2381,6 +2512,72 @@ test("cancelled queued jobs remain stored and are skipped by a late worker", () 
   const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
   assert.equal(state.jobs[0].status, "cancelled");
   assert.equal(JSON.parse(fs.readFileSync(jobFile, "utf8")).status, "cancelled");
+});
+
+test("cancel during task worker spawn remains terminal and rejects late PID assignment", () => {
+  const workspace = makeTempDir();
+  const jobId = "task-cancel-during-spawn";
+  const logFile = path.join(resolveStateDir(workspace), "jobs", `${jobId}.log`);
+  const spawningJob = {
+    id: jobId,
+    status: "queued",
+    phase: "spawning",
+    title: "Codex Task",
+    jobClass: "task",
+    summary: "Cancel during spawn",
+    pid: null,
+    logFile
+  };
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.writeFileSync(logFile, "", "utf8");
+  writeJobFile(workspace, jobId, spawningJob);
+  upsertJob(workspace, spawningJob);
+
+  const cancelled = run("node", [SCRIPT, "cancel", jobId, "--json"], { cwd: workspace });
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  assert.equal(JSON.parse(cancelled.stdout).status, "cancelled");
+
+  const assignment = assignJobWorkerPid(workspace, jobId, 2_147_483_647);
+  assert.equal(assignment.assigned, false);
+  assert.equal(assignment.job.status, "cancelled");
+  assert.equal(assignment.job.pid, null);
+
+  const stored = JSON.parse(fs.readFileSync(path.join(resolveStateDir(workspace), "jobs", `${jobId}.json`), "utf8"));
+  assert.equal(stored.status, "cancelled");
+  assert.equal(stored.phase, "cancelled");
+  assert.equal(stored.pid, null);
+});
+
+test("task worker records a terminal failure when its stored request is missing", () => {
+  const workspace = makeTempDir();
+  const jobId = "task-worker-missing-request";
+  const logFile = path.join(resolveStateDir(workspace), "jobs", `${jobId}.log`);
+  const queuedJob = {
+    id: jobId,
+    status: "queued",
+    phase: "queued",
+    title: "Codex Task",
+    jobClass: "task",
+    summary: "Missing request regression",
+    pid: process.pid,
+    logFile
+  };
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.writeFileSync(logFile, "", "utf8");
+  writeJobFile(workspace, jobId, queuedJob);
+  upsertJob(workspace, queuedJob);
+
+  const worker = run("node", [SCRIPT, "task-worker", "--cwd", workspace, "--job-id", jobId], {
+    cwd: workspace
+  });
+
+  assert.equal(worker.status, 1);
+  assert.match(worker.stderr, /missing its task request payload/i);
+  const stored = JSON.parse(fs.readFileSync(path.join(resolveStateDir(workspace), "jobs", `${jobId}.json`), "utf8"));
+  assert.equal(stored.status, "failed");
+  assert.equal(stored.phase, "failed");
+  assert.equal(stored.pid, null);
+  assert.match(stored.errorMessage, /missing its task request payload/i);
 });
 
 test("tracked jobs preserve cancellation observed during execution", async () => {

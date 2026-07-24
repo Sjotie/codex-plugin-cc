@@ -48,6 +48,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background --wai
 
 The CLI polls the job JSON and prints the terminal status plus stored result. Preserve that stdout even when terminal failure or cancellation produces a non-zero exit status.
 
+The `task` process itself must not be placed in Claude Code's `run_in_background` layer. That layer is tied to the forwarding subagent and can terminate when the subagent ends. Detach the worker through `task --background` and let only the waiter remain attached to Claude.
+
 ## Background fallback
 
 If the accompanying agent cannot remain synchronously blocked, it must arm a Claude Code Bash task with `run_in_background: true` before ending its turn. Use the companion waiter in the loop so the CLI remains the only implementation of job-state semantics:

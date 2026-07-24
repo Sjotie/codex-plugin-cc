@@ -19,14 +19,15 @@ Execution rules:
 - You may use the `gpt-5-4-prompting` skill to rewrite the user's request into a tighter Codex prompt before the single `task` call.
 - That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
 - Pass through an explicit user model or effort. Otherwise leave both unset so Codex uses the defaults supported by the active account; on resume, never replace the existing thread model with a guessed slug.
-- The runtime validates explicit model overrides against the active ChatGPT account and falls back to its default when unavailable.
+- The runtime validates explicit model overrides against the active ChatGPT account and visibly falls back to its default when unavailable.
 - Map `spark` to `--model gpt-5.3-codex-spark`.
 - Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
 - Use foreground `task` for short work. Before any detached task, load and follow `codex:await-task`; that skill is the sole source of truth for how the task is awaited.
-- If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
+- If the forwarded request includes `--background` or the work may exceed one Bash call's foreground lifetime, strip that token from the natural-language text and invoke `task --background --wait`. Never put a foreground `task` in Claude Code's `run_in_background` layer.
+- If the forwarded request includes `--wait`, strip that token from the natural-language text and keep the `task` call in the foreground; use `task --background --wait` as well when the work is not clearly short.
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.

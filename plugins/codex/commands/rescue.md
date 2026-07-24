@@ -13,10 +13,10 @@ $ARGUMENTS
 
 Execution mode:
 
-- If the request includes `--background`, run the `codex:codex-rescue` subagent in the background.
+- If the request includes `--background`, keep the `codex:codex-rescue` subagent in the foreground and have it invoke `task --background --wait`. The plugin's detached worker owns the turn; do not delegate process ownership to Claude Code's background-agent lifecycle.
 - If the request includes `--wait`, run the `codex:codex-rescue` subagent in the foreground.
 - If neither flag is present, default to foreground.
-- `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
+- `--background` and `--wait` are execution controls, not natural-language task text. Forward their meaning to the rescue subagent so it can choose the plugin's `task --background --wait` route.
 - `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.
@@ -39,6 +39,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task-resume-candidate -
 Operating rules:
 
 - The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...` and return that command's stdout as-is.
+- Never run that Bash call with Claude Code's `run_in_background`; long-lived ownership belongs to the plugin's detached worker and terminal job record.
 - Pass `--cwd <dir>` explicitly for the intended workspace root. Before accompanying background work, require the subagent to load and follow `codex:await-task`, the canonical waiting contract preloaded by `codex:codex-rescue`.
 - Return the Codex companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.

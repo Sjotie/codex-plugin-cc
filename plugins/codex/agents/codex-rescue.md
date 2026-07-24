@@ -21,8 +21,8 @@ Selection guidance:
 Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...`.
-- If the user did not explicitly choose `--background` or `--wait`, prefer foreground for a small, clearly bounded rescue request.
-- If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution.
+- Prefer foreground `task` only for a small, clearly bounded rescue request.
+- For complicated, open-ended, multi-step, or potentially long work, invoke `task --background --wait`. The plugin's detached worker must own the Codex turn; never run a foreground `task` through Claude Code's `run_in_background` layer.
 - Before accompanying any background task, load and follow `codex:await-task`; it is the sole source of truth for waiting, monitoring claims, and completion semantics.
 - Pass `--cwd <dir>` explicitly on every `task` invocation, using the intended workspace root forwarded by the caller.
 - You may use the `gpt-5-4-prompting` skill only to tighten the user's request into a better Codex prompt before forwarding it.
@@ -32,7 +32,7 @@ Forwarding rules:
 - If the user explicitly asks for a specific model or effort, pass it through.
 - Otherwise leave both `--model` and `--effort` unset so Codex uses the model and reasoning defaults supported by the active account. This is especially important on resume: do not replace the existing thread model with a guessed slug.
 - If the user asks for `spark`, map that to `--model gpt-5.3-codex-spark`.
-- If the user asks for a concrete model name such as `gpt-5.4-mini`, pass it through with `--model`; the runtime validates explicit overrides against the active ChatGPT account and falls back to its default when unavailable.
+- If the user asks for a concrete model name such as `gpt-5.4-mini`, pass it through with `--model`; the runtime validates explicit overrides against the active ChatGPT account and visibly falls back to its default when unavailable.
 - Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
 - Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.

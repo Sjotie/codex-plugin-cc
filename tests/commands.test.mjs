@@ -111,9 +111,9 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /AskUserQuestion/);
   assert.match(rescue, /Continue current Codex thread/);
   assert.match(rescue, /Start a new Codex thread/);
-  assert.match(rescue, /run the `codex:codex-rescue` subagent in the background/i);
+  assert.match(rescue, /keep the `codex:codex-rescue` subagent in the foreground/i);
   assert.match(rescue, /default to foreground/i);
-  assert.match(rescue, /Do not forward them to `task`/i);
+  assert.match(rescue, /Forward their meaning to the rescue subagent/i);
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(rescue, /Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort/i);
   assert.match(rescue, /If they ask for `spark`, map it to `gpt-5\.3-codex-spark`/i);
@@ -129,8 +129,8 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /--resume/);
   assert.match(agent, /--fresh/);
   assert.match(agent, /thin forwarding wrapper/i);
-  assert.match(agent, /prefer foreground for a small, clearly bounded rescue request/i);
-  assert.match(agent, /If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution/i);
+  assert.match(agent, /prefer foreground `task` only for a small, clearly bounded rescue request/i);
+  assert.match(agent, /For complicated, open-ended, multi-step, or potentially long work, invoke `task --background --wait`/i);
   assert.match(agent, /load and follow `codex:await-task`/i);
   assert.match(agent, /sole source of truth for waiting, monitoring claims, and completion semantics/i);
   assert.match(agent, /skills:[\s\S]*- await-task/);
@@ -141,6 +141,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /If the user explicitly asks for a specific model or effort, pass it through/i);
   assert.match(agent, /leave both `--model` and `--effort` unset/i);
   assert.match(agent, /do not replace the existing thread model with a guessed slug/i);
+  assert.doesNotMatch(agent, /gpt-5\.6-(?:luna|sol|terra)/i);
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
@@ -155,9 +156,10 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(runtimeSkill, /Pass through an explicit user model or effort/i);
   assert.match(runtimeSkill, /leave both unset so Codex uses the defaults supported by the active account/i);
   assert.match(runtimeSkill, /never replace the existing thread model with a guessed slug/i);
+  assert.doesNotMatch(runtimeSkill, /gpt-5\.6-(?:luna|sol|terra)/i);
   assert.match(runtimeSkill, /Map `spark` to `--model gpt-5\.3-codex-spark`/i);
-  assert.match(runtimeSkill, /If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only/i);
-  assert.match(runtimeSkill, /Strip it before calling `task`/i);
+  assert.match(runtimeSkill, /invoke `task --background --wait`/i);
+  assert.match(runtimeSkill, /Never put a foreground `task` in Claude Code's `run_in_background` layer/i);
   assert.match(runtimeSkill, /`--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`/i);
   assert.match(runtimeSkill, /Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own/i);
   assert.match(runtimeSkill, /load and follow `codex:await-task`/i);
@@ -179,6 +181,21 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(readme, /### `\/codex:wait`/);
   assert.match(readme, /### `\/codex:result`/);
   assert.match(readme, /### `\/codex:cancel`/);
+});
+
+test("rescue keeps long-running Codex ownership inside the companion runtime", () => {
+  const rescue = read("commands/rescue.md");
+  const agent = read("agents/codex-rescue.md");
+  const runtimeSkill = read("skills/codex-cli-runtime/SKILL.md");
+  const awaitTask = read("skills/await-task/SKILL.md");
+
+  assert.match(rescue, /keep the `codex:codex-rescue` subagent in the foreground/i);
+  assert.match(rescue, /plugin's detached worker owns the turn/i);
+  assert.match(rescue, /Never run that Bash call with Claude Code's `run_in_background`/i);
+  assert.match(agent, /invoke `task --background --wait`/i);
+  assert.match(agent, /never run a foreground `task` through Claude Code's `run_in_background` layer/i);
+  assert.match(runtimeSkill, /Never put a foreground `task` in Claude Code's `run_in_background` layer/i);
+  assert.match(awaitTask, /`task` process itself must not be placed in Claude Code's `run_in_background` layer/i);
 });
 
 test("await-task is the canonical reusable background-task waiting contract", () => {

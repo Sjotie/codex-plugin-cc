@@ -27,10 +27,12 @@ import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
+  assignJobWorkerPid,
   generateJobId,
   getConfig,
   listJobs,
   setConfig,
+  updateJobRecord,
   upsertJob,
   writeJobFile
 } from "./lib/state.mjs";
@@ -799,17 +801,51 @@ function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
-    phase: "queued",
-    pid: child.pid ?? null,
+    phase: "spawning",
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
+
+  let child;
+  try {
+    child = spawnDetachedTaskWorker(cwd, job.id);
+    if (!Number.isInteger(child.pid) || child.pid <= 0) {
+      throw new Error("Detached task worker did not report a process id.");
+    }
+
+    const assignment = assignJobWorkerPid(job.workspaceRoot, job.id, child.pid);
+    if (!assignment.assigned) {
+      try {
+        terminateProcessTree(child.pid);
+      } catch {
+        // A concurrently cancelled job remains terminal. The detached worker
+        // also observes that terminal record before beginning the task.
+      }
+    }
+  } catch (error) {
+    const errorMessage = `Failed to start detached task worker: ${error instanceof Error ? error.message : String(error)}`;
+    updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+      if (existing && isTerminalJobStatus(existing.status)) {
+        return null;
+      }
+      return {
+        ...(existing ?? queuedRecord),
+        status: "failed",
+        phase: "failed",
+        pid: null,
+        completedAt: nowIso(),
+        errorMessage
+      };
+    });
+    appendLogLine(logFile, errorMessage);
+    throw error;
+  }
 
   return {
     payload: {
@@ -974,37 +1010,27 @@ async function handleTaskWorker(argv) {
   if (!storedJob) {
     return;
   }
-  if (storedJob.status === "cancelled") {
-    appendLogLine(storedJob.logFile, "Skipped cancelled background job.");
-    return;
-  }
-
-  const request = storedJob.request;
-  if (!request || typeof request !== "object") {
-    throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
-  }
-
-  const { logFile, progress } = createTrackedProgress(
-    {
-      ...storedJob,
-      workspaceRoot
-    },
-    {
-      logFile: storedJob.logFile ?? null
-    }
-  );
+  const workerJob = {
+    ...storedJob,
+    workspaceRoot,
+    logFile: storedJob.logFile ?? null
+  };
   await runTrackedJob(
-    {
-      ...storedJob,
-      workspaceRoot,
-      logFile
-    },
-    () =>
-      executeTaskRun({
+    workerJob,
+    () => {
+      const request = storedJob.request;
+      if (!request || typeof request !== "object") {
+        throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
+      }
+      const { progress } = createTrackedProgress(workerJob, {
+        logFile: workerJob.logFile
+      });
+      return executeTaskRun({
         ...request,
         onProgress: progress
-      }),
-    { logFile }
+      });
+    },
+    { logFile: workerJob.logFile }
   );
 }
 
@@ -1129,20 +1155,12 @@ async function handleCancel(argv) {
   };
   const persistCancellation = (pid) => {
     const cancelledJob = { ...cancellingJob, pid };
-    writeJobFile(workspaceRoot, job.id, {
+    return updateJobRecord(workspaceRoot, job.id, (current) => ({
       ...existing,
+      ...current,
       ...cancelledJob,
       cancelledAt: completedAt
-    });
-    upsertJob(workspaceRoot, {
-      id: job.id,
-      status: "cancelled",
-      phase: "cancelled",
-      pid,
-      errorMessage: "Cancelled by user.",
-      completedAt
-    });
-    return cancelledJob;
+    }));
   };
 
   persistCancellation(job.pid ?? null);

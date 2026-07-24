@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import {
+  readJobFile,
+  resolveJobFile,
+  resolveJobLogFile,
+  updateJobRecord,
+  upsertJob,
+  writeJobFile
+} from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 
@@ -164,13 +171,74 @@ function stopTrackedJobIfCancelled(job, logFile) {
   };
 }
 
-export async function runTrackedJob(job, runner, options = {}) {
-  const logFile = options.logFile ?? job.logFile ?? null;
-  const cancelledBeforeStart = stopTrackedJobIfCancelled(job, logFile);
-  if (cancelledBeforeStart) {
-    return cancelledBeforeStart;
+function persistUnexpectedProcessExit(job, logFile, errorMessage) {
+  try {
+    let persisted = false;
+    updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+      if (existing && ["completed", "failed", "error", "cancelled"].includes(existing.status)) {
+        return null;
+      }
+      persisted = true;
+      return {
+        ...(existing ?? job),
+        status: "failed",
+        phase: "failed",
+        pid: null,
+        completedAt: nowIso(),
+        errorMessage,
+        logFile: logFile ?? existing?.logFile ?? job.logFile ?? null
+      };
+    });
+    if (persisted) {
+      appendLogLine(logFile, errorMessage);
+    }
+  } catch {
+    // Exit reporting is best-effort. Dead-worker reconciliation remains the
+    // fail-safe when the process cannot persist its own terminal record.
+  }
+}
+
+function installProcessExitReporter(job, logFile) {
+  let settled = false;
+  const signalHandlers = new Map();
+
+  const report = (errorMessage) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    persistUnexpectedProcessExit(job, logFile, errorMessage);
+  };
+
+  const onExit = (code) => {
+    report(`Codex companion process exited with code ${code} before reporting a terminal result.`);
+  };
+  process.once("exit", onExit);
+
+  for (const [signal, exitCode] of [
+    ["SIGHUP", 129],
+    ["SIGINT", 130],
+    ["SIGTERM", 143]
+  ]) {
+    const handler = () => {
+      report(`Codex companion process received ${signal} before reporting a terminal result.`);
+      process.exit(exitCode);
+    };
+    signalHandlers.set(signal, handler);
+    process.once(signal, handler);
   }
 
+  return () => {
+    settled = true;
+    process.removeListener("exit", onExit);
+    for (const [signal, handler] of signalHandlers) {
+      process.removeListener(signal, handler);
+    }
+  };
+}
+
+export async function runTrackedJob(job, runner, options = {}) {
+  const logFile = options.logFile ?? job.logFile ?? null;
   const runningRecord = {
     ...job,
     status: "running",
@@ -179,65 +247,82 @@ export async function runTrackedJob(job, runner, options = {}) {
     pid: process.pid,
     logFile
   };
-  writeJobFile(job.workspaceRoot, job.id, runningRecord);
-  upsertJob(job.workspaceRoot, runningRecord);
+  const settleProcessExitReporter = installProcessExitReporter(job, logFile);
+  const storedAtStart = updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+    if (existing?.status === "cancelled") {
+      return null;
+    }
+    return {
+      ...existing,
+      ...runningRecord
+    };
+  });
+  if (storedAtStart?.status === "cancelled") {
+    settleProcessExitReporter();
+    return stopTrackedJobIfCancelled(job, logFile);
+  }
 
   try {
     const execution = await runner();
     const cancelledDuringRun = stopTrackedJobIfCancelled(job, logFile);
     if (cancelledDuringRun) {
+      settleProcessExitReporter();
       return cancelledDuringRun;
     }
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...runningRecord,
-      status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
-      pid: null,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      completedAt,
-      result: execution.payload,
-      rendered: execution.rendered
+    const completedRecord = updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+      if (existing?.status === "cancelled") {
+        return null;
+      }
+      return {
+        ...runningRecord,
+        ...existing,
+        status: completionStatus,
+        threadId: execution.threadId ?? null,
+        turnId: execution.turnId ?? null,
+        summary: execution.summary ?? existing?.summary ?? runningRecord.summary,
+        pid: null,
+        phase: completionStatus === "completed" ? "done" : "failed",
+        completedAt,
+        result: execution.payload,
+        rendered: execution.rendered
+      };
     });
-    upsertJob(job.workspaceRoot, {
-      id: job.id,
-      status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
-      summary: execution.summary,
-      phase: completionStatus === "completed" ? "done" : "failed",
-      pid: null,
-      completedAt
-    });
+    if (completedRecord?.status === "cancelled") {
+      settleProcessExitReporter();
+      return stopTrackedJobIfCancelled(job, logFile);
+    }
+    settleProcessExitReporter();
     appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     return execution;
   } catch (error) {
     const cancelledDuringRun = stopTrackedJobIfCancelled(job, logFile);
     if (cancelledDuringRun) {
+      settleProcessExitReporter();
       return cancelledDuringRun;
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const existing = readStoredJobOrNull(job.workspaceRoot, job.id) ?? runningRecord;
     const completedAt = nowIso();
-    writeJobFile(job.workspaceRoot, job.id, {
-      ...existing,
-      status: "failed",
-      phase: "failed",
-      errorMessage,
-      pid: null,
-      completedAt,
-      logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
+    const failedRecord = updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+      if (existing?.status === "cancelled") {
+        return null;
+      }
+      return {
+        ...(existing ?? runningRecord),
+        status: "failed",
+        phase: "failed",
+        errorMessage,
+        pid: null,
+        completedAt,
+        logFile: options.logFile ?? job.logFile ?? existing?.logFile ?? null
+      };
     });
-    upsertJob(job.workspaceRoot, {
-      id: job.id,
-      status: "failed",
-      phase: "failed",
-      pid: null,
-      errorMessage,
-      completedAt
-    });
+    if (failedRecord?.status === "cancelled") {
+      settleProcessExitReporter();
+      return stopTrackedJobIfCancelled(job, logFile);
+    }
+    settleProcessExitReporter();
     throw error;
   }
 }

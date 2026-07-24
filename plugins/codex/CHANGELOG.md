@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.7-sjotie.8 (fork)
+
+- long-running rescue work now stays in a plugin-owned detached worker instead
+  of tying a foreground Codex process to Claude Code's background-subagent
+  lifecycle
+- tracked jobs synchronously persist a concrete terminal failure when the
+  companion process exits early or receives SIGHUP, SIGINT, or SIGTERM; the
+  existing dead-worker reconciliation remains the fallback for uncatchable exits
+- detached tasks are registered before their worker starts, and malformed worker
+  requests are terminalized through the same tracked-job contract
+- added regression coverage for normal process exits, SIGTERM, pre-run worker
+  failure, plugin-owned background routing, account-default model selection,
+  and visible unsupported model fallback
+
 ## 1.0.7-sjotie.7 (fork)
 
 - rescue forwarding now leaves model and effort unset unless the user explicitly
