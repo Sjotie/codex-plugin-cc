@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.9 (fork)
+
+- `task --background` now double-forks its detached worker through a
+  short-lived `task-worker-spawn` launcher, re-parenting the worker to PID 1.
+  This stops Claude Code's Bash-timeout tree kill from taking the worker down
+  when a `task --background --wait` call outlives the 600s tool timeout
+  (previously the job failed with "received SIGTERM before reporting a
+  terminal result" while Codex itself was still healthy)
+- rescue agent and runtime skills now document the re-attach contract: an
+  aborted wait is not a task failure — resume with bounded
+  `wait <job-id> --timeout 480` calls until the job is terminal
+
 ## 1.0.7-sjotie.8 (fork)
 
 - long-running rescue work now stays in a plugin-owned detached worker instead

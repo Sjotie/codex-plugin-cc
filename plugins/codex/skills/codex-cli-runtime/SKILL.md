@@ -28,6 +28,7 @@ Command selection:
 - Use foreground `task` for short work. Before any detached task, load and follow `codex:await-task`; that skill is the sole source of truth for how the task is awaited.
 - If the forwarded request includes `--background` or the work may exceed one Bash call's foreground lifetime, strip that token from the natural-language text and invoke `task --background --wait`. Never put a foreground `task` in Claude Code's `run_in_background` layer.
 - If the forwarded request includes `--wait`, strip that token from the natural-language text and keep the `task` call in the foreground; use `task --background --wait` as well when the work is not clearly short.
+- If a `task --background --wait` call is aborted by Claude Code's Bash tool timeout, the detached worker keeps running: re-attach with repeated `wait <job-id> --timeout 480` calls instead of treating the aborted call as a failed task.
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.

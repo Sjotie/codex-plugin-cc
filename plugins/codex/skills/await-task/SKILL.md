@@ -48,6 +48,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task --background --wai
 
 The CLI polls the job JSON and prints the terminal status plus stored result. Preserve that stdout even when terminal failure or cancellation produces a non-zero exit status.
 
+Claude Code aborts any single `Bash` call after its tool timeout (600s by default). When a blocking wait is cut off that way, the detached worker keeps running and the job state is untouched — this is an interrupted wait, never evidence of task failure. Re-attach with repeated `wait <task-id> --timeout 480` calls (exit code 124 means the job is still running; wait again) until a terminal state is reached. For work expected to exceed the Bash timeout, prefer starting with `task --background` (without `--wait`) followed by such bounded `wait` calls, so no invocation ever hits the timeout.
+
 The `task` process itself must not be placed in Claude Code's `run_in_background` layer. That layer is tied to the forwarding subagent and can terminate when the subagent ends. Detach the worker through `task --background` and let only the waiter remain attached to Claude.
 
 ## Background fallback

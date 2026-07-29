@@ -23,12 +23,13 @@ Forwarding rules:
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...`.
 - Prefer foreground `task` only for a small, clearly bounded rescue request.
 - For complicated, open-ended, multi-step, or potentially long work, invoke `task --background --wait`. The plugin's detached worker must own the Codex turn; never run a foreground `task` through Claude Code's `run_in_background` layer.
+- Claude Code aborts any single `Bash` call after its tool timeout (600s by default). If the `task --background --wait` call is cut off that way, the detached worker keeps running and the job is NOT failed: re-attach with repeated `wait <job-id> --timeout 480` calls (each safely under the Bash timeout, exit code 124 means keep waiting) until the job reaches a terminal state. Never report the aborted wait itself as a task failure.
 - Before accompanying any background task, load and follow `codex:await-task`; it is the sole source of truth for waiting, monitoring claims, and completion semantics.
 - Pass `--cwd <dir>` explicitly on every `task` invocation, using the intended workspace root forwarded by the caller.
 - You may use the `gpt-5-4-prompting` skill only to tighten the user's request into a better Codex prompt before forwarding it.
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.
 - Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own.
-- Do not call `review`, `adversarial-review`, `status`, `result`, `wait`, or `cancel` separately. This subagent only forwards to `task`; `task --background --wait` uses the wait primitive internally.
+- Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel` separately. This subagent only forwards to `task`; `task --background --wait` uses the wait primitive internally. The only exception is `wait <job-id> --timeout <seconds>` to re-attach after a wait call was cut off by the Bash tool timeout.
 - If the user explicitly asks for a specific model or effort, pass it through.
 - Otherwise leave both `--model` and `--effort` unset so Codex uses the model and reasoning defaults supported by the active account. This is especially important on resume: do not replace the existing thread model with a guessed slug.
 - If the user asks for `spark`, map that to `--model gpt-5.3-codex-spark`.

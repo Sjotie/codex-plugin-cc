@@ -784,20 +784,72 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
+// Double-fork: a short-lived launcher spawns the real worker and exits
+// immediately, so the worker re-parents to PID 1 and disappears from the
+// caller's process tree. Claude Code's Bash-timeout handling terminates the
+// entire descendant tree of a timed-out call (a `detached` process group does
+// not protect against a ppid-based tree walk); without the re-parent, a
+// `task --background --wait` that outlives the Bash timeout took the worker
+// down with it.
 function spawnDetachedTaskWorker(cwd, jobId) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true
+  return new Promise((resolve, reject) => {
+    const launcher = spawn(
+      process.execPath,
+      [scriptPath, "task-worker-spawn", "--cwd", cwd, "--job-id", jobId],
+      {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true
+      }
+    );
+
+    let stdout = "";
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(() => {
+      try {
+        launcher.kill("SIGKILL");
+      } catch {
+        // The launcher already exited; the close handler settles the promise.
+      }
+      settle(reject, new Error("Timed out waiting for the task-worker launcher to report a worker process id."));
+    }, 15000);
+
+    launcher.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    launcher.on("error", (error) => settle(reject, error));
+    launcher.on("close", (code) => {
+      if (code !== 0) {
+        settle(reject, new Error(`Task-worker launcher exited with code ${code} before reporting a worker process id.`));
+        return;
+      }
+      let workerPid = null;
+      try {
+        workerPid = JSON.parse(stdout.trim())?.workerPid;
+      } catch {
+        // Fall through to the shared validation error below.
+      }
+      if (!Number.isInteger(workerPid) || workerPid <= 0) {
+        settle(reject, new Error("Detached task worker did not report a process id."));
+        return;
+      }
+      settle(resolve, workerPid);
+    });
   });
-  child.unref();
-  return child;
 }
 
-function enqueueBackgroundTask(cwd, job, request) {
+async function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
@@ -812,17 +864,13 @@ function enqueueBackgroundTask(cwd, job, request) {
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
 
-  let child;
   try {
-    child = spawnDetachedTaskWorker(cwd, job.id);
-    if (!Number.isInteger(child.pid) || child.pid <= 0) {
-      throw new Error("Detached task worker did not report a process id.");
-    }
+    const workerPid = await spawnDetachedTaskWorker(cwd, job.id);
 
-    const assignment = assignJobWorkerPid(job.workspaceRoot, job.id, child.pid);
+    const assignment = assignJobWorkerPid(job.workspaceRoot, job.id, workerPid);
     if (!assignment.assigned) {
       try {
-        terminateProcessTree(child.pid);
+        terminateProcessTree(workerPid);
       } catch {
         // A concurrently cancelled job remains terminal. The detached worker
         // also observes that terminal record before beginning the task.
@@ -954,7 +1002,7 @@ async function handleTask(argv) {
       resumeThreadId,
       jobId: job.id
     });
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
+    const { payload } = await enqueueBackgroundTask(cwd, job, request);
     if (options.wait) {
       await waitForJobAndOutput(cwd, job.id, { json: options.json });
       return;
@@ -993,6 +1041,38 @@ async function handleTransfer(argv) {
     source: options.source
   });
   outputCommandResult(payload, rendered, options.json);
+}
+
+// Intermediate hop of the double-fork in spawnDetachedTaskWorker: spawn the
+// real worker, report its pid on stdout, and exit immediately so the worker
+// re-parents to PID 1.
+function handleTaskWorkerSpawn(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "job-id"]
+  });
+
+  if (!options["job-id"]) {
+    throw new Error("Missing required --job-id for task-worker-spawn.");
+  }
+
+  const cwd = resolveCommandCwd(options);
+  const scriptPath = path.join(ROOT_DIR, "scripts", "codex-companion.mjs");
+  const child = spawn(
+    process.execPath,
+    [scriptPath, "task-worker", "--cwd", cwd, "--job-id", options["job-id"]],
+    {
+      cwd,
+      env: process.env,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true
+    }
+  );
+  child.unref();
+  if (!Number.isInteger(child.pid) || child.pid <= 0) {
+    throw new Error("Detached task worker did not report a process id.");
+  }
+  process.stdout.write(`${JSON.stringify({ workerPid: child.pid })}\n`);
 }
 
 async function handleTaskWorker(argv) {
@@ -1233,6 +1313,9 @@ async function main() {
       break;
     case "transfer":
       await handleTransfer(argv);
+      break;
+    case "task-worker-spawn":
+      handleTaskWorkerSpawn(argv);
       break;
     case "task-worker":
       await handleTaskWorker(argv);

@@ -1333,6 +1333,58 @@ test("task --background --wait stays attached until the stored result is termina
   assert.match(payload.storedJob.rendered, /Handled the requested task/);
 });
 
+test("task --background re-parents the detached worker away from the companion", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX re-parenting semantics only");
+    return;
+  }
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "keep the worker busy briefly"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+  assert.equal(launched.status, 0, launched.stderr);
+  const launchPayload = JSON.parse(launched.stdout);
+  assert.match(launchPayload.jobId, /^task-/);
+
+  const workerPid = await waitFor(() => {
+    const status = run("node", [SCRIPT, "status", launchPayload.jobId, "--json"], {
+      cwd: repo,
+      env: buildEnv(binDir)
+    });
+    if (status.status !== 0) {
+      return null;
+    }
+    const pid = JSON.parse(status.stdout).job?.pid;
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  });
+
+  // The double-fork must have re-parented the worker to PID 1 by the time its
+  // pid is registered; a worker still parented to the (already exited)
+  // companion or launcher would be vulnerable to Bash-timeout tree kills.
+  const ppidResult = run("ps", ["-o", "ppid=", "-p", String(workerPid)]);
+  assert.equal(ppidResult.status, 0, ppidResult.stderr);
+  assert.equal(ppidResult.stdout.trim(), "1");
+
+  const waitedStatus = run(
+    "node",
+    [SCRIPT, "status", launchPayload.jobId, "--wait", "--timeout-ms", "20000", "--json"],
+    {
+      cwd: repo,
+      env: buildEnv(binDir)
+    }
+  );
+  assert.equal(waitedStatus.status, 0, waitedStatus.stderr);
+  assert.equal(JSON.parse(waitedStatus.stdout).job.status, "completed");
+});
+
 test("review rejects focus text because it is native-review only", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

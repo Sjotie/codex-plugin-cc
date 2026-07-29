@@ -137,7 +137,10 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /pass `--cwd <dir>` explicitly/i);
   assert.match(agent, /Use exactly one `Bash` call/i);
   assert.match(agent, /Do not inspect the repository, read files, grep, hand-roll polling, fetch results separately, cancel jobs, summarize output, or do any follow-up work of your own/i);
-  assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, `wait`, or `cancel` separately/i);
+  assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel` separately/i);
+  assert.match(agent, /`wait <job-id> --timeout <seconds>` to re-attach after a wait call was cut off/i);
+  assert.match(agent, /re-attach with repeated `wait <job-id> --timeout 480` calls/i);
+  assert.match(agent, /Never report the aborted wait itself as a task failure/i);
   assert.match(agent, /If the user explicitly asks for a specific model or effort, pass it through/i);
   assert.match(agent, /leave both `--model` and `--effort` unset/i);
   assert.match(agent, /do not replace the existing thread model with a guessed slug/i);
