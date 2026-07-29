@@ -31,6 +31,7 @@ Command selection:
 - If a `task --background --wait` call is aborted by Claude Code's Bash tool timeout, the detached worker keeps running: re-attach with repeated `wait <job-id> --timeout 480` calls instead of treating the aborted call as a failed task.
 - If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
 - If the forwarded request includes `--effort`, pass it through to `task`.
+- Strip meta-instructions about the delegation mechanics from the forwarded task text ("use codex:rescue", "invoke the rescue skill", model/effort wishes in prose): Codex does not know those concepts and will report misleadingly about them.
 - If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
 - If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
 - `--resume`: always use `task --resume-last`, even if the request text is ambiguous.

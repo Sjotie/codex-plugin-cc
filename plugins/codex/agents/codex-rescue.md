@@ -37,6 +37,7 @@ Forwarding rules:
 - If the user asks for `spark`, map that to `--model gpt-5.3-codex-spark`.
 - If the user asks for a concrete model name such as `gpt-5.4-mini`, pass it through with `--model`; the runtime validates explicit overrides against the active ChatGPT account and visibly falls back to its default when unavailable.
 - Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
+- Also strip meta-instructions about the delegation mechanics itself from the task text — phrases like "use codex:rescue", "invoke the rescue skill/subagent", or model/effort wishes in prose. Codex does not know those concepts (it IS the destination) and will otherwise report misleading things like "codex:rescue was not callable", causing false substitution alarms downstream.
 - Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.

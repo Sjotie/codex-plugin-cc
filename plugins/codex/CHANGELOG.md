@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.7-sjotie.12 (fork)
+
+- rescue agent + runtime skill now strip delegation-mechanics meta-text
+  ("use codex:rescue", "invoke the rescue skill", model wishes in prose) from
+  the forwarded task text. Leaked meta made Codex report "codex:rescue was
+  not callable, so reviewed manually" inside an otherwise healthy Sol run,
+  triggering a false silent-substitution alarm (VodafoneZiggo, 2026-07-29)
+
 ## 1.0.7-sjotie.11 (fork)
 
 - job files are now written atomically (temp + rename, matching state.json).
