@@ -54,7 +54,9 @@ The `task` process itself must not be placed in Claude Code's `run_in_background
 
 ## Background fallback
 
-If the accompanying agent cannot remain synchronously blocked, it must arm a Claude Code Bash task with `run_in_background: true` before ending its turn. Use the companion waiter in the loop so the CLI remains the only implementation of job-state semantics:
+The fallback below is for MAIN sessions only — agents that can still send messages after their current turn. A SUBAGENT whose final message is its only transport back to the caller must NEVER use it: a subagent that ends its turn with the job still running has no way to deliver the result, the caller sees only silence, and the background Bash layer may be reaped when the subagent goes idle. Subagents must stay synchronous — bounded foreground `wait <task-id> --timeout 480` calls in a loop until the job is terminal — and only then end their turn with the result in the final message.
+
+If the accompanying MAIN-session agent cannot remain synchronously blocked, it must arm a Claude Code Bash task with `run_in_background: true` before ending its turn. Use the companion waiter in the loop so the CLI remains the only implementation of job-state semantics:
 
 ```bash
 until output="$(node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" wait "$task_id" --timeout 45 --json)"; do
@@ -76,3 +78,7 @@ Start that command through `Bash(..., run_in_background: true)` and confirm the 
 - Never promise that an idle agent will resume polling by itself.
 - Do not report completion until the waiter returns a terminal job-JSON state.
 - On timeout, unknown ID, unreadable state, or invocation failure, report that outcome explicitly instead of calling the task complete.
+
+## Recoverability on failure
+
+Codex's work survives most delivery failures: the thread transcript keeps growing at `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*-<threadId>.jsonl` even when the tracked job fails. Whenever a wait is aborted or a job ends in `failed`/`error`, always include in your report: the job id, the `threadId` from `status <job-id> --json`, and that rollout path pattern — so the caller can recover partial findings from the transcript instead of concluding the work is lost.

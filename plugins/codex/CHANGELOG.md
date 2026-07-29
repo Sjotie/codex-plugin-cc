@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.10 (fork)
+
+- await-task: the `run_in_background` fallback is now explicitly main-session
+  only. A subagent whose final message is its only transport must stay in a
+  synchronous bounded-wait loop until the job is terminal — ending its turn
+  with the job still running delivered silence to the caller (reported by the
+  mcp-spec session, 2026-07-29)
+- rescue agent + await-task: failed/aborted jobs must be reported with job id,
+  `threadId`, and the `~/.codex/sessions/.../rollout-*-<threadId>.jsonl`
+  transcript path, so callers can recover Codex's partial findings instead of
+  concluding the work is lost
+
 ## 1.0.7-sjotie.9 (fork)
 
 - `task --background` now double-forks its detached worker through a
