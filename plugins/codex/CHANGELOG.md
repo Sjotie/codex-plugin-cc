@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.11 (fork)
+
+- job files are now written atomically (temp + rename, matching state.json).
+  A freshly spawned task worker polls the job file every 25ms while
+  `assignJobWorkerPid` rewrites it; catching that half-written window killed
+  the worker on JSON.parse before the job ever started, and dead-worker
+  reconciliation reported "Process exited without reporting." (observed on a
+  VodafoneZiggo review run, 2026-07-29 — the sjotie.9 double-fork widened this
+  pre-existing race window)
+- `readStoredJob` treats a malformed job file as transient (retry) instead of
+  crashing the reading process
+
 ## 1.0.7-sjotie.10 (fork)
 
 - await-task: the `run_in_background` fallback is now explicitly main-session

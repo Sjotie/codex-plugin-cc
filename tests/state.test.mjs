@@ -137,3 +137,29 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
       .sort()
   );
 });
+
+test("writeJobFile writes atomically and leaves no temp residue", () => {
+  const workspace = makeTempDir();
+  const jobId = "task-atomic-write";
+  const jobFile = writeJobFile(workspace, jobId, { id: jobId, status: "queued" });
+
+  const parsed = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  assert.equal(parsed.id, jobId);
+  const residue = fs.readdirSync(path.dirname(jobFile)).filter((name) => name.includes(".tmp"));
+  assert.deepEqual(residue, []);
+});
+
+test("readStoredJob treats a half-written job file as transient instead of throwing", async () => {
+  const { readStoredJob } = await import("../plugins/codex/scripts/lib/job-control.mjs");
+  const workspace = makeTempDir();
+  const jobId = "task-torn-read";
+  const jobFile = resolveJobFile(workspace, jobId);
+  fs.mkdirSync(path.dirname(jobFile), { recursive: true });
+  // Simulate the torn read a 25ms-polling worker can catch mid-rewrite.
+  fs.writeFileSync(jobFile, '{"id":"task-torn-read","status":"que', "utf8");
+
+  assert.equal(readStoredJob(workspace, jobId), null);
+
+  writeJobFile(workspace, jobId, { id: jobId, status: "queued" });
+  assert.equal(readStoredJob(workspace, jobId).status, "queued");
+});

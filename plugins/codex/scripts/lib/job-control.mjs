@@ -213,6 +213,12 @@ export function readStoredJob(workspaceRoot, jobId) {
     if (error?.code === "ENOENT") {
       return null;
     }
+    // A malformed job file is transient by contract now that writes are
+    // atomic; treat it like "not yet readable" so pollers retry instead of
+    // crashing the process that happened to catch a bad read.
+    if (error instanceof SyntaxError) {
+      return null;
+    }
     throw error;
   }
 }

@@ -406,10 +406,17 @@ export function getConfig(cwd) {
   return loadState(cwd).config;
 }
 
+// Job files are read lock-free by concurrent processes (most critically the
+// freshly spawned task worker polling every 25ms in waitForStoredJob), so the
+// write must be atomic: a plain writeFileSync exposes half-written JSON and a
+// reader that catches that window dies on JSON.parse before ever starting the
+// job ("Process exited without reporting.", observed 2026-07-29).
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const tempFile = `${jobFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tempFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  fs.renameSync(tempFile, jobFile);
   return jobFile;
 }
 
