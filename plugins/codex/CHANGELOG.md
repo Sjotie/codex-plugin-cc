@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.7-sjotie.13 (fork)
+
+- the shared broker no longer keeps an orphaned turn alive. When the client
+  that owns a running turn disappears (worker SIGTERM/SIGKILL, host restart,
+  SessionEnd cleanup), the broker sends `turn/interrupt` for it and exits as
+  soon as it is idle instead of after the 5-minute idle timeout. Codex's
+  app-server keeps a thread loaded (and its
+  `~/.codex/thread-writer-locks/<thread>.lock`) until it exits, so before this
+  every other app-server — the direct fallback, `codex resume`, a fresh broker
+  — was refused with "already has an active writer" (Homebase #398)
+- a client that disconnects before its `turn/start` is answered no longer
+  leaves the broker permanently busy. The broker used to claim the stream for
+  the closed socket, so every later request got "broker busy", fell back to a
+  direct app-server and hit the same writer lock until the broker was killed
+
 ## 1.0.7-sjotie.12 (fork)
 
 - rescue agent + runtime skill now strip delegation-mechanics meta-text

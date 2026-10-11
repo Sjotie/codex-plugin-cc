@@ -12,6 +12,8 @@ import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const BROKER_ORPHAN_GRACE_ENV = "CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS";
+const DEFAULT_BROKER_ORPHAN_GRACE_MS = 3000;
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -47,10 +49,10 @@ function writePidFile(pidFile) {
   fs.writeFileSync(pidFile, `${process.pid}\n`, "utf8");
 }
 
-function resolveIdleTimeoutMs(value) {
+function resolveTimeoutMs(value, fallbackMs) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_BROKER_IDLE_TIMEOUT_MS;
+    return fallbackMs;
   }
   return Math.max(1, Math.floor(parsed));
 }
@@ -80,9 +82,17 @@ async function main() {
   let activeStreamSocket = null;
   let activeStreamThreadIds = null;
   const sockets = new Set();
-  const idleTimeoutMs = resolveIdleTimeoutMs(process.env[BROKER_IDLE_TIMEOUT_ENV]);
+  const idleTimeoutMs = resolveTimeoutMs(process.env[BROKER_IDLE_TIMEOUT_ENV], DEFAULT_BROKER_IDLE_TIMEOUT_MS);
+  const orphanGraceMs = resolveTimeoutMs(process.env[BROKER_ORPHAN_GRACE_ENV], DEFAULT_BROKER_ORPHAN_GRACE_MS);
   let idleTimer = null;
   let shutdownPromise = null;
+  // Turns running on the app-server, by thread. A client that dies mid-stream
+  // (worker SIGTERM/SIGKILL, host restart) leaves its turn running with nobody
+  // reading it, and the app-server holds ~/.codex/thread-writer-locks/<thread>.lock
+  // until it exits: every other app-server (direct fallback, `codex resume`, a
+  // fresh broker) is refused with "already has an active writer" (#398).
+  const runningTurns = new Map();
+  let orphanedStream = false;
 
   function cancelIdleShutdown() {
     if (idleTimer) {
@@ -110,10 +120,51 @@ async function main() {
     if (activeStreamSocket === socket) {
       activeStreamSocket = null;
       activeStreamThreadIds = null;
+      abandonStream();
+    }
+  }
+
+  // The stream's owner is gone while its turns may still run. A client can
+  // stop reading once it has the final answer, before turn/completed arrives,
+  // so give the turns a grace period to finish. Interrupt the ones that do not
+  // and retire the broker as soon as it is idle: only the app-server exiting
+  // releases the thread lock (it keeps a thread loaded after thread/unsubscribe).
+  function abandonStream(startedTurn = null) {
+    if (startedTurn?.threadId && startedTurn.turnId && !runningTurns.has(startedTurn.threadId)) {
+      runningTurns.set(startedTurn.threadId, startedTurn.turnId);
+    }
+    const turns = [...runningTurns];
+    if (turns.length === 0) {
+      return;
+    }
+    setTimeout(async () => {
+      const orphaned = turns.filter(([threadId, turnId]) => runningTurns.get(threadId) === turnId);
+      if (orphaned.length === 0) {
+        return;
+      }
+      await Promise.allSettled(
+        orphaned.map(([threadId, turnId]) => appClient.request("turn/interrupt", { threadId, turnId }))
+      );
+      orphanedStream = true;
+      scheduleIdleShutdown(server);
+    }, orphanGraceMs).unref?.();
+  }
+
+  function trackTurn(message) {
+    const threadId = message.params?.threadId;
+    const turnId = message.params?.turn?.id;
+    if (!threadId) {
+      return;
+    }
+    if (message.method === "turn/started" && turnId) {
+      runningTurns.set(threadId, turnId);
+    } else if (message.method === "turn/completed") {
+      runningTurns.delete(threadId);
     }
   }
 
   function routeNotification(message) {
+    trackTurn(message);
     const target = activeRequestSocket ?? activeStreamSocket;
     if (!target) {
       return;
@@ -170,7 +221,7 @@ async function main() {
           process.exit(1);
         }
       );
-    }, idleTimeoutMs);
+    }, orphanedStream ? 0 : idleTimeoutMs);
     idleTimer.unref?.();
   }
 
@@ -273,7 +324,12 @@ async function main() {
         try {
           const result = await appClient.request(message.method, message.params ?? {});
           send(socket, { id: message.id, result });
-          if (isStreaming) {
+          if (isStreaming && !sockets.has(socket)) {
+            // The client left while the stream was starting. Claiming the
+            // stream for a closed socket would keep the broker busy forever.
+            abandonStream({ threadId: message.params?.threadId, turnId: result?.turn?.id });
+            scheduleIdleShutdown(server);
+          } else if (isStreaming) {
             activeStreamSocket = socket;
             activeStreamThreadIds = buildStreamThreadIds(message.method, message.params ?? {}, result);
           }

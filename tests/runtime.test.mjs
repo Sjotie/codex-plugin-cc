@@ -10,6 +10,7 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { BROKER_ENDPOINT_ENV, CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import {
+  ensureBrokerSession,
   isBrokerSessionActive,
   loadBrokerSession,
   saveBrokerSession,
@@ -2984,47 +2985,30 @@ test("session end preserves a broker that rejects shutdown while another client 
 test("accepted shutdown stops accepting new broker clients immediately", async (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
-  installFakeCodex(binDir, "interruptible-slow-task");
+  installFakeCodex(binDir);
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
   run("git", ["add", "README.md"], { cwd: repo });
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
   const env = buildEnv(binDir);
-  const launched = run("node", [SCRIPT, "task", "--background", "--json", "leave an orphaned slow turn"], {
+  delete env[BROKER_ENDPOINT_ENV];
+  // A finished task leaves the shared broker idle and alive. (A worker killed
+  // mid-turn no longer does: the broker then retires by itself, see #398.)
+  const taskResult = run("node", [SCRIPT, "task", "leave an idle shared broker"], {
     cwd: repo,
     env
   });
-  assert.equal(launched.status, 0, launched.stderr);
-
-  const { jobId } = JSON.parse(launched.stdout);
-  const stateDir = resolveStateDir(repo);
-  const runningJob = await waitFor(() => {
-    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-    const job = state.jobs.find((candidate) => candidate.id === jobId);
-    return job?.status === "running" && job.threadId && job.turnId ? job : null;
-  }, { timeoutMs: 15000 });
+  assert.equal(taskResult.status, 0, taskResult.stderr);
   const brokerSession = loadBrokerSession(repo);
   assert.ok(brokerSession?.pid);
 
   let lateClient = null;
   t.after(() => {
     lateClient?.destroy();
-    for (const pid of [runningJob.pid, brokerSession.pid]) {
-      try {
-        terminateProcessTree(pid);
-      } catch {}
-    }
-  });
-
-  terminateProcessTree(runningJob.pid);
-  await waitFor(() => {
     try {
-      process.kill(runningJob.pid, 0);
-      return false;
-    } catch (error) {
-      return error?.code === "ESRCH";
-    }
+      terminateProcessTree(brokerSession.pid);
+    } catch {}
   });
 
   await waitFor(async () => {
@@ -3245,6 +3229,137 @@ test("broker disconnect marks a background task failed", async (t) => {
 
   assert.match(failedJob.errorMessage, /connection closed/i);
   assert.equal(failedJob.pid, null);
+});
+
+function waitForProcessExit(pid, options) {
+  return waitFor(() => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (error) {
+      return error?.code === "ESRCH";
+    }
+  }, options);
+}
+
+test("broker interrupts the turn of a worker killed mid-stream and retires without waiting for the idle timeout", async (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "interruptible-slow-task");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: "200" };
+  delete env[BROKER_ENDPOINT_ENV];
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the flaky worker timeout"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(launched.status, 0, launched.stderr);
+  const { jobId } = JSON.parse(launched.stdout);
+  const stateDir = resolveStateDir(repo);
+  const runningJob = await waitFor(() => {
+    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+    const job = state.jobs.find((candidate) => candidate.id === jobId);
+    return job?.status === "running" && job.threadId && job.turnId ? job : null;
+  }, { timeoutMs: 15000 });
+  const brokerSession = loadBrokerSession(repo);
+  assert.ok(brokerSession?.pid);
+  t.after(() => {
+    for (const pid of [runningJob.pid, brokerSession.pid]) {
+      try {
+        terminateProcessTree(pid);
+      } catch {}
+    }
+  });
+
+  // A host restart or SessionEnd cleanup kills the worker, not the shared broker.
+  terminateProcessTree(runningJob.pid);
+
+  const lastInterrupt = await waitFor(() => JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastInterrupt ?? null);
+  assert.deepEqual(lastInterrupt, { threadId: runningJob.threadId, turnId: runningJob.turnId });
+  // The default idle timeout is minutes; the orphaned broker must exit now so its
+  // app-server releases the thread's writer lock.
+  await waitForProcessExit(brokerSession.pid);
+});
+
+test("broker does not stay busy when the client leaves before turn/start answers", async (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "slow-turn-start");
+  initGitRepo(repo);
+
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: "200" };
+  delete env[BROKER_ENDPOINT_ENV];
+  const brokerSession = await ensureBrokerSession(repo, { env });
+  assert.ok(brokerSession?.pid);
+  t.after(() => {
+    try {
+      terminateProcessTree(brokerSession.pid);
+    } catch {}
+  });
+
+  const socket = net.createConnection({ path: parseBrokerEndpoint(brokerSession.endpoint).path });
+  socket.setEncoding("utf8");
+  const responses = new Map();
+  let buffer = "";
+  socket.on("data", (chunk) => {
+    buffer += chunk;
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex !== -1) {
+      const message = JSON.parse(buffer.slice(0, newlineIndex));
+      buffer = buffer.slice(newlineIndex + 1);
+      newlineIndex = buffer.indexOf("\n");
+      if (message.id !== undefined) {
+        responses.set(message.id, message);
+      }
+    }
+  });
+  socket.write(`${JSON.stringify({ id: 1, method: "thread/start", params: { cwd: repo } })}\n`);
+  const threadStart = await waitFor(() => responses.get(1));
+  const threadId = threadStart.result.thread.id;
+  socket.write(
+    `${JSON.stringify({ id: 2, method: "turn/start", params: { threadId, input: [{ type: "text", text: "hi" }] } })}\n`
+  );
+  await waitFor(() => JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastTurnStart ?? null);
+  socket.destroy();
+
+  const { turnId } = JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastTurnStart;
+  const lastInterrupt = await waitFor(() => JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastInterrupt ?? null);
+  assert.deepEqual(lastInterrupt, { threadId, turnId });
+  await waitForProcessExit(brokerSession.pid);
+});
+
+test("broker keeps serving when the client leaves after the final answer but before turn/completed", async (t) => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "late-turn-completed");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: "1500" };
+  delete env[BROKER_ENDPOINT_ENV];
+  const taskResult = run("node", [SCRIPT, "task", "finish before turn completed"], { cwd: repo, env });
+  assert.equal(taskResult.status, 0, taskResult.stderr);
+  const brokerSession = loadBrokerSession(repo);
+  assert.ok(brokerSession?.pid);
+  t.after(() => {
+    try {
+      terminateProcessTree(brokerSession.pid);
+    } catch {}
+  });
+
+  // Past the grace period: the late turn/completed arrived, so nothing was orphaned.
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastInterrupt ?? null, null);
+  process.kill(brokerSession.pid, 0);
 });
 
 test("session end fully cleans up jobs for the ending session", async (t) => {
