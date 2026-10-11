@@ -3311,12 +3311,12 @@ function connectBrokerClient(endpoint) {
   return { socket, request, write };
 }
 
-async function startSlowTurnBroker(t) {
+async function startFakeBroker(t, { behavior = "slow-turn-start", orphanGraceMs = 300 } = {}) {
   const repo = makeTempDir();
   const binDir = makeTempDir();
-  installFakeCodex(binDir, "slow-turn-start");
+  installFakeCodex(binDir, behavior);
   initGitRepo(repo);
-  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: "300" };
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: String(orphanGraceMs) };
   delete env[BROKER_ENDPOINT_ENV];
   const brokerSession = await ensureBrokerSession(repo, { env });
   assert.ok(brokerSession?.pid);
@@ -3330,7 +3330,7 @@ async function startSlowTurnBroker(t) {
 }
 
 test("broker does not stay busy when the client leaves before turn/start answers", async (t) => {
-  const { repo, brokerSession, readFakeState } = await startSlowTurnBroker(t);
+  const { repo, brokerSession, readFakeState } = await startFakeBroker(t);
   const client = connectBrokerClient(brokerSession.endpoint);
   const threadId = (await client.request(1, "thread/start", { cwd: repo })).result.thread.id;
   client.write(2, "turn/start", { threadId, input: [{ type: "text", text: "slow hi" }] });
@@ -3344,7 +3344,7 @@ test("broker does not stay busy when the client leaves before turn/start answers
 });
 
 test("an orphaned turn/start does not interrupt the turn of a client that is still connected", async (t) => {
-  const { repo, brokerSession, readFakeState } = await startSlowTurnBroker(t);
+  const { repo, brokerSession, readFakeState } = await startFakeBroker(t);
   const leaver = connectBrokerClient(brokerSession.endpoint);
   const leaverThreadId = (await leaver.request(1, "thread/start", { cwd: repo })).result.thread.id;
   leaver.write(2, "turn/start", { threadId: leaverThreadId, input: [{ type: "text", text: "slow leave" }] });
@@ -3364,6 +3364,28 @@ test("an orphaned turn/start does not interrupt the turn of a client that is sti
   await new Promise((resolve) => setTimeout(resolve, 600));
   assert.deepEqual(readFakeState().interrupts, [{ threadId: leaverThreadId, turnId: leaverTurnId }]);
   process.kill(brokerSession.pid, 0);
+});
+
+test("a late turn/completed of a replaced turn does not end the new owner's stream on the same thread", async (t) => {
+  const { repo, brokerSession } = await startFakeBroker(t, { behavior: "interruptible-slow-task", orphanGraceMs: 60000 });
+  const leaver = connectBrokerClient(brokerSession.endpoint);
+  const threadId = (await leaver.request(1, "thread/start", { cwd: repo })).result.thread.id;
+  const oldTurnId = (await leaver.request(2, "turn/start", { threadId, input: [{ type: "text", text: "old" }] })).result.turn.id;
+  leaver.socket.destroy();
+
+  // A resumed worker takes the thread over, then the old turn finishes late.
+  const owner = connectBrokerClient(brokerSession.endpoint);
+  t.after(() => owner.socket.destroy());
+  await waitFor(async () => {
+    const response = await owner.request(`start-${Date.now()}`, "turn/start", { threadId, input: [{ type: "text", text: "new" }] });
+    return response.result ? response : null;
+  });
+  await owner.request(3, "turn/interrupt", { threadId, turnId: oldTurnId });
+
+  const other = connectBrokerClient(brokerSession.endpoint);
+  t.after(() => other.socket.destroy());
+  const response = await other.request(1, "thread/start", { cwd: repo });
+  assert.equal(response.error?.code, -32001, "the new owner must still hold the stream");
 });
 
 test("broker keeps serving when the client leaves after the final answer but before turn/completed", async (t) => {

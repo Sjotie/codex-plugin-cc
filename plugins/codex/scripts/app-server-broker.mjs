@@ -83,6 +83,7 @@ async function main() {
   let activeRequestSocket = null;
   let activeStreamSocket = null;
   let activeStreamThreadIds = null;
+  let activeRequestThreadId = null;
   const sockets = new Set();
   const idleTimeoutMs = resolveTimeoutMs(process.env[BROKER_IDLE_TIMEOUT_ENV], DEFAULT_BROKER_IDLE_TIMEOUT_MS);
   const orphanGraceMs = resolveTimeoutMs(process.env[BROKER_ORPHAN_GRACE_ENV], DEFAULT_BROKER_ORPHAN_GRACE_MS);
@@ -149,7 +150,7 @@ async function main() {
         const turnId = runningTurns.get(threadId);
         const takenOver = turnIdAtLeave
           ? turnId !== turnIdAtLeave
-          : Boolean(activeRequestSocket || activeStreamThreadIds?.has(threadId));
+          : Boolean(activeStreamThreadIds?.has(threadId) || (activeRequestSocket && activeRequestThreadId === threadId));
         if (!turnId || takenOver) {
           continue;
         }
@@ -163,21 +164,31 @@ async function main() {
     }, orphanGraceMs).unref?.();
   }
 
+  // Returns false for a turn/completed of a turn that is no longer the
+  // thread's current one, e.g. an interrupted orphan finishing after another
+  // client took the thread over.
   function trackTurn(message) {
     const threadId = message.params?.threadId;
     const turnId = message.params?.turn?.id;
     if (!threadId || !turnId) {
-      return;
+      return true;
     }
     if (message.method === "turn/started") {
       runningTurns.set(threadId, turnId);
-    } else if (message.method === "turn/completed" && runningTurns.get(threadId) === turnId) {
+    } else if (message.method === "turn/completed") {
+      const currentTurnId = runningTurns.get(threadId);
+      if (currentTurnId && currentTurnId !== turnId) {
+        return false;
+      }
       runningTurns.delete(threadId);
     }
+    return true;
   }
 
   function routeNotification(message) {
-    trackTurn(message);
+    if (!trackTurn(message)) {
+      return;
+    }
     const target = activeRequestSocket ?? activeStreamSocket;
     if (!target) {
       return;
@@ -333,6 +344,7 @@ async function main() {
 
         const isStreaming = STREAMING_METHODS.has(message.method);
         activeRequestSocket = socket;
+        activeRequestThreadId = message.params?.threadId ?? null;
 
         try {
           const result = await appClient.request(message.method, message.params ?? {});
