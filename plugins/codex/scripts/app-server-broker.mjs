@@ -13,7 +13,9 @@ const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact
 const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const BROKER_ORPHAN_GRACE_ENV = "CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS";
-const DEFAULT_BROKER_ORPHAN_GRACE_MS = 3000;
+// Codex can send turn/completed ~0.5 s after the final answer, when the
+// companion has already inferred completion and disconnected.
+const DEFAULT_BROKER_ORPHAN_GRACE_MS = 10 * 1000;
 
 function buildStreamThreadIds(method, params, result) {
   const threadIds = new Set();
@@ -92,7 +94,7 @@ async function main() {
   // until it exits: every other app-server (direct fallback, `codex resume`, a
   // fresh broker) is refused with "already has an active writer" (#398).
   const runningTurns = new Map();
-  let orphanedStream = false;
+  let retireWhenIdle = false;
 
   function cancelIdleShutdown() {
     if (idleTimer) {
@@ -118,47 +120,58 @@ async function main() {
       activeRequestSocket = null;
     }
     if (activeStreamSocket === socket) {
+      const threadIds = activeStreamThreadIds;
       activeStreamSocket = null;
       activeStreamThreadIds = null;
-      abandonStream();
+      abandonStream(threadIds);
     }
   }
 
-  // The stream's owner is gone while its turns may still run. A client can
-  // stop reading once it has the final answer, before turn/completed arrives,
-  // so give the turns a grace period to finish. Interrupt the ones that do not
-  // and retire the broker as soon as it is idle: only the app-server exiting
+  // The client that owned a stream on these threads is gone. A client may
+  // leave after the final answer but before turn/completed, so wait a grace
+  // period and only then interrupt a turn still running on those threads,
+  // unless another client has taken the thread over meanwhile. After an
+  // interrupt, retire the broker once it is idle: only the app-server exiting
   // releases the thread lock (it keeps a thread loaded after thread/unsubscribe).
-  function abandonStream(startedTurn = null) {
-    if (startedTurn?.threadId && startedTurn.turnId && !runningTurns.has(startedTurn.threadId)) {
-      runningTurns.set(startedTurn.threadId, startedTurn.turnId);
-    }
-    const turns = [...runningTurns];
-    if (turns.length === 0) {
+  function abandonStream(threadIds, startedTurn = null) {
+    const turnAtLeave = new Map(
+      [...(threadIds ?? [])].map((threadId) => [
+        threadId,
+        runningTurns.get(threadId) ?? (startedTurn?.threadId === threadId ? startedTurn.turnId : null) ?? null
+      ])
+    );
+    if (turnAtLeave.size === 0) {
       return;
     }
-    setTimeout(async () => {
-      const orphaned = turns.filter(([threadId, turnId]) => runningTurns.get(threadId) === turnId);
-      if (orphaned.length === 0) {
-        return;
+    setTimeout(() => {
+      let interrupted = false;
+      for (const [threadId, turnIdAtLeave] of turnAtLeave) {
+        const turnId = runningTurns.get(threadId);
+        const takenOver = turnIdAtLeave
+          ? turnId !== turnIdAtLeave
+          : Boolean(activeRequestSocket || activeStreamThreadIds?.has(threadId));
+        if (!turnId || takenOver) {
+          continue;
+        }
+        appClient.request("turn/interrupt", { threadId, turnId }).catch(() => {});
+        interrupted = true;
       }
-      await Promise.allSettled(
-        orphaned.map(([threadId, turnId]) => appClient.request("turn/interrupt", { threadId, turnId }))
-      );
-      orphanedStream = true;
-      scheduleIdleShutdown(server);
+      if (interrupted) {
+        retireWhenIdle = true;
+        scheduleIdleShutdown(server);
+      }
     }, orphanGraceMs).unref?.();
   }
 
   function trackTurn(message) {
     const threadId = message.params?.threadId;
     const turnId = message.params?.turn?.id;
-    if (!threadId) {
+    if (!threadId || !turnId) {
       return;
     }
-    if (message.method === "turn/started" && turnId) {
+    if (message.method === "turn/started") {
       runningTurns.set(threadId, turnId);
-    } else if (message.method === "turn/completed") {
+    } else if (message.method === "turn/completed" && runningTurns.get(threadId) === turnId) {
       runningTurns.delete(threadId);
     }
   }
@@ -221,7 +234,7 @@ async function main() {
           process.exit(1);
         }
       );
-    }, orphanedStream ? 0 : idleTimeoutMs);
+    }, retireWhenIdle ? orphanGraceMs : idleTimeoutMs);
     idleTimer.unref?.();
   }
 
@@ -327,8 +340,10 @@ async function main() {
           if (isStreaming && !sockets.has(socket)) {
             // The client left while the stream was starting. Claiming the
             // stream for a closed socket would keep the broker busy forever.
-            abandonStream({ threadId: message.params?.threadId, turnId: result?.turn?.id });
-            scheduleIdleShutdown(server);
+            abandonStream(
+              buildStreamThreadIds(message.method, message.params ?? {}, result),
+              message.method === "turn/start" ? { threadId: message.params?.threadId, turnId: result?.turn?.id } : null
+            );
           } else if (isStreaming) {
             activeStreamSocket = socket;
             activeStreamThreadIds = buildStreamThreadIds(message.method, message.params ?? {}, result);

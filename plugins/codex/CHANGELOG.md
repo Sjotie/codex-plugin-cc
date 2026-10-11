@@ -4,12 +4,16 @@
 
 - the shared broker no longer keeps an orphaned turn alive. When the client
   that owns a running turn disappears (worker SIGTERM/SIGKILL, host restart,
-  SessionEnd cleanup), the broker sends `turn/interrupt` for it and exits as
-  soon as it is idle instead of after the 5-minute idle timeout. Codex's
-  app-server keeps a thread loaded (and its
-  `~/.codex/thread-writer-locks/<thread>.lock`) until it exits, so before this
-  every other app-server — the direct fallback, `codex resume`, a fresh broker
-  — was refused with "already has an active writer" (Homebase #398)
+  SessionEnd cleanup), the broker waits a grace period
+  (`CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS`, default 10 s: real Codex sends
+  `turn/completed` ~0.3-0.5 s after the final answer, when the companion has
+  already inferred completion and left), then sends `turn/interrupt` for a
+  turn still running on that client's threads and retires once idle, instead
+  of after the 5-minute idle timeout. Codex's app-server keeps a thread loaded
+  (and its `~/.codex/thread-writer-locks/<thread>.lock`) until it exits, so
+  before this every other app-server — the direct fallback, `codex resume`, a
+  fresh broker — was refused with "already has an active writer" (Homebase
+  #398). Turns of clients that are still connected are left alone
 - a client that disconnects before its `turn/start` is answered no longer
   leaves the broker permanently busy. The broker used to claim the stream for
   the closed socket, so every later request got "broker busy", fell back to a

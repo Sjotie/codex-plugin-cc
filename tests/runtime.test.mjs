@@ -3286,24 +3286,8 @@ test("broker interrupts the turn of a worker killed mid-stream and retires witho
   await waitForProcessExit(brokerSession.pid);
 });
 
-test("broker does not stay busy when the client leaves before turn/start answers", async (t) => {
-  const repo = makeTempDir();
-  const binDir = makeTempDir();
-  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
-  installFakeCodex(binDir, "slow-turn-start");
-  initGitRepo(repo);
-
-  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: "200" };
-  delete env[BROKER_ENDPOINT_ENV];
-  const brokerSession = await ensureBrokerSession(repo, { env });
-  assert.ok(brokerSession?.pid);
-  t.after(() => {
-    try {
-      terminateProcessTree(brokerSession.pid);
-    } catch {}
-  });
-
-  const socket = net.createConnection({ path: parseBrokerEndpoint(brokerSession.endpoint).path });
+function connectBrokerClient(endpoint) {
+  const socket = net.createConnection({ path: parseBrokerEndpoint(endpoint).path });
   socket.setEncoding("utf8");
   const responses = new Map();
   let buffer = "";
@@ -3319,19 +3303,67 @@ test("broker does not stay busy when the client leaves before turn/start answers
       }
     }
   });
-  socket.write(`${JSON.stringify({ id: 1, method: "thread/start", params: { cwd: repo } })}\n`);
-  const threadStart = await waitFor(() => responses.get(1));
-  const threadId = threadStart.result.thread.id;
-  socket.write(
-    `${JSON.stringify({ id: 2, method: "turn/start", params: { threadId, input: [{ type: "text", text: "hi" }] } })}\n`
-  );
-  await waitFor(() => JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastTurnStart ?? null);
-  socket.destroy();
+  const request = (id, method, params) => {
+    socket.write(`${JSON.stringify({ id, method, params })}\n`);
+    return waitFor(() => responses.get(id));
+  };
+  const write = (id, method, params) => socket.write(`${JSON.stringify({ id, method, params })}\n`);
+  return { socket, request, write };
+}
 
-  const { turnId } = JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastTurnStart;
-  const lastInterrupt = await waitFor(() => JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastInterrupt ?? null);
-  assert.deepEqual(lastInterrupt, { threadId, turnId });
+async function startSlowTurnBroker(t) {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "slow-turn-start");
+  initGitRepo(repo);
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: "300" };
+  delete env[BROKER_ENDPOINT_ENV];
+  const brokerSession = await ensureBrokerSession(repo, { env });
+  assert.ok(brokerSession?.pid);
+  t.after(() => {
+    try {
+      terminateProcessTree(brokerSession.pid);
+    } catch {}
+  });
+  const readFakeState = () => JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  return { repo, brokerSession, readFakeState };
+}
+
+test("broker does not stay busy when the client leaves before turn/start answers", async (t) => {
+  const { repo, brokerSession, readFakeState } = await startSlowTurnBroker(t);
+  const client = connectBrokerClient(brokerSession.endpoint);
+  const threadId = (await client.request(1, "thread/start", { cwd: repo })).result.thread.id;
+  client.write(2, "turn/start", { threadId, input: [{ type: "text", text: "slow hi" }] });
+  await waitFor(() => readFakeState().lastTurnStart ?? null);
+  client.socket.destroy();
+
+  const { turnId } = readFakeState().lastTurnStart;
+  const interrupts = await waitFor(() => readFakeState().interrupts ?? null);
+  assert.deepEqual(interrupts, [{ threadId, turnId }]);
   await waitForProcessExit(brokerSession.pid);
+});
+
+test("an orphaned turn/start does not interrupt the turn of a client that is still connected", async (t) => {
+  const { repo, brokerSession, readFakeState } = await startSlowTurnBroker(t);
+  const leaver = connectBrokerClient(brokerSession.endpoint);
+  const leaverThreadId = (await leaver.request(1, "thread/start", { cwd: repo })).result.thread.id;
+  leaver.write(2, "turn/start", { threadId: leaverThreadId, input: [{ type: "text", text: "slow leave" }] });
+  await waitFor(() => readFakeState().lastTurnStart ?? null);
+  const leaverTurnId = readFakeState().lastTurnStart.turnId;
+  leaver.socket.destroy();
+
+  // The broker frees the request slot when the leaver's socket closes, so a
+  // second client can start its own turn, which is running by the time the
+  // leaver's late turn/start answer arrives.
+  const stayer = connectBrokerClient(brokerSession.endpoint);
+  t.after(() => stayer.socket.destroy());
+  const stayerThreadId = (await stayer.request(1, "thread/start", { cwd: repo })).result.thread.id;
+  await stayer.request(2, "turn/start", { threadId: stayerThreadId, input: [{ type: "text", text: "stay" }] });
+
+  await waitFor(() => readFakeState().interrupts ?? null);
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.deepEqual(readFakeState().interrupts, [{ threadId: leaverThreadId, turnId: leaverTurnId }]);
+  process.kill(brokerSession.pid, 0);
 });
 
 test("broker keeps serving when the client leaves after the final answer but before turn/completed", async (t) => {
@@ -3345,6 +3377,7 @@ test("broker keeps serving when the client leaves after the final answer but bef
   run("git", ["commit", "-m", "init"], { cwd: repo });
 
   const env = { ...buildEnv(binDir), CODEX_COMPANION_BROKER_ORPHAN_GRACE_MS: "1500" };
+  // The fixture sends turn/completed 1 s after the final answer, inside the grace period.
   delete env[BROKER_ENDPOINT_ENV];
   const taskResult = run("node", [SCRIPT, "task", "finish before turn completed"], { cwd: repo, env });
   assert.equal(taskResult.status, 0, taskResult.stderr);
@@ -3357,7 +3390,7 @@ test("broker keeps serving when the client leaves after the final answer but bef
   });
 
   // Past the grace period: the late turn/completed arrived, so nothing was orphaned.
-  await new Promise((resolve) => setTimeout(resolve, 2500));
+  await new Promise((resolve) => setTimeout(resolve, 1800));
   assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastInterrupt ?? null, null);
   process.kill(brokerSession.pid, 0);
 });

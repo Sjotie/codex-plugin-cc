@@ -519,10 +519,12 @@ rl.on("line", (line) => {
 	          prompt
 	        };
 	        saveState(state);
-	        if (BEHAVIOR === "slow-turn-start") {
-	          // The client can disconnect before this response reaches it.
+	        // slow-turn-start: a prompt containing "slow" gets its response late,
+	        // so the client can disconnect before it arrives.
+	        const turnStartDelayMs = BEHAVIOR === "slow-turn-start" && prompt.includes("slow") ? 800 : 0;
+	        if (turnStartDelayMs > 0) {
 	          const responseId = message.id;
-	          setTimeout(() => send({ id: responseId, result: { turn: buildTurn(turnId) } }), 500);
+	          setTimeout(() => send({ id: responseId, result: { turn: buildTurn(turnId) } }), turnStartDelayMs);
 	        } else {
 	          send({ id: message.id, result: { turn: buildTurn(turnId) } });
 	        }
@@ -659,7 +661,13 @@ rl.on("line", (line) => {
         ];
 
 	        if (BEHAVIOR === "interruptible-slow-task" || BEHAVIOR === "slow-turn-start") {
-	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          const sendStarted = () => send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          if (BEHAVIOR === "slow-turn-start") {
+	            // Arrives after the (possibly delayed) turn/start response.
+	            setTimeout(sendStarted, turnStartDelayMs + 100);
+	          } else {
+	            sendStarted();
+	          }
 	          const timer = setTimeout(() => {
 	            if (!interruptibleTurns.has(turnId)) {
 	              return;
@@ -698,6 +706,7 @@ rl.on("line", (line) => {
 	          threadId: message.params.threadId,
 	          turnId: message.params.turnId
 	        };
+	        state.interrupts = [...(state.interrupts || []), state.lastInterrupt];
 	        saveState(state);
 	        const pending = interruptibleTurns.get(message.params.turnId);
 	        if (pending) {
