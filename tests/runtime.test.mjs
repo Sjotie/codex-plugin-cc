@@ -3388,6 +3388,30 @@ test("a late turn/completed of a replaced turn does not end the new owner's stre
   assert.equal(response.error?.code, -32001, "the new owner must still hold the stream");
 });
 
+test("an old turn completing before the new owner's turn/started does not end the new owner's stream", async (t) => {
+  const { repo, brokerSession } = await startFakeBroker(t, { orphanGraceMs: 60000 });
+  const leaver = connectBrokerClient(brokerSession.endpoint);
+  const threadId = (await leaver.request(1, "thread/start", { cwd: repo })).result.thread.id;
+  const oldTurnId = (await leaver.request(2, "turn/start", { threadId, input: [{ type: "text", text: "old" }] })).result.turn.id;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  leaver.socket.destroy();
+
+  // The fixture sends the new turn's turn/started 100 ms after its turn/start
+  // answer; the old turn's completion lands inside that window.
+  const owner = connectBrokerClient(brokerSession.endpoint);
+  t.after(() => owner.socket.destroy());
+  await waitFor(async () => {
+    const response = await owner.request(`start-${Date.now()}`, "turn/start", { threadId, input: [{ type: "text", text: "new" }] });
+    return response.result ? response : null;
+  });
+  await owner.request(3, "turn/interrupt", { threadId, turnId: oldTurnId });
+
+  const other = connectBrokerClient(brokerSession.endpoint);
+  t.after(() => other.socket.destroy());
+  const response = await other.request(1, "thread/start", { cwd: repo });
+  assert.equal(response.error?.code, -32001, "the new owner must still hold the stream");
+});
+
 test("broker keeps serving when the client leaves after the final answer but before turn/completed", async (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

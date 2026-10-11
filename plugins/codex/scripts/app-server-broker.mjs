@@ -83,6 +83,9 @@ async function main() {
   let activeRequestSocket = null;
   let activeStreamSocket = null;
   let activeStreamThreadIds = null;
+  // The turn the stream was started for (turn/start, review/start); unknown
+  // for thread/compact/start, which then ends on any turn/completed of its threads.
+  let activeStreamTurnId = null;
   let activeRequestThreadId = null;
   const sockets = new Set();
   const idleTimeoutMs = resolveTimeoutMs(process.env[BROKER_IDLE_TIMEOUT_ENV], DEFAULT_BROKER_IDLE_TIMEOUT_MS);
@@ -124,6 +127,7 @@ async function main() {
       const threadIds = activeStreamThreadIds;
       activeStreamSocket = null;
       activeStreamThreadIds = null;
+      activeStreamTurnId = null;
       abandonStream(threadIds);
     }
   }
@@ -185,8 +189,22 @@ async function main() {
     return true;
   }
 
+  function isForeignCompletion(message) {
+    const threadId = message.params?.threadId;
+    const turnId = message.params?.turn?.id;
+    return Boolean(
+      message.method === "turn/completed" &&
+        activeStreamTurnId &&
+        turnId &&
+        turnId !== activeStreamTurnId &&
+        activeStreamThreadIds?.has(threadId)
+    );
+  }
+
   function routeNotification(message) {
-    if (!trackTurn(message)) {
+    // A turn/completed on the stream's threads for another turn (an orphan
+    // finishing after this client took the thread over) is not this stream's.
+    if (!trackTurn(message) || isForeignCompletion(message)) {
       return;
     }
     const target = activeRequestSocket ?? activeStreamSocket;
@@ -199,6 +217,7 @@ async function main() {
       if (!threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
         activeStreamSocket = null;
         activeStreamThreadIds = null;
+        activeStreamTurnId = null;
         if (activeRequestSocket === target) {
           activeRequestSocket = null;
         }
@@ -359,6 +378,7 @@ async function main() {
           } else if (isStreaming) {
             activeStreamSocket = socket;
             activeStreamThreadIds = buildStreamThreadIds(message.method, message.params ?? {}, result);
+            activeStreamTurnId = result?.turn?.id ?? null;
           }
           if (activeRequestSocket === socket) {
             activeRequestSocket = null;
