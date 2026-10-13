@@ -1017,7 +1017,7 @@ test("task --resume-last after session end picks the task that was still running
   assert.equal(payload.candidate.threadId, "thr_running");
 });
 
-test("session end keeps a result the worker already published and cancels a queued job in its job file", () => {
+test("session end keeps what the worker already published and cancels a queued job in its job file", () => {
   const repo = makeTempDir();
   initGitRepo(repo);
   const stateDir = resolveStateDir(repo);
@@ -1034,6 +1034,9 @@ test("session end keeps a result the worker already published and cancels a queu
   // A queued job has no worker pid yet; its worker reads the job file when it starts.
   const queuedFile = path.join(jobsDir, "task-queued.json");
   fs.writeFileSync(queuedFile, JSON.stringify({ id: "task-queued", status: "queued" }), "utf8");
+  // The worker published its thread id to the index but not yet to its job file.
+  const startingFile = path.join(jobsDir, "task-starting.json");
+  fs.writeFileSync(startingFile, JSON.stringify({ id: "task-starting", status: "running" }), "utf8");
 
   const job = (id, status) => ({
     id,
@@ -1045,7 +1048,7 @@ test("session end keeps a result the worker already published and cancels a queu
   });
   fs.writeFileSync(
     path.join(stateDir, "state.json"),
-    `${JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs: [job("task-finished", "running"), job("task-queued", "queued")] }, null, 2)}\n`,
+    `${JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs: [job("task-finished", "running"), job("task-queued", "queued"), { ...job("task-starting", "running"), threadId: "thr_new" }] }, null, 2)}\n`,
     "utf8"
   );
 
@@ -1068,6 +1071,9 @@ test("session end keeps a result the worker already published and cancels a queu
   assert.equal(byId["task-finished"].status, "completed");
   assert.equal(byId["task-finished"].threadId, "thr_done");
   assert.equal(byId["task-queued"].status, "cancelled");
+  assert.equal(byId["task-starting"].status, "cancelled");
+  assert.equal(byId["task-starting"].threadId, "thr_new");
+  assert.equal(JSON.parse(fs.readFileSync(startingFile, "utf8")).threadId, "thr_new");
 });
 
 test("task --resume-last ignores running tasks from other Claude sessions", () => {

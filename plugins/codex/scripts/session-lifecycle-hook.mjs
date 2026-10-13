@@ -45,19 +45,22 @@ const SESSION_ENDED_MESSAGE = "Stopped because the Claude session ended.";
 // Records an ending job as cancelled in its job file and the index together,
 // under the state lock, the same way workers publish their own results. A job
 // whose worker already wrote a terminal result keeps it. Returns the pid to stop.
-function endSessionJob(workspaceRoot, job) {
+function endSessionJob(workspaceRoot, jobId) {
   let pid = null;
-  updateJobRecord(workspaceRoot, job.id, (stored) => {
+  updateJobRecord(workspaceRoot, jobId, (stored) => {
     if (isTerminalJobStatus(stored?.status)) {
       return stored;
     }
-    pid = stored?.pid ?? job.pid ?? null;
+    // Read the index under the same lock: a worker may have published its
+    // thread id there after the snapshot and before writing its job file.
+    const indexed = loadState(workspaceRoot).jobs.find((job) => job.id === jobId) ?? {};
+    pid = stored?.pid ?? indexed.pid ?? null;
     const endedAt = new Date().toISOString();
     return {
-      ...job,
+      ...indexed,
       ...stored,
-      threadId: stored?.threadId ?? job.threadId ?? null,
-      turnId: stored?.turnId ?? job.turnId ?? null,
+      threadId: indexed.threadId ?? stored?.threadId ?? null,
+      turnId: indexed.turnId ?? stored?.turnId ?? null,
       status: "cancelled",
       phase: "cancelled",
       pid: null,
@@ -89,7 +92,7 @@ function cleanupSessionJobs(cwd, sessionId) {
   for (const job of endingJobs) {
     let pid = job.pid ?? null;
     try {
-      pid = endSessionJob(workspaceRoot, job);
+      pid = endSessionJob(workspaceRoot, job.id);
     } catch {
       // An unreadable job file must not keep the worker alive or stop the cleanup.
     }
