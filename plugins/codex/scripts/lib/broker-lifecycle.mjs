@@ -277,7 +277,7 @@ export async function ensureBrokerSession(cwd, options = {}) {
       sessionDir,
       pid: child.pid ?? null,
       // An exited child's pid may already belong to another process: only kill a live one.
-      killProcess: options.killProcess ?? (childExited ? null : terminateProcessTree)
+      killProcess: childExited ? null : (options.killProcess ?? terminateProcessTree)
     });
     return null;
   }
