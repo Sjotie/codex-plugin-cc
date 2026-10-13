@@ -6,8 +6,7 @@ import {
   resolveJobFile,
   resolveJobLogFile,
   updateJobRecord,
-  upsertJob,
-  writeJobFile
+  upsertJob
 } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
@@ -106,17 +105,17 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       return;
     }
 
-    upsertJob(workspaceRoot, patch);
-
-    const jobFile = resolveJobFile(workspaceRoot, jobId);
-    if (!fs.existsSync(jobFile)) {
-      return;
-    }
-
-    const storedJob = readJobFile(jobFile);
-    writeJobFile(workspaceRoot, jobId, {
-      ...storedJob,
-      ...patch
+    // Write the job file and the index in one locked transaction: an
+    // unlocked rewrite can overwrite a concurrent terminal or cancellation
+    // update with the stale copy it read before that update landed.
+    updateJobRecord(workspaceRoot, jobId, (existing) => {
+      if (!existing) {
+        return null;
+      }
+      return {
+        ...existing,
+        ...patch
+      };
     });
   };
 }

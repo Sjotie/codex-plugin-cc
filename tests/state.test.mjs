@@ -138,6 +138,79 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
   );
 });
 
+test("saveState keeps the newest resumable task per session and active jobs when pruning", () => {
+  const workspace = makeTempDir();
+  const stateFile = resolveStateFile(workspace);
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+
+  const base = Date.UTC(2026, 0, 1, 0, 0, 0);
+  const at = (minutes) => new Date(base + minutes * 60_000).toISOString();
+  const makeJob = (job) => {
+    const logFile = resolveJobLogFile(workspace, job.id);
+    const jobFile = resolveJobFile(workspace, job.id);
+    fs.writeFileSync(logFile, `log ${job.id}\n`, "utf8");
+    fs.writeFileSync(jobFile, `${JSON.stringify({ id: job.id, status: job.status })}\n`, "utf8");
+    return { createdAt: job.updatedAt, logFile, ...job };
+  };
+
+  // Oldest: an even older resumable task from the stale session (only the
+  // newest resumable task per session is protected), then the stale
+  // session's newest resumable task and an active job from another session.
+  const jobs = [
+    makeJob({
+      id: "task-stale-older",
+      jobClass: "task",
+      status: "completed",
+      sessionId: "sess-stale",
+      threadId: "thr_stale_older",
+      updatedAt: at(0)
+    }),
+    makeJob({
+      id: "task-stale",
+      jobClass: "task",
+      status: "completed",
+      sessionId: "sess-stale",
+      threadId: "thr_stale",
+      updatedAt: at(1)
+    }),
+    makeJob({
+      id: "task-active",
+      jobClass: "task",
+      status: "running",
+      sessionId: "sess-active",
+      updatedAt: at(2)
+    }),
+    // 51 newer jobs from other sessions fill the cap on their own.
+    ...Array.from({ length: 51 }, (_, index) =>
+      makeJob({
+        id: `job-new-${index}`,
+        jobClass: "task",
+        status: "completed",
+        sessionId: "sess-busy",
+        updatedAt: at(10 + index)
+      })
+    )
+  ];
+
+  fs.writeFileSync(
+    stateFile,
+    `${JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs }, null, 2)}\n`,
+    "utf8"
+  );
+
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs });
+
+  const savedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const savedIds = new Set(savedState.jobs.map((job) => job.id));
+  assert.equal(savedState.jobs.length, 50, "the overall cap still applies");
+  assert.equal(savedIds.has("task-stale"), true, "newest resumable task per session survives");
+  assert.equal(savedIds.has("task-active"), true, "an active job survives");
+  assert.equal(savedIds.has("task-stale-older"), false, "only the newest resumable task per session is kept");
+  assert.equal(fs.existsSync(resolveJobFile(workspace, "task-stale")), true);
+  assert.equal(fs.existsSync(resolveJobFile(workspace, "task-active")), true);
+  assert.equal(fs.existsSync(resolveJobFile(workspace, "task-stale-older")), false);
+});
+
 test("writeJobFile writes atomically and leaves no temp residue", () => {
   const workspace = makeTempDir();
   const jobId = "task-atomic-write";
