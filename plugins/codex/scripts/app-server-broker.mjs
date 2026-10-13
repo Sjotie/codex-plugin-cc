@@ -384,6 +384,12 @@ async function main() {
             activeRequestSocket = null;
           }
         } catch (error) {
+          // A lost child connection is transport failure, not an RPC refusal.
+          // Keep that distinction when it happens before the start response.
+          if (appClient.exitResolved && error.data === undefined && error.rpcCode === undefined) {
+            socket.destroy();
+            continue;
+          }
           send(socket, {
             id: message.id,
             error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)

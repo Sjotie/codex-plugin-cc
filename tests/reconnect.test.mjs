@@ -9,11 +9,17 @@ import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/codex-companion.mjs", import.meta.url));
 const LIFECYCLE = new URL("../plugins/codex/scripts/lib/broker-lifecycle.mjs", import.meta.url).href;
 
-function disconnectedTask(t, behavior, args = []) {
+function disconnectedTask(t, behavior, args = [], command = "task") {
   const repo = makeTempDir("codex-reconnect-repo-");
   const bin = makeTempDir("codex-reconnect-bin-");
   const data = makeTempDir("codex-reconnect-data-");
   initGitRepo(repo);
+  if (command === "adversarial-review") {
+    fs.writeFileSync(path.join(repo, "README.md"), "baseline\n");
+    run("git", ["add", "README.md"], { cwd: repo });
+    run("git", ["commit", "-m", "fixture baseline"], { cwd: repo });
+    fs.appendFileSync(path.join(repo, "README.md"), "changed\n");
+  }
   installFakeCodex(bin, behavior);
   const env = { ...buildEnv(bin), CLAUDE_PLUGIN_DATA: data, CODEX_HOME: data };
   for (const key of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_APP_SERVER_ENDPOINT",
@@ -28,7 +34,8 @@ function disconnectedTask(t, behavior, args = []) {
   const broker = JSON.parse(boot.stdout);
   assert.ok(broker?.endpoint, "fixture broker must be ready before task starts");
   env.CODEX_COMPANION_APP_SERVER_ENDPOINT = broker.endpoint;
-  const result = run("node", [SCRIPT, "task", ...args, "--model", "gpt-5.4", "--effort", "high", "inspect this repository"], { cwd: repo, env });
+  const settings = command === "task" ? ["--effort", "high"] : [];
+  const result = run("node", [SCRIPT, command, ...args, "--model", "gpt-5.4", ...settings, "inspect this repository"], { cwd: repo, env });
   const brokerLog = fs.readFileSync(broker.logFile, "utf8");
   t.after(() => fs.rmSync(broker.sessionDir, { recursive: true, force: true }));
   return { result, brokerLog, state: JSON.parse(fs.readFileSync(path.join(bin, "fake-codex-state.json"), "utf8")) };
@@ -80,4 +87,19 @@ test("background worker completes the same tracked job after reconnection", (t) 
   assert.equal(state.turnStarts, 2);
   assert.equal(state.threads.length, 1);
   assert.match(result.stdout, /completed|result/i);
+});
+
+test("lost turn/start response still recovers the notified turn without replay", (t) => {
+  const { result, state } = disconnectedTask(t, "disconnect-task-lost-ack");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(state.turnStarts, 1);
+  assert.match(result.stdout, /Recovered original final answer/);
+});
+
+test("busy turn/start fallback creates a fresh ephemeral review thread", (t) => {
+  const { result, state } = disconnectedTask(t, "busy-turn-once", [], "adversarial-review");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(state.threads.length, 2);
+  assert.ok(state.threads.every((thread) => thread.ephemeral));
+  assert.equal(state.lastThreadResume, undefined);
 });

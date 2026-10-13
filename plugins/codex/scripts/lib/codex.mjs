@@ -627,6 +627,9 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   const previousHandler = client.notificationHandler;
 
   client.setNotificationHandler((message) => {
+    if (message.method === "turn/started" && message.params.threadId === threadId) {
+      options.onTurnStarted?.(message.params.turn.id);
+    }
     if (!state.turnId) {
       state.bufferedNotifications.push(message);
       return;
@@ -1179,8 +1182,12 @@ export async function runAppServerTurn(cwd, options = {}) {
   let threadId = options.resumeThreadId ?? null;
   let requestedTurn = false;
   let previousTurnId = null;
+  let recoveringDisconnect = false;
   return withAppServer(cwd, async (client) => {
-    const recovering = requestedTurn;
+    // Busy/preflight fallback starts afresh. Only a lost connection may carry
+    // a saved thread into the new server; ephemeral threads cannot be resumed.
+    if (!recoveringDisconnect) threadId = options.resumeThreadId ?? null;
+    const recovering = recoveringDisconnect;
     let recoveredTurn = null;
     const model = await resolveCompatibleRunModel(client, options.model, options.onProgress);
 
@@ -1233,6 +1240,7 @@ export async function runAppServerTurn(cwd, options = {}) {
       },
       {
         onProgress: options.onProgress,
+        onTurnStarted: (turnId) => { previousTurnId = turnId; },
         onResponse(response, state) {
           if (recoveredTurn) {
             for (const item of response.turn.items ?? []) recordItem(state, item, "completed", threadId);
@@ -1255,9 +1263,12 @@ export async function runAppServerTurn(cwd, options = {}) {
       commandExecutions: turnState.commandExecutions
     };
   }, {
-    recoverDisconnectedTurn: () => requestedTurn && Boolean(threadId) &&
-      Boolean(options.persistThread || options.resumeThreadId) &&
-      (options.sandbox ?? "read-only") === "read-only"
+    recoverDisconnectedTurn: () => {
+      recoveringDisconnect = requestedTurn && Boolean(threadId) &&
+        Boolean(options.persistThread || options.resumeThreadId) &&
+        (options.sandbox ?? "read-only") === "read-only";
+      return recoveringDisconnect;
+    }
   });
 }
 

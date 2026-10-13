@@ -401,6 +401,9 @@ rl.on("line", (line) => {
       }
 
       case "thread/resume": {
+        if (BEHAVIOR === "busy-turn-once") {
+          throw new Error("ephemeral thread cannot be resumed by a different app-server");
+        }
         if (BEHAVIOR === "disconnect-task-locked" && state.turnStarts) {
           throw new Error("thread already has an active writer");
         }
@@ -506,6 +509,12 @@ rl.on("line", (line) => {
       }
 
 	      case "turn/start": {
+	        if (BEHAVIOR === "busy-turn-once" && !state.busyRejected) {
+	          state.busyRejected = true;
+	          saveState(state);
+	          send({ id: message.id, error: { code: -32001, message: "Shared Codex broker is busy." } });
+	          break;
+	        }
 	        rejectUnavailableChatGptModel(message.params.model);
 	        const thread = ensureThread(state, message.params.threadId);
 	        const prompt = (message.params.input || [])
@@ -524,14 +533,14 @@ rl.on("line", (line) => {
 	        saveState(state);
 	        if (BEHAVIOR.startsWith("disconnect-task-")) {
 	          state.turnStarts = (state.turnStarts || 0) + 1;
-	          if (BEHAVIOR === "disconnect-task-completed") {
+	          if (BEHAVIOR === "disconnect-task-completed" || BEHAVIOR === "disconnect-task-lost-ack") {
 	            thread.turns = [{ ...buildTurn(turnId, "completed"), items: [
 	              { type: "agentMessage", id: "final_" + turnId, phase: "final_answer", text: "Recovered original final answer." }
 	            ] }];
 	          }
 	          saveState(state);
 	          if (state.turnStarts === 1 || BEHAVIOR === "disconnect-task-always") {
-	            send({ id: message.id, result: { turn: buildTurn(turnId) } });
+	            if (BEHAVIOR !== "disconnect-task-lost-ack") send({ id: message.id, result: { turn: buildTurn(turnId) } });
 	            send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
 	            setTimeout(() => process.exit(0), 100);
 	            break;
