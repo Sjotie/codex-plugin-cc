@@ -6,6 +6,21 @@ export function parseArgs(argv, config = {}) {
   const positionals = [];
   let passthrough = false;
 
+  // A dashed, option-shaped token nobody declared is a typo, not prompt text. Commands
+  // that take a free-form prompt ("leading") only reject it before the first positional,
+  // because after that dashed words belong to the prompt (e.g. "fix --foo"); the rest
+  // ("always") reject it anywhere. Text like "- item", "-1 handling" or "--- a/f" is not
+  // option-shaped and always stays a positional.
+  const rejectUnknownOption = (token) => {
+    const mode = config.rejectUnknownOptions;
+    if (!mode || !/^--?[A-Za-z][A-Za-z0-9-]*(=|$)/.test(token)) {
+      return;
+    }
+    if (mode === "always" || positionals.length === 0) {
+      throw new Error(`Unknown option ${token.split("=")[0]}. Run the subcommand with --help for usage.`);
+    }
+  };
+
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
 
@@ -45,6 +60,7 @@ export function parseArgs(argv, config = {}) {
         continue;
       }
 
+      rejectUnknownOption(token);
       positionals.push(token);
       continue;
     }
@@ -67,6 +83,7 @@ export function parseArgs(argv, config = {}) {
       continue;
     }
 
+    rejectUnknownOption(token);
     positionals.push(token);
   }
 

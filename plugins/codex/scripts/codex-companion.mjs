@@ -149,6 +149,7 @@ function normalizeArgv(argv) {
 
 function parseCommandInput(argv, config = {}) {
   return parseArgs(normalizeArgv(argv), {
+    rejectUnknownOptions: "always",
     ...config,
     aliasMap: {
       C: "cwd",
@@ -909,6 +910,7 @@ async function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
+    rejectUnknownOptions: "leading",
     valueOptions: ["base", "scope", "model", "cwd"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
@@ -959,6 +961,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
+    rejectUnknownOptions: "leading",
     valueOptions: ["model", "effort", "cwd", "prompt-file", "resume-thread"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "wait"],
     aliasMap: {

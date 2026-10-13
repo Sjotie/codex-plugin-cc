@@ -119,6 +119,35 @@ test("<subcommand> --help prints usage and never starts a Codex task", () => {
   assert.equal(state.lastTurnStart ?? null, null);
 });
 
+test("an unknown option before the prompt fails with a usage hint and never starts a Codex task", () => {
+  const binDir = makeTempDir();
+  const repo = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+
+  for (const args of [["task", "--bogus"], ["task", "--bogus", "do the thing"], ["task", "-z", "do the thing"], ["review", "--bogus"], ["status", "--bogus"], ["cancel", "--bogus"], ["status", "job-1", "--jsno"], ["cancel", "job-1", "--jsno"]]) {
+    const result = run("node", [SCRIPT, ...args], { cwd: repo, env: buildEnv(binDir) });
+    assert.notEqual(result.status, 0, `${args.join(" ")} should fail`);
+    assert.match(result.stderr, /Unknown option (--bogus|-z|--jsno)\. Run the subcommand with --help/);
+  }
+  const state = fs.existsSync(fakeStatePath) ? JSON.parse(fs.readFileSync(fakeStatePath, "utf8")) : {};
+  assert.equal(state.lastTurnStart ?? null, null);
+
+  // Option-shaped typos are rejected; prompts that merely start with a dash are not.
+  for (const prompt of ["- fix the null deref", "-1 off-by-one", "--- a/foo.js"]) {
+    const dashed = run("node", [SCRIPT, "task", "--write", prompt], { cwd: repo, env: buildEnv(binDir) });
+    assert.equal(dashed.status, 0, `${prompt}: ${dashed.stderr}`);
+    assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastTurnStart.prompt.includes(prompt), true);
+  }
+
+  // Control: dashed words after the prompt starts stay prompt text, and a turn does start.
+  const ok = run("node", [SCRIPT, "task", "fix the --bogus handling"], { cwd: repo, env: buildEnv(binDir) });
+  assert.equal(ok.status, 0, ok.stderr);
+  const after = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.match(after.lastTurnStart.prompt, /fix the --bogus handling/);
+});
+
 test("setup is ready without npm when Codex is already installed and authenticated", () => {
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -2901,21 +2930,7 @@ test("ending another session preserves an active brokered task", async (t) => {
   assert.equal(launched.status, 0, launched.stderr);
   const { jobId } = JSON.parse(launched.stdout);
   const stateDir = resolveStateDir(repo);
-  const runningJob = await waitFor(() => {
-    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-    const job = state.jobs.find((candidate) => candidate.id === jobId);
-    return job?.status === "running" && job.threadId && job.turnId ? job : null;
-  });
-  const brokerBefore = loadBrokerSession(repo);
-  assert.ok(brokerBefore?.pid);
-
-  t.after(() => {
-    for (const pid of [runningJob.pid, brokerBefore.pid]) {
-      try {
-        terminateProcessTree(pid);
-      } catch {}
-    }
-  });
+  const { runningJob, brokerSession: brokerBefore } = await awaitBrokeredRunningJob(t, repo, jobId);
 
   const otherSessionEnd = run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
@@ -3225,21 +3240,7 @@ test("broker disconnect marks a background write task failed without replay", as
   assert.equal(launched.status, 0, launched.stderr);
   const { jobId } = JSON.parse(launched.stdout);
   const stateDir = resolveStateDir(repo);
-  const runningJob = await waitFor(() => {
-    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-    const job = state.jobs.find((candidate) => candidate.id === jobId);
-    return job?.status === "running" && job.threadId && job.turnId ? job : null;
-  });
-  const brokerSession = loadBrokerSession(repo);
-  assert.ok(brokerSession?.pid);
-
-  t.after(() => {
-    for (const pid of [runningJob.pid, brokerSession.pid]) {
-      try {
-        terminateProcessTree(pid);
-      } catch {}
-    }
-  });
+  const { runningJob, brokerSession } = await awaitBrokeredRunningJob(t, repo, jobId);
 
   terminateProcessTree(brokerSession.pid);
 
@@ -3252,6 +3253,51 @@ test("broker disconnect marks a background write task failed without replay", as
   assert.match(failedJob.errorMessage, /connection closed/i);
   assert.equal(failedJob.pid, null);
 });
+
+// Brokered fixtures need three things before their first assert: a cleanup that is
+// registered before anything can fail (a failed start must not leak its broker and
+// worker), the job actually running, and proof that the shared broker, not the
+// direct fallback, serves it: broker.json names a live pid and its socket exists
+// (probing with a connection would itself touch the broker's client bookkeeping). Each wait ends as soon as it holds, so a loaded machine only costs time.
+async function awaitBrokeredRunningJob(t, repo, jobId) {
+  const stateDir = resolveStateDir(repo);
+  const readJob = () => {
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+      return state.jobs.find((candidate) => candidate.id === jobId) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  t.after(() => {
+    for (const pid of [readJob()?.pid, loadBrokerSession(repo)?.pid]) {
+      if (!pid) {
+        continue;
+      }
+      try {
+        terminateProcessTree(pid);
+      } catch {}
+    }
+  });
+
+  const runningJob = await waitFor(() => {
+    const job = readJob();
+    return job?.status === "running" && job.threadId && job.turnId ? job : null;
+  });
+  const brokerSession = await waitFor(async () => {
+    const session = loadBrokerSession(repo);
+    if (!session?.pid || !session.endpoint) {
+      return null;
+    }
+    try {
+      process.kill(session.pid, 0);
+    } catch {
+      return null;
+    }
+    return fs.existsSync(parseBrokerEndpoint(session.endpoint).path) ? session : null;
+  });
+  return { runningJob, brokerSession };
+}
 
 function waitForProcessExit(pid, options) {
   return waitFor(() => {
@@ -3282,21 +3328,7 @@ test("broker interrupts the turn of a worker killed mid-stream and retires witho
   });
   assert.equal(launched.status, 0, launched.stderr);
   const { jobId } = JSON.parse(launched.stdout);
-  const stateDir = resolveStateDir(repo);
-  const runningJob = await waitFor(() => {
-    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-    const job = state.jobs.find((candidate) => candidate.id === jobId);
-    return job?.status === "running" && job.threadId && job.turnId ? job : null;
-  });
-  const brokerSession = loadBrokerSession(repo);
-  assert.ok(brokerSession?.pid);
-  t.after(() => {
-    for (const pid of [runningJob.pid, brokerSession.pid]) {
-      try {
-        terminateProcessTree(pid);
-      } catch {}
-    }
-  });
+  const { runningJob, brokerSession } = await awaitBrokeredRunningJob(t, repo, jobId);
 
   // A host restart or SessionEnd cleanup kills the worker, not the shared broker.
   terminateProcessTree(runningJob.pid);
