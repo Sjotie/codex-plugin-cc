@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { isWaitingJobStatus } from "./lib/job-status.mjs";
+import { isTerminalJobStatus, isWaitingJobStatus } from "./lib/job-status.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
 import {
@@ -14,7 +14,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, updateState } from "./lib/state.mjs";
+import { loadState, readJobFile, resolveJobFile, resolveStateFile, updateState, writeJobFile } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -40,6 +40,34 @@ function appendEnvVar(name, value) {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
+const SESSION_ENDED_MESSAGE = "Stopped because the Claude session ended.";
+
+// The worker of an ending job may already have written its terminal result to
+// the job file; otherwise the job is stopped here and recorded as cancelled.
+function endedJobRecord(workspaceRoot, job, endedAt) {
+  let storedJob = {};
+  try {
+    storedJob = readJobFile(resolveJobFile(workspaceRoot, job.id));
+  } catch {
+    // An absent or unreadable job file leaves the index entry as the only record.
+  }
+  if (isTerminalJobStatus(storedJob.status)) {
+    return { ...job, ...storedJob };
+  }
+  return {
+    ...storedJob,
+    ...job,
+    threadId: job.threadId ?? storedJob.threadId ?? null,
+    turnId: job.turnId ?? storedJob.turnId ?? null,
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    completedAt: endedAt,
+    updatedAt: endedAt,
+    errorMessage: SESSION_ENDED_MESSAGE
+  };
+}
+
 function cleanupSessionJobs(cwd, sessionId) {
   if (!cwd || !sessionId) {
     return;
@@ -51,17 +79,16 @@ function cleanupSessionJobs(cwd, sessionId) {
     return;
   }
 
-  // Only the session's queued and running jobs end with it. Finished jobs stay:
-  // a resumed session (same session id, e.g. after a host restart) still needs
-  // their thread ids for --resume-last, and pruneJobs caps the history anyway.
+  // The session's queued and running jobs end with it, but every job keeps its
+  // record: a session resumed under the same id (e.g. after a host restart)
+  // needs the thread ids for --resume-last (#1576).
   const isEndingJob = (job) => job.sessionId === sessionId && isWaitingJobStatus(job.status);
-  const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter(isEndingJob);
-  if (removedJobs.length === 0) {
+  const endingJobs = loadState(workspaceRoot).jobs.filter(isEndingJob);
+  if (endingJobs.length === 0) {
     return;
   }
 
-  for (const job of removedJobs) {
+  for (const job of endingJobs) {
     try {
       terminateProcessTree(job.pid ?? Number.NaN);
     } catch {
@@ -72,9 +99,28 @@ function cleanupSessionJobs(cwd, sessionId) {
   // Use updateState so the read-modify-write is atomic under the state lock.
   // This prevents a concurrent upsertJob from being silently dropped (and its
   // artifacts deleted) when the stale snapshot loaded above is saved back.
+  const endedAt = new Date().toISOString();
+  const endedJobs = [];
   updateState(workspaceRoot, (currentState) => {
-    currentState.jobs = currentState.jobs.filter((job) => !isEndingJob(job));
+    currentState.jobs = currentState.jobs.map((job) => {
+      if (!isEndingJob(job)) {
+        return job;
+      }
+      const endedJob = endedJobRecord(workspaceRoot, job, endedAt);
+      endedJobs.push(endedJob);
+      return endedJob;
+    });
   });
+  for (const job of endedJobs) {
+    if (job.errorMessage !== SESSION_ENDED_MESSAGE) {
+      continue;
+    }
+    try {
+      writeJobFile(workspaceRoot, job.id, job);
+    } catch {
+      // The index entry above already records the cancellation.
+    }
+  }
 }
 
 function hasActiveJobFromAnotherSession(cwd, sessionId) {
@@ -86,7 +132,7 @@ function hasActiveJobFromAnotherSession(cwd, sessionId) {
 
   return loadState(workspaceRoot).jobs.some(
     (job) =>
-      (job.status === "queued" || job.status === "running") &&
+      isWaitingJobStatus(job.status) &&
       (!sessionId || !job.sessionId || job.sessionId !== sessionId)
   );
 }

@@ -1,13 +1,15 @@
 # Changelog
 
-## 1.0.7-sjotie.14 (fork)
+## 1.0.7-sjotie.15 (fork)
 
-- SessionEnd no longer forgets a session's finished tasks. It used to drop
-  every job of the ending session, so a session resumed under the same id
-  (Factory host restart, `claude --resume`) got "No previous Codex task
-  thread was found for this repository." on its next `--resume-last`
-  (Homebase #1576). SessionEnd now only stops and drops the session's queued
-  and running jobs; finished ones stay until the 50-job prune
+- SessionEnd no longer forgets a session's tasks. It used to drop every job of
+  the ending session, so a session resumed under the same id (Factory host
+  restart, `claude --resume`) got "No previous Codex task thread was found for
+  this repository." on its next `--resume-last` (Homebase #1576). SessionEnd
+  still stops the session's queued and running jobs, but now records them as
+  cancelled ("Stopped because the Claude session ended.") with their thread
+  id, and keeps finished jobs until the 50-job prune. `--resume-last` after a
+  resume continues the thread that was last in use, not an older one
 
 ## 1.0.7-sjotie.13 (fork)
 

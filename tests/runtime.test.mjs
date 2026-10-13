@@ -936,7 +936,8 @@ test("task --resume-last still finds the thread after the session ends and is re
   assert.equal(fakeState.lastTurnStart.threadId, "thr_1");
   assert.equal(fakeState.lastTurnStart.prompt, "follow up");
 
-  // A session that never ran a task still has no thread to resume, ended or not.
+  // The kept jobs stay scoped to their session: one that never ran a task still
+  // gets the clear error instead of sess-current's thread.
   const otherEnded = endSession("sess-other");
   assert.equal(otherEnded.status, 0, otherEnded.stderr);
   const missing = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
@@ -945,6 +946,75 @@ test("task --resume-last still finds the thread after the session ends and is re
   });
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /No previous Codex task thread was found for this repository\./);
+});
+
+test("task --resume-last after session end picks the task that was still running, not an older one", async (t) => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    cwd: repo,
+    detached: true,
+    stdio: "ignore"
+  });
+  sleeper.unref();
+  t.after(() => {
+    try {
+      process.kill(sleeper.pid, "SIGKILL");
+    } catch {
+      // Already stopped by the hook.
+    }
+  });
+
+  const stateDir = resolveStateDir(repo);
+  fs.mkdirSync(path.join(stateDir, "jobs"), { recursive: true });
+  const task = (id, status, threadId, createdAt, extra = {}) => ({
+    id,
+    kind: "task",
+    jobClass: "task",
+    title: "Codex Task",
+    status,
+    threadId,
+    sessionId: "sess-current",
+    createdAt,
+    updatedAt: createdAt,
+    ...extra
+  });
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          task("task-older", "completed", "thr_older", "2026-10-13T07:00:00.000Z"),
+          task("task-running", "running", "thr_running", "2026-10-13T08:00:00.000Z", { pid: sleeper.pid })
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const env = { ...process.env, CODEX_COMPANION_SESSION_ID: "sess-current" };
+  const ended = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env,
+    input: JSON.stringify({ hook_event_name: "SessionEnd", session_id: "sess-current", cwd: repo })
+  });
+  assert.equal(ended.status, 0, ended.stderr);
+
+  const candidate = run("node", [SCRIPT, "task-resume-candidate", "--json"], { cwd: repo, env });
+  assert.equal(candidate.status, 0, candidate.stderr);
+  const payload = JSON.parse(candidate.stdout);
+  assert.equal(payload.available, true);
+  assert.equal(payload.candidate.id, "task-running");
+  assert.equal(payload.candidate.status, "cancelled");
+  assert.equal(payload.candidate.threadId, "thr_running");
 });
 
 test("task --resume-last ignores running tasks from other Claude sessions", () => {
@@ -3551,7 +3621,7 @@ test("broker keeps serving when the client leaves after the final answer but bef
   process.kill(brokerSession.pid, 0);
 });
 
-test("session end stops the ending session's running jobs and keeps its finished ones", async (t) => {
+test("session end stops the ending session's running jobs and keeps every job record", async (t) => {
   const repo = makeTempDir();
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
@@ -3658,6 +3728,8 @@ test("session end stops the ending session's running jobs and keeps its finished
     [
       path.basename(completedJobFile),
       path.basename(completedLog),
+      path.basename(runningJobFile),
+      path.basename(runningLog),
       path.basename(otherJobFile),
       path.basename(otherSessionLog)
     ].sort()
@@ -3673,9 +3745,14 @@ test("session end stops the ending session's running jobs and keeps its finished
   });
 
   const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-  assert.deepEqual(state.jobs.map((job) => job.id).sort(), ["review-completed", "review-other"]);
+  assert.deepEqual(state.jobs.map((job) => job.id).sort(), ["review-completed", "review-other", "review-running"]);
   const otherJob = state.jobs.find((job) => job.id === "review-other");
   assert.equal(otherJob.logFile, otherSessionLog);
+  const stoppedJob = state.jobs.find((job) => job.id === "review-running");
+  assert.equal(stoppedJob.status, "cancelled");
+  assert.equal(stoppedJob.pid, null);
+  assert.equal(stoppedJob.errorMessage, "Stopped because the Claude session ended.");
+  assert.equal(JSON.parse(fs.readFileSync(runningJobFile, "utf8")).status, "cancelled");
 });
 
 test("stop hook runs a stop-time review task and blocks on findings when the review gate is enabled", () => {
