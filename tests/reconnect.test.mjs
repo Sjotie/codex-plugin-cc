@@ -7,6 +7,7 @@ import { installFakeCodex, buildEnv } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
 const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/codex-companion.mjs", import.meta.url));
+const LIFECYCLE = new URL("../plugins/codex/scripts/lib/broker-lifecycle.mjs", import.meta.url).href;
 
 function disconnectedTask(t, behavior, args = []) {
   const repo = makeTempDir("codex-reconnect-repo-");
@@ -18,10 +19,16 @@ function disconnectedTask(t, behavior, args = []) {
   for (const key of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_APP_SERVER_ENDPOINT",
     "CODEX_COMPANION_APP_SERVER_PID_FILE", "CODEX_COMPANION_APP_SERVER_LOG_FILE"]) delete env[key];
   t.after(() => { for (const dir of [repo, bin, data]) fs.rmSync(dir, { recursive: true, force: true }); });
+  // Start explicitly so slow CI cannot silently fall back to direct before
+  // the fault injection. These tests must exercise the broker transport.
+  const boot = run("node", ["--input-type=module", "-e",
+    `import { ensureBrokerSession } from ${JSON.stringify(LIFECYCLE)};
+     console.log(JSON.stringify(await ensureBrokerSession(process.cwd(), { timeoutMs: 30000 })));`], { cwd: repo, env });
+  assert.equal(boot.status, 0, boot.stderr);
+  const broker = JSON.parse(boot.stdout);
+  assert.ok(broker?.endpoint, "fixture broker must be ready before task starts");
+  env.CODEX_COMPANION_APP_SERVER_ENDPOINT = broker.endpoint;
   const result = run("node", [SCRIPT, "task", ...args, "--model", "gpt-5.4", "--effort", "high", "inspect this repository"], { cwd: repo, env });
-  const stateRoot = path.join(data, "state");
-  const workspaceState = path.join(stateRoot, fs.readdirSync(stateRoot)[0]);
-  const broker = JSON.parse(fs.readFileSync(path.join(workspaceState, "broker.json"), "utf8"));
   const brokerLog = fs.readFileSync(broker.logFile, "utf8");
   t.after(() => fs.rmSync(broker.sessionDir, { recursive: true, force: true }));
   return { result, brokerLog, state: JSON.parse(fs.readFileSync(path.join(bin, "fake-codex-state.json"), "utf8")) };
