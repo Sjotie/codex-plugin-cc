@@ -427,6 +427,7 @@ async function main() {
   // spawns a fresh, working broker. (Upstream PR #453, reapplied on PR #491.)
   appClient.exitPromise.then(() => {
     if (!shutdownPromise) {
+      process.stderr.write(`Codex app-server child closed: ${appClient.exitError?.message ?? "exit 0"}\n`);
       shutdown(server).finally(() => process.exit(1));
     }
   });

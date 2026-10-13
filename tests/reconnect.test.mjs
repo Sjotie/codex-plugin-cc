@@ -1,0 +1,76 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { installFakeCodex, buildEnv } from "./fake-codex-fixture.mjs";
+import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
+
+const SCRIPT = fileURLToPath(new URL("../plugins/codex/scripts/codex-companion.mjs", import.meta.url));
+
+function disconnectedTask(t, behavior, args = []) {
+  const repo = makeTempDir("codex-reconnect-repo-");
+  const bin = makeTempDir("codex-reconnect-bin-");
+  const data = makeTempDir("codex-reconnect-data-");
+  initGitRepo(repo);
+  installFakeCodex(bin, behavior);
+  const env = { ...buildEnv(bin), CLAUDE_PLUGIN_DATA: data, CODEX_HOME: data };
+  for (const key of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_APP_SERVER_ENDPOINT",
+    "CODEX_COMPANION_APP_SERVER_PID_FILE", "CODEX_COMPANION_APP_SERVER_LOG_FILE"]) delete env[key];
+  t.after(() => { for (const dir of [repo, bin, data]) fs.rmSync(dir, { recursive: true, force: true }); });
+  const result = run("node", [SCRIPT, "task", ...args, "--model", "gpt-5.4", "--effort", "high", "inspect this repository"], { cwd: repo, env });
+  const stateRoot = path.join(data, "state");
+  const workspaceState = path.join(stateRoot, fs.readdirSync(stateRoot)[0]);
+  const broker = JSON.parse(fs.readFileSync(path.join(workspaceState, "broker.json"), "utf8"));
+  const brokerLog = fs.readFileSync(broker.logFile, "utf8");
+  t.after(() => fs.rmSync(broker.sessionDir, { recursive: true, force: true }));
+  return { result, brokerLog, state: JSON.parse(fs.readFileSync(path.join(bin, "fake-codex-state.json"), "utf8")) };
+}
+
+test("persistent read-only task resumes its thread once after mid-turn broker exit", (t) => {
+  const { result, state, brokerLog } = disconnectedTask(t, "disconnect-task-once");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(state.turnStarts, 2);
+  assert.equal(state.threads.length, 1, "must resume, not create a second task");
+  assert.equal(state.lastThreadResume.model, "gpt-5.4");
+  assert.equal(state.lastTurnStart.effort, "high");
+  assert.match(result.stderr, /reconnect|resum/i);
+  assert.match(brokerLog, /Codex app-server child closed: exit 0/);
+});
+
+test("write task is not replayed after mid-turn broker exit", (t) => {
+  const { result, state } = disconnectedTask(t, "disconnect-task-once", ["--write"]);
+  assert.notEqual(result.status, 0);
+  assert.equal(state.turnStarts, 1);
+  assert.match(result.stderr, /connection closed/i);
+});
+
+test("repeated disconnect fails after one recovery attempt", (t) => {
+  const { result, state } = disconnectedTask(t, "disconnect-task-always");
+  assert.notEqual(result.status, 0);
+  assert.equal(state.turnStarts, 2);
+  assert.equal(state.threads.length, 1);
+});
+
+test("completed turn is read from resumed history without executing it again", (t) => {
+  const { result, state } = disconnectedTask(t, "disconnect-task-completed");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(state.turnStarts, 1);
+  assert.match(result.stdout, /Recovered original final answer/);
+});
+
+test("active writer refusal never starts another turn", (t) => {
+  const { result, state } = disconnectedTask(t, "disconnect-task-locked");
+  assert.notEqual(result.status, 0);
+  assert.equal(state.turnStarts, 1);
+  assert.equal(state.threads.length, 1);
+  assert.match(result.stderr, /already has an active writer/);
+});
+
+test("background worker completes the same tracked job after reconnection", (t) => {
+  const { result, state } = disconnectedTask(t, "disconnect-task-once", ["--background", "--wait"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(state.turnStarts, 2);
+  assert.equal(state.threads.length, 1);
+  assert.match(result.stdout, /completed|result/i);
+});

@@ -56,7 +56,7 @@ function buildThread(thread) {
     agentRole: null,
     gitInfo: null,
     name: thread.name || null,
-    turns: []
+    turns: thread.turns || []
   };
 }
 
@@ -401,6 +401,9 @@ rl.on("line", (line) => {
       }
 
       case "thread/resume": {
+        if (BEHAVIOR === "disconnect-task-locked" && state.turnStarts) {
+          throw new Error("thread already has an active writer");
+        }
         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
           throw new Error("thread/resume.persistFullHistory requires experimentalApi capability");
         }
@@ -519,6 +522,21 @@ rl.on("line", (line) => {
 	          prompt
 	        };
 	        saveState(state);
+	        if (BEHAVIOR.startsWith("disconnect-task-")) {
+	          state.turnStarts = (state.turnStarts || 0) + 1;
+	          if (BEHAVIOR === "disconnect-task-completed") {
+	            thread.turns = [{ ...buildTurn(turnId, "completed"), items: [
+	              { type: "agentMessage", id: "final_" + turnId, phase: "final_answer", text: "Recovered original final answer." }
+	            ] }];
+	          }
+	          saveState(state);
+	          if (state.turnStarts === 1 || BEHAVIOR === "disconnect-task-always") {
+	            send({ id: message.id, result: { turn: buildTurn(turnId) } });
+	            send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	            setTimeout(() => process.exit(0), 100);
+	            break;
+	          }
+	        }
 	        // slow-turn-start: a prompt containing "slow" gets its response late,
 	        // so the client can disconnect before it arrives.
 	        const turnStartDelayMs = BEHAVIOR === "slow-turn-start" && prompt.includes("slow") ? 800 : 0;

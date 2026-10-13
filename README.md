@@ -150,6 +150,16 @@ Examples:
 /codex:rescue --background investigate the regression
 ```
 
+If the shared app-server connection closes during a saved read-only task,
+the companion makes one recovery attempt through a fresh direct app-server
+and resumes the same thread. It returns an already completed turn from the
+saved history when available; otherwise it continues the task with the same
+prompt and run settings. Progress reports the reconnection. A second failure
+or an active thread writer ends the job with an error. Write tasks are not
+automatically replayed after a mid-turn disconnect; use the reported thread
+ID to inspect the work and deliberately resume it. The broker log records
+unexpected child exits for diagnosis.
+
 You can also just ask for a task to be delegated to Codex:
 
 ```text

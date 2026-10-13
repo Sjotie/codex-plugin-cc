@@ -3182,7 +3182,7 @@ test("broker exits after remaining fully idle for the configured timeout", async
   assert.equal(reusedClient.transport, "direct");
 });
 
-test("broker disconnect marks a background task failed", async (t) => {
+test("broker disconnect marks a background write task failed without replay", async (t) => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "interruptible-slow-task");
@@ -3195,7 +3195,7 @@ test("broker disconnect marks a background task failed", async (t) => {
     ...buildEnv(binDir),
     CODEX_COMPANION_SESSION_ID: "sess-owner"
   };
-  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the flaky worker timeout"], {
+  const launched = run("node", [SCRIPT, "task", "--write", "--background", "--json", "investigate the flaky worker timeout"], {
     cwd: repo,
     env
   });

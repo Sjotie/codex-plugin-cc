@@ -676,7 +676,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   }
 }
 
-async function withAppServer(cwd, fn) {
+async function withAppServer(cwd, fn, options = {}) {
   let client = null;
   try {
     client = await CodexAppServerClient.connect(cwd);
@@ -693,7 +693,10 @@ async function withAppServer(cwd, fn) {
         error?.code === "EPIPE");
     const shouldRetryDirect =
       (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      brokerConnectionFailed;
+      brokerConnectionFailed ||
+      (client?.transport === "broker" && client.exitResolved &&
+        client.exitError === error && ["ECONNRESET", "EPIPE"].includes(error?.code) &&
+        options.recoverDisconnectedTurn?.());
 
     if (client) {
       await client.close().catch(() => {});
@@ -1173,18 +1176,25 @@ export async function runAppServerTurn(cwd, options = {}) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }
 
+  let threadId = options.resumeThreadId ?? null;
+  let requestedTurn = false;
+  let previousTurnId = null;
   return withAppServer(cwd, async (client) => {
-    let threadId;
+    const recovering = requestedTurn;
+    let recoveredTurn = null;
     const model = await resolveCompatibleRunModel(client, options.model, options.onProgress);
 
-    if (options.resumeThreadId) {
-      emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
+    if (threadId) {
+      emitProgress(options.onProgress, `${recovering ? "Reconnecting and resuming" : "Resuming"} thread ${threadId}.`, "starting");
+      const response = await resumeThread(client, threadId, cwd, {
         model,
         sandbox: options.sandbox,
         ephemeral: false
       });
       threadId = response.thread.id;
+      recoveredTurn = recovering
+        ? response.thread.turns?.find((turn) => turn.id === previousTurnId && turn.status === "completed") ?? null
+        : null;
     } else {
       emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
       const response = await startThread(client, cwd, {
@@ -1208,15 +1218,27 @@ export async function runAppServerTurn(cwd, options = {}) {
     const turnState = await captureTurn(
       client,
       threadId,
-      () =>
-        client.request("turn/start", {
+      async () => {
+        if (recoveredTurn) return { turn: recoveredTurn };
+        requestedTurn = true;
+        const response = await client.request("turn/start", {
           threadId,
           input: buildTurnInput(prompt),
           model,
           effort: options.effort ?? null,
           outputSchema: options.outputSchema ?? null
-        }),
-      { onProgress: options.onProgress }
+        });
+        previousTurnId = response.turn?.id ?? null;
+        return response;
+      },
+      {
+        onProgress: options.onProgress,
+        onResponse(response, state) {
+          if (recoveredTurn) {
+            for (const item of response.turn.items ?? []) recordItem(state, item, "completed", threadId);
+          }
+        }
+      }
     );
 
     return {
@@ -1232,6 +1254,10 @@ export async function runAppServerTurn(cwd, options = {}) {
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
       commandExecutions: turnState.commandExecutions
     };
+  }, {
+    recoverDisconnectedTurn: () => requestedTurn && Boolean(threadId) &&
+      Boolean(options.persistThread || options.resumeThreadId) &&
+      (options.sandbox ?? "read-only") === "read-only"
   });
 }
 
