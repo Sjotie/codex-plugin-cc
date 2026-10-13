@@ -14,7 +14,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, readJobFile, resolveJobFile, resolveStateFile, updateState, writeJobFile } from "./lib/state.mjs";
+import { loadState, resolveStateFile, updateJobRecord } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -42,30 +42,30 @@ function appendEnvVar(name, value) {
 
 const SESSION_ENDED_MESSAGE = "Stopped because the Claude session ended.";
 
-// The worker of an ending job may already have written its terminal result to
-// the job file; otherwise the job is stopped here and recorded as cancelled.
-function endedJobRecord(workspaceRoot, job, endedAt) {
-  let storedJob = {};
-  try {
-    storedJob = readJobFile(resolveJobFile(workspaceRoot, job.id));
-  } catch {
-    // An absent or unreadable job file leaves the index entry as the only record.
-  }
-  if (isTerminalJobStatus(storedJob.status)) {
-    return { ...job, ...storedJob };
-  }
-  return {
-    ...storedJob,
-    ...job,
-    threadId: job.threadId ?? storedJob.threadId ?? null,
-    turnId: job.turnId ?? storedJob.turnId ?? null,
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt: endedAt,
-    updatedAt: endedAt,
-    errorMessage: SESSION_ENDED_MESSAGE
-  };
+// Records an ending job as cancelled in its job file and the index together,
+// under the state lock, the same way workers publish their own results. A job
+// whose worker already wrote a terminal result keeps it. Returns the pid to stop.
+function endSessionJob(workspaceRoot, job) {
+  let pid = null;
+  updateJobRecord(workspaceRoot, job.id, (stored) => {
+    if (isTerminalJobStatus(stored?.status)) {
+      return stored;
+    }
+    pid = stored?.pid ?? job.pid ?? null;
+    const endedAt = new Date().toISOString();
+    return {
+      ...job,
+      ...stored,
+      threadId: stored?.threadId ?? job.threadId ?? null,
+      turnId: stored?.turnId ?? job.turnId ?? null,
+      status: "cancelled",
+      phase: "cancelled",
+      pid: null,
+      completedAt: endedAt,
+      errorMessage: SESSION_ENDED_MESSAGE
+    };
+  });
+  return pid;
 }
 
 function cleanupSessionJobs(cwd, sessionId) {
@@ -81,44 +81,22 @@ function cleanupSessionJobs(cwd, sessionId) {
 
   // The session's queued and running jobs end with it, but every job keeps its
   // record: a session resumed under the same id (e.g. after a host restart)
-  // needs the thread ids for --resume-last (#1576).
-  const isEndingJob = (job) => job.sessionId === sessionId && isWaitingJobStatus(job.status);
-  const endingJobs = loadState(workspaceRoot).jobs.filter(isEndingJob);
-  if (endingJobs.length === 0) {
-    return;
-  }
-
+  // needs the thread ids for --resume-last (#1576). Cancel first, then stop the
+  // worker, so a queued worker that starts in between sees the cancellation.
+  const endingJobs = loadState(workspaceRoot).jobs.filter(
+    (job) => job.sessionId === sessionId && isWaitingJobStatus(job.status)
+  );
   for (const job of endingJobs) {
+    let pid = job.pid ?? null;
     try {
-      terminateProcessTree(job.pid ?? Number.NaN);
+      pid = endSessionJob(workspaceRoot, job);
+    } catch {
+      // An unreadable job file must not keep the worker alive or stop the cleanup.
+    }
+    try {
+      terminateProcessTree(pid ?? Number.NaN);
     } catch {
       // Ignore teardown failures during session shutdown.
-    }
-  }
-
-  // Use updateState so the read-modify-write is atomic under the state lock.
-  // This prevents a concurrent upsertJob from being silently dropped (and its
-  // artifacts deleted) when the stale snapshot loaded above is saved back.
-  const endedAt = new Date().toISOString();
-  const endedJobs = [];
-  updateState(workspaceRoot, (currentState) => {
-    currentState.jobs = currentState.jobs.map((job) => {
-      if (!isEndingJob(job)) {
-        return job;
-      }
-      const endedJob = endedJobRecord(workspaceRoot, job, endedAt);
-      endedJobs.push(endedJob);
-      return endedJob;
-    });
-  });
-  for (const job of endedJobs) {
-    if (job.errorMessage !== SESSION_ENDED_MESSAGE) {
-      continue;
-    }
-    try {
-      writeJobFile(workspaceRoot, job.id, job);
-    } catch {
-      // The index entry above already records the cancellation.
     }
   }
 }

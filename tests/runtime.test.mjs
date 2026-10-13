@@ -1017,6 +1017,59 @@ test("task --resume-last after session end picks the task that was still running
   assert.equal(payload.candidate.threadId, "thr_running");
 });
 
+test("session end keeps a result the worker already published and cancels a queued job in its job file", () => {
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  const stateDir = resolveStateDir(repo);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  // The worker finished and wrote its job file, but the index still says running.
+  const finishedFile = path.join(jobsDir, "task-finished.json");
+  fs.writeFileSync(
+    finishedFile,
+    JSON.stringify({ id: "task-finished", status: "completed", threadId: "thr_done", rendered: "the answer" }),
+    "utf8"
+  );
+  // A queued job has no worker pid yet; its worker reads the job file when it starts.
+  const queuedFile = path.join(jobsDir, "task-queued.json");
+  fs.writeFileSync(queuedFile, JSON.stringify({ id: "task-queued", status: "queued" }), "utf8");
+
+  const job = (id, status) => ({
+    id,
+    jobClass: "task",
+    status,
+    sessionId: "sess-current",
+    createdAt: "2026-10-13T08:00:00.000Z",
+    updatedAt: "2026-10-13T08:00:00.000Z"
+  });
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs: [job("task-finished", "running"), job("task-queued", "queued")] }, null, 2)}\n`,
+    "utf8"
+  );
+
+  const ended = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: { ...process.env, CODEX_COMPANION_SESSION_ID: "sess-current" },
+    input: JSON.stringify({ hook_event_name: "SessionEnd", session_id: "sess-current", cwd: repo })
+  });
+  assert.equal(ended.status, 0, ended.stderr);
+
+  const finished = JSON.parse(fs.readFileSync(finishedFile, "utf8"));
+  assert.equal(finished.status, "completed");
+  assert.equal(finished.rendered, "the answer");
+  const queued = JSON.parse(fs.readFileSync(queuedFile, "utf8"));
+  assert.equal(queued.status, "cancelled");
+  assert.equal(queued.errorMessage, "Stopped because the Claude session ended.");
+
+  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+  const byId = Object.fromEntries(state.jobs.map((entry) => [entry.id, entry]));
+  assert.equal(byId["task-finished"].status, "completed");
+  assert.equal(byId["task-finished"].threadId, "thr_done");
+  assert.equal(byId["task-queued"].status, "cancelled");
+});
+
 test("task --resume-last ignores running tasks from other Claude sessions", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
