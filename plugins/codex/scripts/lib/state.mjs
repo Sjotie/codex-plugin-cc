@@ -13,6 +13,8 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const RESUMABLE_TASK_MAX_AGE_ENV = "CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS";
+const DEFAULT_RESUMABLE_TASK_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting.";
 
 const LOCK_FILE_NAME = "state.lock";
@@ -164,16 +166,34 @@ function isResumableTaskJob(job) {
   return job.jobClass === "task" && Boolean(job.threadId) && isTerminalJobStatus(job.status);
 }
 
+function resolveResumableTaskMaxAgeMs() {
+  const parsed = Number(process.env[RESUMABLE_TASK_MAX_AGE_ENV]);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_RESUMABLE_TASK_MAX_AGE_MS;
+  }
+  return Math.max(1, Math.floor(parsed));
+}
+
+function isRecentJob(job, nowMs, maxAgeMs) {
+  const updatedMs = Date.parse(job.updatedAt ?? "");
+  return Number.isFinite(updatedMs) && nowMs - updatedMs < maxAgeMs;
+}
+
 function pruneJobs(jobs) {
   const sorted = [...jobs].sort(byNewestFirst);
   if (sorted.length <= MAX_JOBS) {
     return sorted;
   }
 
-  // Never prune an active job or the newest resumable task of a session:
-  // once a session id is set, --resume-last has no fallback, so losing that
-  // one job loses the session's thread history. Jobs without a session id
-  // form one group, matching how they are visible to --resume-last.
+  // Never prune an active job. Also keep the newest resumable task of a
+  // session while it is recent: once a session id is set, --resume-last has
+  // no fallback, so losing that one job loses the session's thread history.
+  // The age limit (CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS, default seven
+  // days) stops old sessions from staying in the index forever. Jobs
+  // without a session id form one group, matching how they are visible to
+  // --resume-last.
+  const nowMs = Date.now();
+  const maxResumableAgeMs = resolveResumableTaskMaxAgeMs();
   const protectedIds = new Set();
   const sessionsWithResumable = new Set();
   for (const job of sorted) {
@@ -181,7 +201,11 @@ function pruneJobs(jobs) {
       protectedIds.add(job.id);
     }
     const sessionKey = job.sessionId ?? "";
-    if (!sessionsWithResumable.has(sessionKey) && isResumableTaskJob(job)) {
+    if (
+      !sessionsWithResumable.has(sessionKey) &&
+      isResumableTaskJob(job) &&
+      isRecentJob(job, nowMs, maxResumableAgeMs)
+    ) {
       sessionsWithResumable.add(sessionKey);
       protectedIds.add(job.id);
     }

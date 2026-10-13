@@ -60,6 +60,32 @@ test("progress updater merges phase and thread ids into the job file and index",
   assert.equal(indexed.turnId, "turn_1");
 });
 
+test("progress updater leaves a terminal job untouched", () => {
+  const workspace = makeTempDir();
+  const jobId = "task-terminal";
+  writeJobFile(workspace, jobId, {
+    id: jobId,
+    status: "completed",
+    phase: "done",
+    threadId: "thr_done",
+    turnId: "turn_done"
+  });
+  updateJobRecord(workspace, jobId, (existing) => existing);
+
+  const updateProgress = createJobProgressUpdater(workspace, jobId);
+  updateProgress({ phase: "editing", threadId: "thr_late", turnId: "turn_late" });
+
+  const stored = readJobFile(resolveJobFile(workspace, jobId));
+  assert.equal(stored.status, "completed");
+  assert.equal(stored.phase, "done");
+  assert.equal(stored.threadId, "thr_done");
+  assert.equal(stored.turnId, "turn_done");
+
+  const indexed = loadState(workspace).jobs.find((job) => job.id === jobId);
+  assert.equal(indexed.phase, "done");
+  assert.equal(indexed.threadId, "thr_done");
+});
+
 test("progress updater does not recreate a missing job file", () => {
   const workspace = makeTempDir();
   const updateProgress = createJobProgressUpdater(workspace, "task-gone");
