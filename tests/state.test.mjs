@@ -15,6 +15,10 @@ import {
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
 
+// Never let these tests write into a real plugin data dir when the shell
+// happens to have CLAUDE_PLUGIN_DATA set.
+process.env.CLAUDE_PLUGIN_DATA = makeTempDir("codex-plugin-data-");
+
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
@@ -143,8 +147,8 @@ test("saveState keeps the newest resumable task per session and active jobs when
   const stateFile = resolveStateFile(workspace);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
 
-  const base = Date.UTC(2026, 0, 1, 0, 0, 0);
-  const at = (minutes) => new Date(base + minutes * 60_000).toISOString();
+  const now = Date.now();
+  const at = (minutes) => new Date(now - (70 - minutes) * 60_000).toISOString();
   const makeJob = (job) => {
     const logFile = resolveJobLogFile(workspace, job.id);
     const jobFile = resolveJobFile(workspace, job.id);
@@ -209,6 +213,118 @@ test("saveState keeps the newest resumable task per session and active jobs when
   assert.equal(fs.existsSync(resolveJobFile(workspace, "task-stale")), true);
   assert.equal(fs.existsSync(resolveJobFile(workspace, "task-active")), true);
   assert.equal(fs.existsSync(resolveJobFile(workspace, "task-stale-older")), false);
+});
+
+test("saveState prunes resumable tasks from old sessions but keeps a recent one", () => {
+  const workspace = makeTempDir();
+  const stateFile = resolveStateFile(workspace);
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+
+  const now = Date.now();
+  const daysAgo = (days) => new Date(now - days * 24 * 60 * 60_000).toISOString();
+  const makeJob = (job) => {
+    const logFile = resolveJobLogFile(workspace, job.id);
+    fs.writeFileSync(logFile, `log ${job.id}\n`, "utf8");
+    fs.writeFileSync(
+      resolveJobFile(workspace, job.id),
+      `${JSON.stringify({ id: job.id, status: job.status })}\n`,
+      "utf8"
+    );
+    return { createdAt: job.updatedAt, logFile, ...job };
+  };
+
+  const jobs = [
+    // One recent resumable task: six days old, inside the seven-day limit.
+    makeJob({
+      id: "task-recent",
+      jobClass: "task",
+      status: "completed",
+      sessionId: "sess-recent",
+      threadId: "thr_recent",
+      updatedAt: daysAgo(6)
+    }),
+    // 200 old sessions, each with a resumable task outside the limit.
+    ...Array.from({ length: 200 }, (_, index) =>
+      makeJob({
+        id: `task-old-${index}`,
+        jobClass: "task",
+        status: "completed",
+        sessionId: `sess-old-${index}`,
+        threadId: `thr_old_${index}`,
+        updatedAt: daysAgo(8)
+      })
+    ),
+    // Newer non-resumable jobs fill the cap on their own.
+    ...Array.from({ length: 60 }, (_, index) =>
+      makeJob({
+        id: `job-new-${index}`,
+        jobClass: "task",
+        status: "completed",
+        sessionId: "sess-busy",
+        updatedAt: new Date(now - (60 - index) * 60_000).toISOString()
+      })
+    )
+  ];
+
+  fs.writeFileSync(
+    stateFile,
+    `${JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs }, null, 2)}\n`,
+    "utf8"
+  );
+  saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs });
+
+  const savedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const savedIds = new Set(savedState.jobs.map((job) => job.id));
+  assert.equal(savedState.jobs.length, 50, "old sessions are pruned back to the cap");
+  assert.equal(savedIds.has("task-recent"), true, "a recent resumable task survives");
+  assert.equal(
+    savedState.jobs.filter((job) => job.id.startsWith("task-old-")).length,
+    0,
+    "resumable tasks older than the limit are not protected"
+  );
+  assert.equal(fs.existsSync(resolveJobFile(workspace, "task-recent")), true);
+  assert.equal(fs.existsSync(resolveJobFile(workspace, "task-old-0")), false);
+});
+
+test("the resumable age limit is configurable with CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS", () => {
+  const workspace = makeTempDir();
+  const now = Date.now();
+  const jobs = [
+    {
+      id: "task-recent",
+      jobClass: "task",
+      status: "completed",
+      sessionId: "sess-recent",
+      threadId: "thr_recent",
+      createdAt: new Date(now - 60 * 60_000).toISOString(),
+      updatedAt: new Date(now - 60 * 60_000).toISOString()
+    },
+    ...Array.from({ length: 50 }, (_, index) => ({
+      id: `job-new-${index}`,
+      jobClass: "task",
+      status: "completed",
+      sessionId: "sess-busy",
+      createdAt: new Date(now - (50 - index) * 60_000).toISOString(),
+      updatedAt: new Date(now - (50 - index) * 60_000).toISOString()
+    }))
+  ];
+
+  const previous = process.env.CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS;
+  process.env.CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS = "1000";
+  try {
+    saveState(workspace, { version: 1, config: { stopReviewGate: false }, jobs });
+  } finally {
+    if (previous == null) {
+      delete process.env.CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS;
+    } else {
+      process.env.CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS = previous;
+    }
+  }
+
+  const savedIds = new Set(
+    JSON.parse(fs.readFileSync(resolveStateFile(workspace), "utf8")).jobs.map((job) => job.id)
+  );
+  assert.equal(savedIds.has("task-recent"), false, "an hour-old task is outside a one-second limit");
 });
 
 test("writeJobFile writes atomically and leaves no temp residue", () => {

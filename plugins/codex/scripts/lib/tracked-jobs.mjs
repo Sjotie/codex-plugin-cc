@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
+import { isTerminalJobStatus } from "./job-status.mjs";
 import {
   readJobFile,
   resolveJobFile,
@@ -109,7 +110,7 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
     // unlocked rewrite can overwrite a concurrent terminal or cancellation
     // update with the stale copy it read before that update landed.
     updateJobRecord(workspaceRoot, jobId, (existing) => {
-      if (!existing) {
+      if (!existing || isTerminalJobStatus(existing.status)) {
         return null;
       }
       return {
