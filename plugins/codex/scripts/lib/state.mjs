@@ -156,10 +156,61 @@ export function loadState(cwd) {
   }
 }
 
+function byNewestFirst(left, right) {
+  return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
+}
+
+function isResumableTaskJob(job) {
+  return job.jobClass === "task" && Boolean(job.threadId) && isTerminalJobStatus(job.status);
+}
+
 function pruneJobs(jobs) {
-  return [...jobs]
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
-    .slice(0, MAX_JOBS);
+  const sorted = [...jobs].sort(byNewestFirst);
+  if (sorted.length <= MAX_JOBS) {
+    return sorted;
+  }
+
+  // Never prune an active job or the newest resumable task of a session:
+  // once a session id is set, --resume-last has no fallback, so losing that
+  // one job loses the session's thread history. Jobs without a session id
+  // form one group, matching how they are visible to --resume-last.
+  const protectedIds = new Set();
+  const sessionsWithResumable = new Set();
+  for (const job of sorted) {
+    if (isWaitingJobStatus(job.status)) {
+      protectedIds.add(job.id);
+    }
+    const sessionKey = job.sessionId ?? "";
+    if (!sessionsWithResumable.has(sessionKey) && isResumableTaskJob(job)) {
+      sessionsWithResumable.add(sessionKey);
+      protectedIds.add(job.id);
+    }
+  }
+
+  const retained = sorted.slice(0, MAX_JOBS);
+  const retainedIds = new Set(retained.map((job) => job.id));
+  for (const job of sorted) {
+    if (!protectedIds.has(job.id) || retainedIds.has(job.id)) {
+      continue;
+    }
+    // Swap the protected job in for the oldest job that is not protected;
+    // only when every retained job is protected does the cap give way.
+    let displacedIndex = -1;
+    for (let index = retained.length - 1; index >= 0; index--) {
+      if (!protectedIds.has(retained[index].id)) {
+        displacedIndex = index;
+        break;
+      }
+    }
+    if (displacedIndex === -1) {
+      retained.push(job);
+    } else {
+      retainedIds.delete(retained[displacedIndex].id);
+      retained[displacedIndex] = job;
+    }
+    retainedIds.add(job.id);
+  }
+  return retained.sort(byNewestFirst);
 }
 
 function removeFileIfExists(filePath) {
