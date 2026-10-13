@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.7-sjotie.14 (fork)
+
+- SessionEnd no longer forgets a session's finished tasks. It used to drop
+  every job of the ending session, so a session resumed under the same id
+  (Factory host restart, `claude --resume`) got "No previous Codex task
+  thread was found for this repository." on its next `--resume-last`
+  (Homebase #1576). SessionEnd now only stops and drops the session's queued
+  and running jobs; finished ones stay until the 50-job prune
+
 ## 1.0.7-sjotie.13 (fork)
 
 - the shared broker no longer keeps an orphaned turn alive. When the client

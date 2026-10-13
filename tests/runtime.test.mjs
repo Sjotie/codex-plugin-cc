@@ -901,6 +901,52 @@ test("task --resume-last does not resume a task from another Claude session", ()
   assert.equal(fakeState.lastTurnStart.prompt, "initial task");
 });
 
+test("task --resume-last still finds the thread after the session ends and is resumed", () => {
+  // #1576: a host restart ends the Claude session (SessionEnd) and resumes it under
+  // the same session id; the next --resume-last must still find the earlier thread.
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const sessionEnv = {
+    ...buildEnv(binDir),
+    CODEX_COMPANION_SESSION_ID: "sess-current"
+  };
+  const endSession = (sessionId) =>
+    run("node", [SESSION_HOOK, "SessionEnd"], {
+      cwd: repo,
+      env: { ...sessionEnv, CODEX_COMPANION_SESSION_ID: sessionId },
+      input: JSON.stringify({ hook_event_name: "SessionEnd", session_id: sessionId, cwd: repo })
+    });
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env: sessionEnv });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const ended = endSession("sess-current");
+  assert.equal(ended.status, 0, ended.stderr);
+
+  const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env: sessionEnv });
+  assert.equal(resume.status, 0, resume.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.threadId, "thr_1");
+  assert.equal(fakeState.lastTurnStart.prompt, "follow up");
+
+  // A session that never ran a task still has no thread to resume, ended or not.
+  const otherEnded = endSession("sess-other");
+  assert.equal(otherEnded.status, 0, otherEnded.stderr);
+  const missing = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
+    cwd: repo,
+    env: { ...sessionEnv, CODEX_COMPANION_SESSION_ID: "sess-other" }
+  });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /No previous Codex task thread was found for this repository\./);
+});
+
 test("task --resume-last ignores running tasks from other Claude sessions", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -3505,7 +3551,7 @@ test("broker keeps serving when the client leaves after the final answer but bef
   process.kill(brokerSession.pid, 0);
 });
 
-test("session end fully cleans up jobs for the ending session", async (t) => {
+test("session end stops the ending session's running jobs and keeps its finished ones", async (t) => {
   const repo = makeTempDir();
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
@@ -3609,7 +3655,12 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
   assert.equal(fs.existsSync(otherJobFile), true);
   assert.deepEqual(
     fs.readdirSync(path.dirname(otherJobFile)).sort(),
-    [path.basename(otherJobFile), path.basename(otherSessionLog)].sort()
+    [
+      path.basename(completedJobFile),
+      path.basename(completedLog),
+      path.basename(otherJobFile),
+      path.basename(otherSessionLog)
+    ].sort()
   );
 
   await waitFor(() => {
@@ -3622,8 +3673,8 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
   });
 
   const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-  assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
-  const otherJob = state.jobs[0];
+  assert.deepEqual(state.jobs.map((job) => job.id).sort(), ["review-completed", "review-other"]);
+  const otherJob = state.jobs.find((job) => job.id === "review-other");
   assert.equal(otherJob.logFile, otherSessionLog);
 });
 

@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
+import { isWaitingJobStatus } from "./lib/job-status.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
 import { BROKER_ENDPOINT_ENV } from "./lib/app-server.mjs";
 import {
@@ -50,17 +51,17 @@ function cleanupSessionJobs(cwd, sessionId) {
     return;
   }
 
+  // Only the session's queued and running jobs end with it. Finished jobs stay:
+  // a resumed session (same session id, e.g. after a host restart) still needs
+  // their thread ids for --resume-last, and pruneJobs caps the history anyway.
+  const isEndingJob = (job) => job.sessionId === sessionId && isWaitingJobStatus(job.status);
   const state = loadState(workspaceRoot);
-  const removedJobs = state.jobs.filter((job) => job.sessionId === sessionId);
+  const removedJobs = state.jobs.filter(isEndingJob);
   if (removedJobs.length === 0) {
     return;
   }
 
   for (const job of removedJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
-      continue;
-    }
     try {
       terminateProcessTree(job.pid ?? Number.NaN);
     } catch {
@@ -72,7 +73,7 @@ function cleanupSessionJobs(cwd, sessionId) {
   // This prevents a concurrent upsertJob from being silently dropped (and its
   // artifacts deleted) when the stale snapshot loaded above is saved back.
   updateState(workspaceRoot, (currentState) => {
-    currentState.jobs = currentState.jobs.filter((job) => job.sessionId !== sessionId);
+    currentState.jobs = currentState.jobs.filter((job) => !isEndingJob(job));
   });
 }
 
