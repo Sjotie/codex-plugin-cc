@@ -119,12 +119,21 @@ test("<subcommand> --help prints usage and never starts a Codex task", () => {
   assert.equal(state.lastTurnStart ?? null, null);
 });
 
-test("an unknown option before the prompt fails with a usage hint and never starts a Codex task", () => {
+test("an unknown option before the prompt fails with a usage hint and never starts a Codex task", (t) => {
   const binDir = makeTempDir();
   const repo = makeTempDir();
   installFakeCodex(binDir);
   initGitRepo(repo);
   const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  // The control tasks below start a detached shared broker; stop it even if an assert fails.
+  t.after(() => {
+    const pid = loadBrokerSession(repo)?.pid;
+    if (pid) {
+      try {
+        terminateProcessTree(pid);
+      } catch {}
+    }
+  });
 
   for (const args of [["task", "--bogus"], ["task", "--bogus", "do the thing"], ["task", "-z", "do the thing"], ["review", "--bogus"], ["status", "--bogus"], ["cancel", "--bogus"], ["status", "job-1", "--jsno"], ["cancel", "job-1", "--jsno"]]) {
     const result = run("node", [SCRIPT, ...args], { cwd: repo, env: buildEnv(binDir) });
@@ -3294,7 +3303,8 @@ async function awaitBrokeredRunningJob(t, repo, jobId) {
     } catch {
       return null;
     }
-    return fs.existsSync(parseBrokerEndpoint(session.endpoint).path) ? session : null;
+    const target = parseBrokerEndpoint(session.endpoint);
+    return target.kind !== "unix" || fs.existsSync(target.path) ? session : null;
   });
   return { runningJob, brokerSession };
 }
