@@ -36,7 +36,12 @@ const SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
 const STOP_HOOK = path.join(PLUGIN_ROOT, "scripts", "stop-review-gate-hook.mjs");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
 
-async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 50 } = {}) {
+// Every awaited step crosses a freshly spawned node process (broker, worker,
+// fake codex); on a saturated machine each takes seconds. A passing wait returns
+// at once, so the ceiling only matters when the condition really never comes.
+const WAIT_CEILING_MS = 60000;
+
+async function waitFor(predicate, { timeoutMs = WAIT_CEILING_MS, intervalMs = 50 } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const value = await predicate();
@@ -95,6 +100,23 @@ test("setup reports ready when fake codex is installed and authenticated", () =>
   assert.equal(payload.ready, true);
   assert.match(payload.codex.detail, /advanced runtime available/);
   assert.equal(payload.sessionRuntime.mode, "direct");
+});
+
+test("<subcommand> --help prints usage and never starts a Codex task", () => {
+  const binDir = makeTempDir();
+  const repo = makeTempDir();
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+
+  for (const args of [["task", "--help"], ["task", "-h"], ["review", "--help"], ["status", "--help"], ["task", "--background", "--help"], ["task", "--write", "-h"]]) {
+    const result = run("node", [SCRIPT, ...args], { cwd: repo, env: buildEnv(binDir) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^Usage:/);
+  }
+  // The fake Codex records every turn it is asked to start; --help must not reach it.
+  const state = fs.existsSync(fakeStatePath) ? JSON.parse(fs.readFileSync(fakeStatePath, "utf8")) : {};
+  assert.equal(state.lastTurnStart ?? null, null);
 });
 
 test("setup is ready without npm when Codex is already installed and authenticated", () => {
@@ -2823,7 +2845,7 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
       return job;
     }
     return null;
-  }, { timeoutMs: 15000 });
+  });
 
   const cancelResult = run("node", [SCRIPT, "cancel", jobId, "--json"], {
     cwd: repo,
@@ -2883,7 +2905,7 @@ test("ending another session preserves an active brokered task", async (t) => {
     const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
     const job = state.jobs.find((candidate) => candidate.id === jobId);
     return job?.status === "running" && job.threadId && job.turnId ? job : null;
-  }, { timeoutMs: 15000 });
+  });
   const brokerBefore = loadBrokerSession(repo);
   assert.ok(brokerBefore?.pid);
 
@@ -3207,7 +3229,7 @@ test("broker disconnect marks a background write task failed without replay", as
     const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
     const job = state.jobs.find((candidate) => candidate.id === jobId);
     return job?.status === "running" && job.threadId && job.turnId ? job : null;
-  }, { timeoutMs: 15000 });
+  });
   const brokerSession = loadBrokerSession(repo);
   assert.ok(brokerSession?.pid);
 
@@ -3265,7 +3287,7 @@ test("broker interrupts the turn of a worker killed mid-stream and retires witho
     const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
     const job = state.jobs.find((candidate) => candidate.id === jobId);
     return job?.status === "running" && job.threadId && job.turnId ? job : null;
-  }, { timeoutMs: 15000 });
+  });
   const brokerSession = loadBrokerSession(repo);
   assert.ok(brokerSession?.pid);
   t.after(() => {

@@ -6,7 +6,7 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
-import { binaryAvailable } from "./process.mjs";
+import { binaryAvailable, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
@@ -16,6 +16,10 @@ const BROKER_STATE_FILE = "broker.json";
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 const BROKER_SHUTDOWN_TIMEOUT_MS = 1000;
+// A freshly spawned broker loads node and starts its app-server before it binds;
+// on a saturated machine that takes well over the idle-machine ~100 ms. The wait
+// ends early when the broker exits, so this only bounds a broker that is alive but stuck.
+const BROKER_STARTUP_TIMEOUT_MS = 30000;
 
 export function resolveBrokerRuntimeIdentity(cwd, env = process.env) {
   const codex = binaryAvailable("codex", ["--version"], { cwd, env });
@@ -41,9 +45,9 @@ function connectToEndpoint(endpoint) {
   return net.createConnection({ path: target.path });
 }
 
-export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
+export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000, { shouldGiveUp = () => false } = {}) {
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() - start < timeoutMs && !shouldGiveUp()) {
     const ready = await new Promise((resolve) => {
       const socket = connectToEndpoint(endpoint);
       socket.on("connect", () => {
@@ -253,15 +257,27 @@ export async function ensureBrokerSession(cwd, options = {}) {
     env: options.env ?? process.env
   });
 
-  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? 2000);
+  let childExited = false;
+  child.once("exit", () => {
+    childExited = true;
+  });
+  child.once("error", () => {
+    childExited = true;
+  });
+  const ready = await waitForBrokerEndpoint(endpoint, options.timeoutMs ?? BROKER_STARTUP_TIMEOUT_MS, {
+    shouldGiveUp: () => childExited
+  });
   if (!ready) {
+    // This broker never became usable and nobody else knows its pid: always stop it,
+    // or it binds late and lingers as an orphan next to the direct fallback.
     teardownBrokerSession({
       endpoint,
       pidFile,
       logFile,
       sessionDir,
       pid: child.pid ?? null,
-      killProcess: options.killProcess ?? null
+      // An exited child's pid may already belong to another process: only kill a live one.
+      killProcess: options.killProcess ?? (childExited ? null : terminateProcessTree)
     });
     return null;
   }

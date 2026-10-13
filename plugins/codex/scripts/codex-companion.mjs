@@ -1296,6 +1296,13 @@ async function main() {
     return;
   }
 
+  // `<subcommand> --help` (anywhere in the arguments) must show usage; otherwise task would run "--help" as its prompt.
+  const subcommandArgs = normalizeArgv(argv);
+  if (subcommandArgs.some((arg) => arg === "--help" || arg === "-h")) {
+    printUsage();
+    return;
+  }
+
   switch (subcommand) {
     case "setup":
       await handleSetup(argv);
