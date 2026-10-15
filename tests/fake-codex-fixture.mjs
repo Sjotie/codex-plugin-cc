@@ -187,7 +187,47 @@ function emitTurnCompleted(threadId, turnId, item) {
       send({ method: "item/completed", params: { threadId, turnId, item: entry.completed } });
     }
   }
+  const failed = providerFailureFor(BEHAVIOR);
+  if (failed) {
+    if (failed.retryError) {
+      send({ method: "error", params: { threadId, turnId, willRetry: true, error: failed.retryError } });
+    }
+    if (failed.error) {
+      send({ method: "error", params: { threadId, turnId, willRetry: false, error: failed.error } });
+    }
+    send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, failed.turnStatus) } });
+    return;
+  }
+  if (BEHAVIOR === "provider-subagent-error-then-completed") {
+    send({ method: "item/started", params: { threadId, turnId, item: { type: "collabAgentToolCall", id: "collab_sub", tool: "wait", status: "completed", senderThreadId: threadId, receiverThreadIds: ["thread_sub"], prompt: "x", model: null, reasoningEffort: null, agentsStates: {} } } });
+    send({ method: "error", params: { threadId: "thread_sub", turnId: "turn_sub", willRetry: false, error: { message: "SYNTHETIC subagent failure", codexErrorInfo: "cyberPolicy" } } });
+  }
+  if (BEHAVIOR === "provider-error-then-completed") {
+    send({ method: "error", params: { threadId, turnId, willRetry: true, error: { message: "Reconnecting 1/5", codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } } } });
+  }
   send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, "completed") } });
+}
+
+function providerFailureFor(behavior) {
+  const flagged = "This content was flagged for possible cybersecurity risk. SYNTHETIC fixture text, not a real provider response.";
+  switch (behavior) {
+    case "provider-safety-block":
+      return { turnStatus: "failed", error: { message: flagged, codexErrorInfo: "cyberPolicy", additionalDetails: null } };
+    case "provider-safety-text-only":
+      return { turnStatus: "failed", error: { message: flagged, codexErrorInfo: null, additionalDetails: null } };
+    case "provider-unknown-error":
+      return { turnStatus: "failed", error: { message: "SYNTHETIC upstream outage", codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } }, additionalDetails: "retries exhausted" } };
+    case "provider-lookalike-type":
+      return { turnStatus: "failed", error: { message: "SYNTHETIC lookalike", codexErrorInfo: "cyberPolicyOther" } };
+    case "provider-retry-then-failed":
+      return { turnStatus: "failed", error: null, retryError: { message: "SYNTHETIC retrying", codexErrorInfo: "serverOverloaded" } };
+    case "provider-failed-no-error":
+      return { turnStatus: "failed", error: null };
+    case "provider-interrupted":
+      return { turnStatus: "interrupted", error: null };
+    default:
+      return null;
+  }
 }
 
 function emitTurnCompletedLater(threadId, turnId, item, delayMs) {

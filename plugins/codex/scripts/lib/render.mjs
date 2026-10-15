@@ -83,6 +83,84 @@ function isStructuredReviewStoredResult(storedJob) {
   );
 }
 
+
+function failureLabel(failure) {
+  return failure.class === "provider_safety_block" ? "failure:provider_safety_block" : `failure:${failure.class}`;
+}
+
+function describeFailureProvenance(failure) {
+  if (failure.class !== "provider_safety_block") {
+    return null;
+  }
+  return failure.classifiedFrom === "structured-type"
+    ? "Classified from the provider's structured error type."
+    : "Classified from the literal provider message only (no structured error type was supplied).";
+}
+
+// Failure block shown ahead of any partial output. The error is Codex's own
+// text; guidance only names manual routes and never rewrites or retries.
+function failureLines(failure) {
+  if (!failure) {
+    return [];
+  }
+  const lines = [`Failure: ${failureLabel(failure)}`];
+  if (failure.type) {
+    lines.push(`Codex error type: ${failure.type}`);
+  }
+  if (failure.code) {
+    lines.push(`Codex error code: ${failure.code}`);
+  }
+  if (failure.message) {
+    lines.push("Codex error:", "", "```text", failure.message, "```");
+  } else {
+    lines.push("Codex reported no error text for this failure.");
+  }
+  if (failure.details) {
+    lines.push("", `Details: ${failure.details}`);
+  }
+  const provenance = describeFailureProvenance(failure);
+  if (provenance) {
+    lines.push("", provenance);
+    lines.push(
+      "Nothing was retried, rephrased or rerouted automatically. If this block looks wrong, the account owner can raise it with OpenAI support or the approved access program."
+    );
+  }
+  return lines;
+}
+
+function partialOutputLines(rawOutput) {
+  if (!rawOutput) {
+    return [];
+  }
+  return ["", "Incomplete intermediate output (NOT a final report; the turn failed before finishing):", "", "```text", rawOutput.trimEnd(), "```"];
+}
+
+function renderFailedResult(title, failure, rawOutput, extra = []) {
+  const lines = [`# ${title} (failed)`, "", "Status: failed", ...failureLines(failure), ...extra, ...partialOutputLines(rawOutput)];
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function readFailure(job, storedJob) {
+  const candidate = storedJob?.failure ?? storedJob?.result?.failure ?? job?.failure ?? null;
+  if (candidate && typeof candidate === "object") {
+    return candidate;
+  }
+  // Jobs stored before failures were recorded: a failed job's output is only a partial.
+  const hasOutput = Boolean(storedJob?.result?.rawOutput || storedJob?.result?.codex?.stdout || storedJob?.rendered);
+  if (job?.status === "failed" && hasOutput) {
+    return {
+      class: "turn_failed",
+      classifiedFrom: "legacy-record",
+      type: null,
+      code: null,
+      message: storedJob?.errorMessage ?? job?.errorMessage ?? null,
+      details: null,
+      turnStatus: null
+    };
+  }
+  return null;
+}
+
 function formatJobLine(job) {
   const parts = [job.id, `${job.status || "unknown"}`];
   if (job.kindLabel) {
@@ -127,6 +205,9 @@ function pushJobDetails(lines, job, options = {}) {
   lines.push(`- ${formatJobLine(job)}`);
   if (job.summary) {
     lines.push(`  Summary: ${job.summary}`);
+  }
+  if (job.failure) {
+    lines.push(`  ${failureLabel(job.failure)}${job.failure.type ? ` (${job.failure.type})` : ""}: ${job.failure.message ?? "no error text from Codex"}`);
   }
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
@@ -211,6 +292,11 @@ export function renderSetupReport(report) {
 }
 
 export function renderReviewResult(parsedResult, meta) {
+  if (parsedResult?.failure) {
+    return renderFailedResult(`Codex ${meta.reviewLabel}`, parsedResult.failure, parsedResult.rawOutput ?? "", [
+      ...(meta.targetLabel ? ["", `Target: ${meta.targetLabel}`] : [])
+    ]);
+  }
   if (!parsedResult.parsed) {
     const lines = [
       `# Codex ${meta.reviewLabel}`,
@@ -290,6 +376,13 @@ export function renderReviewResult(parsedResult, meta) {
 export function renderNativeReviewResult(result, meta) {
   const stdout = result.stdout.trim();
   const stderr = result.stderr.trim();
+  if (result.failure) {
+    return renderFailedResult(`Codex ${meta.reviewLabel}`, result.failure, stdout, [
+      "",
+      `Target: ${meta.targetLabel}`,
+      ...(stderr ? ["", "stderr:", "", "```text", stderr, "```"] : [])
+    ]);
+  }
   const lines = [
     `# Codex ${meta.reviewLabel}`,
     "",
@@ -316,6 +409,9 @@ export function renderNativeReviewResult(result, meta) {
 
 export function renderTaskResult(parsedResult, meta) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
+  if (parsedResult?.failure) {
+    return renderFailedResult(meta?.title ?? "Codex Task", parsedResult.failure, rawOutput);
+  }
   if (rawOutput) {
     return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
   }
@@ -392,6 +488,15 @@ export function renderJobStatusReport(job) {
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
+  const failure = readFailure(job, storedJob);
+  if (failure) {
+    const partial =
+      (typeof storedJob?.result?.rawOutput === "string" && storedJob.result.rawOutput) ||
+      (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
+      (typeof storedJob?.rendered === "string" ? storedJob.rendered : "");
+    const output = renderFailedResult(job.title ?? "Codex Result", failure, partial, ["", `Job: ${job.id}`]);
+    return threadId ? `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n` : output;
+  }
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
     if (!threadId) {

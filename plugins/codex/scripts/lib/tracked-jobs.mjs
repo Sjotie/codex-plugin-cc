@@ -286,7 +286,10 @@ export async function runTrackedJob(job, runner, options = {}) {
         phase: completionStatus === "completed" ? "done" : "failed",
         completedAt,
         result: execution.payload,
-        rendered: execution.rendered
+        rendered: execution.rendered,
+        // Explicit values so a failure from an earlier attempt of this job never survives a later result.
+        failure: execution.failure ?? null,
+        errorMessage: execution.failure ? (execution.failure.message ?? null) : null
       };
     });
     if (completedRecord?.status === "cancelled") {
@@ -313,6 +316,7 @@ export async function runTrackedJob(job, runner, options = {}) {
         status: "failed",
         phase: "failed",
         errorMessage,
+        failure: { class: "runner_error", classifiedFrom: "exception", type: error?.name ?? null, code: error?.code == null ? null : String(error.code), message: errorMessage, details: null, turnStatus: null },
         pid: null,
         completedAt,
         logFile: options.logFile ?? job.logFile ?? existing?.logFile ?? null

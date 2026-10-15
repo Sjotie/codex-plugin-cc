@@ -395,6 +395,7 @@ function createTurnCaptureState(threadId, options = {}) {
     reviewText: "",
     reasoningSummary: [],
     error: null,
+    retryableError: null,
     messages: [],
     fileChanges: [],
     commandExecutions: [],
@@ -600,10 +601,20 @@ function applyTurnNotification(state, message) {
         emitProgress(state.onProgress, update?.message, update?.phase ?? null);
       }
       break;
-    case "error":
-      state.error = message.params.error;
+    case "error": {
+      // A subagent thread's error is not the main turn's failure, and an error
+      // Codex is still retrying may be followed by a completed turn.
+      const fromOtherThread = Boolean(message.params.threadId) && message.params.threadId !== state.threadId;
+      if (!fromOtherThread) {
+        if (message.params.willRetry === true) {
+          state.retryableError = message.params.error;
+        } else {
+          state.error = message.params.error;
+        }
+      }
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
       break;
+    }
     case "turn/completed":
       if ((message.params.threadId ?? null) !== state.threadId) {
         state.activeSubagentTurns.delete(message.params.threadId);
@@ -831,6 +842,78 @@ async function resumeThread(client, threadId, cwd, options = {}) {
 
 function buildResultStatus(turnState) {
   return turnState.finalTurn?.status === "completed" ? 0 : 1;
+}
+
+// Exact CodexErrorInfo value for the provider's cyber safety block (present in
+// the Codex app-server error enum). Other values, including similar-looking
+// ones, are reported as plain provider errors.
+const SAFETY_BLOCK_ERROR_TYPES = new Set(["cyberPolicy"]);
+const SAFETY_BLOCK_MESSAGE_PATTERN = /flagged for possible cybersecurity risk/i;
+
+function pickString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+// codexErrorInfo is either a bare string ("usageLimitExceeded") or a one-key
+// object ({ httpConnectionFailed: { httpStatusCode } }).
+function readErrorInfo(info) {
+  if (typeof info === "string") {
+    return { type: pickString(info), code: null };
+  }
+  if (info && typeof info === "object" && !Array.isArray(info)) {
+    const [key] = Object.keys(info);
+    const detail = key ? info[key] : null;
+    const code = detail && typeof detail === "object" ? (detail.httpStatusCode ?? detail.code ?? null) : null;
+    return { type: pickString(key), code: code == null ? null : String(code) };
+  }
+  return { type: null, code: null };
+}
+
+/**
+ * Turns the provider error recorded on a failed turn (or the failed turn's own
+ * error) into a stable shape for callers. A provider safety block is only
+ * claimed from a structured error type; the literal provider sentence is a
+ * narrower fallback and says so in `classifiedFrom`. Anything else stays
+ * `provider_error` instead of being guessed into a policy class.
+ */
+export function describeProviderFailure(error, fallback = {}) {
+  const info = readErrorInfo(error?.codexErrorInfo ?? error?.type ?? null);
+  const message = pickString(error?.message) ?? pickString(fallback.message);
+  const type = info.type ?? pickString(error?.type);
+  const code = info.code ?? (error?.code == null ? null : String(error.code));
+  let failureClass = "provider_error";
+  let classifiedFrom = "error";
+  if (type && SAFETY_BLOCK_ERROR_TYPES.has(type)) {
+    failureClass = "provider_safety_block";
+    classifiedFrom = "structured-type";
+  } else if (message && SAFETY_BLOCK_MESSAGE_PATTERN.test(message)) {
+    failureClass = "provider_safety_block";
+    classifiedFrom = "message-text";
+  }
+  return {
+    class: failureClass,
+    classifiedFrom,
+    type,
+    code,
+    message,
+    details: pickString(error?.additionalDetails),
+    turnStatus: fallback.turnStatus ?? null
+  };
+}
+
+function buildFailure(turnState) {
+  if (buildResultStatus(turnState) === 0) {
+    return null;
+  }
+  const turnStatus = turnState.finalTurn?.status ?? null;
+  const error = turnState.error ?? turnState.finalTurn?.error ?? turnState.retryableError ?? null;
+  if (error) {
+    return describeProviderFailure(error, { turnStatus });
+  }
+  if (turnStatus === "interrupted") {
+    return { class: "interrupted", classifiedFrom: "turn-status", type: null, code: null, message: null, details: null, turnStatus };
+  }
+  return { class: "turn_failed", classifiedFrom: "turn-status", type: null, code: null, message: null, details: null, turnStatus };
 }
 
 const BUILTIN_PROVIDER_LABELS = new Map([
@@ -1130,7 +1213,8 @@ export async function runAppServerReview(cwd, options = {}) {
       reviewText: turnState.reviewText,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
-      error: turnState.error,
+      error: turnState.error ?? turnState.finalTurn?.error ?? null,
+      failure: buildFailure(turnState),
       stderr: cleanCodexStderr(client.stderr)
     };
   });
@@ -1256,7 +1340,8 @@ export async function runAppServerTurn(cwd, options = {}) {
       finalMessage: turnState.lastAgentMessage,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
-      error: turnState.error,
+      error: turnState.error ?? turnState.finalTurn?.error ?? null,
+      failure: buildFailure(turnState),
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),

@@ -401,7 +401,8 @@ export function reconcileJobWorkerState(cwd, job) {
           ...(Object.hasOwn(storedJob, "threadId") ? { threadId: storedJob.threadId } : {}),
           ...(Object.hasOwn(storedJob, "turnId") ? { turnId: storedJob.turnId } : {}),
           ...(Object.hasOwn(storedJob, "summary") ? { summary: storedJob.summary } : {}),
-          ...(Object.hasOwn(storedJob, "errorMessage") ? { errorMessage: storedJob.errorMessage } : {})
+          ...(Object.hasOwn(storedJob, "errorMessage") ? { errorMessage: storedJob.errorMessage } : {}),
+          ...(Object.hasOwn(storedJob, "failure") ? { failure: storedJob.failure } : {})
         }
       };
     }

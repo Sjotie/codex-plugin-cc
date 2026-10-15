@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased (fork, Homebase #1795)
+
+- a failed Codex turn now reports Codex's own error. The task, review and
+  adversarial-review results (JSON, text, stored job, `status`, `wait`,
+  `result`) carry `failure` (`class`, `type`, `code`, `message`, `details`,
+  `classifiedFrom`) and `incomplete: true`; the last intermediate message is
+  shown only as "NOT a final report" after the error. `failure.class` is
+  `provider_safety_block` (exact `cyberPolicy` error type, or the literal
+  provider sentence, marked `classifiedFrom: "message-text"`), `provider_error`,
+  `interrupted`, `turn_failed` (failed without error text) or `runner_error`.
+  Nothing is retried, rephrased or rerouted automatically. Errors from
+  subagent threads and retryable errors no longer count against a completed
+  turn, and a later success clears an earlier failure on the same job
+
 ## 1.0.7-sjotie.15 (fork)
 
 - SessionEnd no longer forgets a session's tasks. It used to drop every job of
