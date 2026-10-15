@@ -195,3 +195,18 @@ test("a later successful run of the same job clears the earlier failure and erro
   const out = renderStoredJobResult({ id: job.id, status: "completed" }, stored);
   assert.equal(out.trim(), "FINAL");
 });
+
+test("the literal-message fallback never overrides a structured type", () => {
+  const failure = describeProviderFailure({
+    message: "flagged for possible cybersecurity risk",
+    codexErrorInfo: "serverOverloaded"
+  });
+  assert.equal(failure.class, "provider_error");
+  assert.equal(failure.type, "serverOverloaded");
+});
+
+test("provider text cannot break out of its code fence", () => {
+  const failure = describeProviderFailure({ message: "line1\n```\n# injected heading", codexErrorInfo: "x" });
+  const out = renderTaskResult({ rawOutput: "", failure }, { title: "T" });
+  assert.match(out, /````text\nline1\n```\n# injected heading\n````/);
+});

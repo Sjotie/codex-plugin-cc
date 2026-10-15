@@ -612,7 +612,8 @@ function applyTurnNotification(state, message) {
           state.error = message.params.error;
         }
       }
-      emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
+      const counts = !fromOtherThread && message.params.willRetry !== true;
+      emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, counts ? "failed" : null);
       break;
     }
     case "turn/completed":
@@ -886,7 +887,7 @@ export function describeProviderFailure(error, fallback = {}) {
   if (type && SAFETY_BLOCK_ERROR_TYPES.has(type)) {
     failureClass = "provider_safety_block";
     classifiedFrom = "structured-type";
-  } else if (message && SAFETY_BLOCK_MESSAGE_PATTERN.test(message)) {
+  } else if (!type && message && SAFETY_BLOCK_MESSAGE_PATTERN.test(message)) {
     failureClass = "provider_safety_block";
     classifiedFrom = "message-text";
   }
@@ -906,7 +907,11 @@ function buildFailure(turnState) {
     return null;
   }
   const turnStatus = turnState.finalTurn?.status ?? null;
-  const error = turnState.error ?? turnState.finalTurn?.error ?? turnState.retryableError ?? null;
+  const error =
+    turnState.error ??
+    turnState.finalTurn?.error ??
+    (turnStatus === "failed" ? turnState.retryableError : null) ??
+    null;
   if (error) {
     return describeProviderFailure(error, { turnStatus });
   }

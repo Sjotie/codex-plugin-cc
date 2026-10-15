@@ -84,6 +84,17 @@ function isStructuredReviewStoredResult(storedJob) {
 }
 
 
+// Fence longer than any backtick run in the text, so provider text cannot close it early.
+function fenced(text) {
+  const longest = Math.max(2, ...(String(text).match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longest + 1);
+  return [`${fence}text`, text, fence];
+}
+
+function oneLine(text) {
+  return String(text).replace(/\s+/g, " ").trim();
+}
+
 function failureLabel(failure) {
   return failure.class === "provider_safety_block" ? "failure:provider_safety_block" : `failure:${failure.class}`;
 }
@@ -111,12 +122,12 @@ function failureLines(failure) {
     lines.push(`Codex error code: ${failure.code}`);
   }
   if (failure.message) {
-    lines.push("Codex error:", "", "```text", failure.message, "```");
+    lines.push("Codex error:", "", ...fenced(failure.message));
   } else {
     lines.push("Codex reported no error text for this failure.");
   }
   if (failure.details) {
-    lines.push("", `Details: ${failure.details}`);
+    lines.push("", `Details: ${oneLine(failure.details)}`);
   }
   const provenance = describeFailureProvenance(failure);
   if (provenance) {
@@ -132,7 +143,7 @@ function partialOutputLines(rawOutput) {
   if (!rawOutput) {
     return [];
   }
-  return ["", "Incomplete intermediate output (NOT a final report; the turn failed before finishing):", "", "```text", rawOutput.trimEnd(), "```"];
+  return ["", "Incomplete intermediate output (NOT a final report; the turn failed before finishing):", "", ...fenced(rawOutput.trimEnd())];
 }
 
 function renderFailedResult(title, failure, rawOutput, extra = []) {
@@ -149,7 +160,7 @@ function readFailure(job, storedJob) {
   const hasOutput = Boolean(storedJob?.result?.rawOutput || storedJob?.result?.codex?.stdout || storedJob?.rendered);
   if (job?.status === "failed" && hasOutput) {
     return {
-      class: "turn_failed",
+      class: "unknown_failure",
       classifiedFrom: "legacy-record",
       type: null,
       code: null,
@@ -207,7 +218,7 @@ function pushJobDetails(lines, job, options = {}) {
     lines.push(`  Summary: ${job.summary}`);
   }
   if (job.failure) {
-    lines.push(`  ${failureLabel(job.failure)}${job.failure.type ? ` (${job.failure.type})` : ""}: ${job.failure.message ?? "no error text from Codex"}`);
+    lines.push(`  ${failureLabel(job.failure)}${job.failure.type ? ` (${job.failure.type})` : ""}: ${oneLine(job.failure.message ?? "no error text from Codex")}`);
   }
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
