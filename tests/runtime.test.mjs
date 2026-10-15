@@ -1569,6 +1569,28 @@ test("task --background --wait stays attached until the stored result is termina
   assert.match(payload.storedJob.rendered, /Handled the requested task/);
 });
 
+// Spawns a detached child from a launcher that exits at once, and returns the
+// pid the orphaned child was re-parented to.
+function measureOrphanReaper(t) {
+  const launcher = run(process.execPath, [
+    "-e",
+    'const c = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));'
+  ]);
+  assert.equal(launcher.status, 0, launcher.stderr);
+  const orphanPid = Number(launcher.stdout);
+  assert.ok(Number.isInteger(orphanPid) && orphanPid > 0, launcher.stdout);
+  t.after(() => {
+    try {
+      process.kill(orphanPid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  });
+  const result = run("ps", ["-o", "ppid=", "-p", String(orphanPid)]);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
 test("task --background re-parents the detached worker away from the companion", async (t) => {
   if (process.platform === "win32") {
     t.skip("POSIX re-parenting semantics only");
@@ -1602,12 +1624,14 @@ test("task --background re-parents the detached worker away from the companion",
     return Number.isInteger(pid) && pid > 0 ? pid : null;
   });
 
-  // The double-fork must have re-parented the worker to PID 1 by the time its
-  // pid is registered; a worker still parented to the (already exited)
-  // companion or launcher would be vulnerable to Bash-timeout tree kills.
+  // The double-fork must have re-parented the worker to the orphan reaper by
+  // the time its pid is registered; a worker still parented to the (already
+  // exited) companion or launcher would be vulnerable to Bash-timeout tree
+  // kills. The reaper is PID 1, or the nearest child-subreaper ancestor such as
+  // `systemd --user` on a Linux desktop, so measure it with an own orphan.
   const ppidResult = run("ps", ["-o", "ppid=", "-p", String(workerPid)]);
   assert.equal(ppidResult.status, 0, ppidResult.stderr);
-  assert.equal(ppidResult.stdout.trim(), "1");
+  assert.equal(ppidResult.stdout.trim(), measureOrphanReaper(t));
 
   const waitedStatus = run(
     "node",
