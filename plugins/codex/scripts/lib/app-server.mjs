@@ -210,9 +210,9 @@ export class AppServerClientBase {
     // app-server delivers as a server->client request. This client runs Codex
     // non-interactively, so there is no human to answer it; blanket-rejecting
     // every server request with -32601 makes those tool calls fail ("user
-    // rejected MCP tool call") on the background runner. A standard form
-    // elicitation from a local MCP server is accepted as before; app consent,
-    // URL and OpenAI-specific forms are declined (#1796, app-policy.mjs).
+    // rejected MCP tool call") on the background runner. A form elicitation
+    // from a local MCP server is accepted as before; anything from the apps
+    // server and URL elicitations are declined (#1796, app-policy.mjs).
     if (message.method === "mcpServer/elicitation/request") {
       const action = shouldAutoAcceptElicitation(message.params) ? "accept" : "decline";
       this.sendMessage({
@@ -380,8 +380,9 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     });
     // #1796: a broker started by an older plugin (or handed in via
     // CODEX_COMPANION_APP_SERVER_ENDPOINT) may run its app-server with apps on.
-    // Only a broker that reports the current app policy is used.
-    if (initialized?.appPolicy !== APPS_POLICY_ID) {
+    // Only a broker that reports the current app policy is used, except to
+    // interrupt a turn it already runs (allowLegacyBroker).
+    if (initialized?.appPolicy !== APPS_POLICY_ID && !this.options.allowLegacyBroker) {
       throw createBrokerPolicyError(initialized?.appPolicy ?? null);
     }
     this.notify("initialized", {});
@@ -431,7 +432,7 @@ export class CodexAppServerClient {
       await client.initialize();
     } catch (error) {
       if (client.transport === "broker") {
-        if (error?.code === BROKER_POLICY_MISMATCH) {
+        if (error?.code === BROKER_POLICY_MISMATCH && !options.allowLegacyBroker) {
           // Never reuse a broker under another app policy: run this request on
           // a direct child instead, and say why on stderr.
           await client.close().catch(() => {});

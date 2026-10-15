@@ -92,11 +92,13 @@ test("app-server children start with ChatGPT apps disabled before the subcommand
   assert.ok(fakeState.appServerConfigOverrides.includes("mcp_servers.claude-peers-convex.enabled=false"));
 });
 
-test("MCP elicitations: local form accepted, app consent and non-standard modes declined", () => {
+test("MCP elicitations: local forms accepted; apps server, URL and unknown modes declined", () => {
   assert.equal(elicitationAction({ serverName: "local-db", threadId: "t", mode: "form", message: "ok?", requestedSchema: {} }), "accept");
   assert.equal(elicitationAction({ serverName: "codex_apps", threadId: "t", mode: "form", message: "ok?", requestedSchema: {} }), "decline");
-  assert.equal(elicitationAction({ serverName: "local-db", threadId: "t", mode: "openai/form", message: "ok?", requestedSchema: {} }), "decline");
-  assert.equal(elicitationAction({ serverName: "local-db", threadId: "t", mode: "openaiForm", message: "ok?", requestedSchema: {} }), "decline");
+  assert.equal(elicitationAction({ serverName: "local-db", threadId: "t", mode: "openai/form", message: "ok?", requestedSchema: {} }), "accept");
+  assert.equal(elicitationAction({ serverName: "local-db", threadId: "t", mode: "openaiForm", message: "ok?", requestedSchema: {} }), "accept");
+  assert.equal(elicitationAction({ serverName: "codex_apps", threadId: "t", mode: "openai/form", message: "ok?", requestedSchema: {} }), "decline");
+  assert.equal(elicitationAction({ serverName: "local-db", threadId: "t", mode: "something-new" }), "decline");
   assert.equal(elicitationAction({ serverName: "local-db", threadId: "t", mode: "url", message: "sign in", url: "https://example.invalid", elicitationId: "e" }), "decline");
   assert.equal(elicitationAction({ threadId: "t", mode: "form" }), "decline");
   assert.equal(elicitationAction(undefined), "decline");
@@ -140,7 +142,7 @@ test("a busy broker recorded without app policy is not reused by ensureBrokerSes
   assert.equal(session, null);
 });
 
-test("status names a broker under a legacy app policy and does not call it shared", () => {
+test("status names a broker under a legacy app policy", () => {
   const workspace = makeTempDir();
   const binDir = makeTempDir();
   fs.symlinkSync(process.execPath, path.join(binDir, "node"));
@@ -151,6 +153,13 @@ test("status names a broker under a legacy app policy and does not call it share
   const setup = run("node", [SCRIPT, "setup", "--cwd", workspace, "--json"], { cwd: makeTempDir(), env });
   assert.equal(setup.status, 0, setup.stderr);
   const payload = JSON.parse(setup.stdout);
-  assert.equal(payload.sessionRuntime.mode, "direct");
-  assert.match(payload.sessionRuntime.label, /app policy legacy, not reused/);
+  assert.equal(payload.sessionRuntime.brokerAppPolicy, "legacy");
+  assert.match(payload.sessionRuntime.label, /app policy legacy: replaced when idle, bypassed while busy/);
+});
+
+test("an interrupt still reaches a legacy broker that owns the turn", { skip: process.platform === "win32" }, async (t) => {
+  const legacy = await startFakeBroker(t, { userAgent: "codex-companion-broker" });
+  const client = await CodexAppServerClient.connect(makeTempDir(), { brokerEndpoint: legacy.endpoint, allowLegacyBroker: true });
+  t.after(() => client.close());
+  assert.equal(client.transport, "broker");
 });

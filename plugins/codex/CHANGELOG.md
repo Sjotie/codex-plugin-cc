@@ -15,10 +15,12 @@
   older plugin, or one handed in via `CODEX_COMPANION_APP_SERVER_ENDPOINT`
   that does not report it, is not reused: the request runs on a direct
   app-server and stderr says why. A busy legacy broker is no longer kept in
-  use either. `/codex:setup` and `/codex:status` name a legacy broker
-- MCP elicitations are no longer accepted blindly. A standard `form`
-  elicitation from a local MCP server is still accepted; consent requests
-  from `codex_apps`, OpenAI-specific forms and URL elicitations are declined
+  use either; an idle one is replaced as before. Only `/codex:cancel` still
+  reaches a legacy broker, to interrupt a turn it runs. `/codex:setup` and
+  `/codex:status` name the broker's app policy
+- MCP elicitations are no longer accepted blindly. Form elicitations from a
+  local MCP server are still accepted; anything from `codex_apps`, URL
+  elicitations and unknown modes are declined
 
 ## 1.0.7-sjotie.15 (fork)
 

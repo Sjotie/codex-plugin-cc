@@ -988,22 +988,19 @@ export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) 
     env?.[BROKER_ENDPOINT_ENV] ??
     (isBrokerSessionActive(brokerSession) ? brokerSession.endpoint : null);
   if (endpoint) {
-    // #1796: show which app policy the shared runtime runs under; a broker
-    // under another policy is not reused (runs start a direct app-server).
+    // #1796: show which app policy the shared runtime runs under. A broker
+    // under another policy is replaced when idle and bypassed while busy.
     const fromEnv = Boolean(env?.[BROKER_ENDPOINT_ENV]);
     const brokerAppPolicy = fromEnv ? null : (brokerSession?.runtime?.appPolicy ?? "legacy");
-    if (brokerAppPolicy !== null && brokerAppPolicy !== APPS_POLICY_ID) {
-      return {
-        mode: "direct",
-        label: `direct startup (shared runtime has app policy ${brokerAppPolicy}, not reused)`,
-        detail: `The shared Codex runtime was started under app policy ${brokerAppPolicy}, not ${APPS_POLICY_ID}; runs start a direct app-server until it is replaced.`,
-        endpoint,
-        brokerAppPolicy
-      };
-    }
+    const policyNote =
+      brokerAppPolicy === null
+        ? "app policy checked on connect"
+        : brokerAppPolicy === APPS_POLICY_ID
+          ? APPS_POLICY_ID
+          : `app policy ${brokerAppPolicy}: replaced when idle, bypassed while busy`;
     return {
       mode: "shared",
-      label: fromEnv ? "shared session (app policy checked on connect)" : `shared session (${APPS_POLICY_ID})`,
+      label: `shared session (${policyNote})`,
       detail: "This Claude session is configured to reuse one shared Codex runtime.",
       endpoint,
       brokerAppPolicy
@@ -1075,7 +1072,9 @@ export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
 
   let client = null;
   try {
-    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
+    // A turn still running on a broker under an older app policy must stay
+    // stoppable: an interrupt starts no new work (#1796).
+    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true, allowLegacyBroker: true });
     await client.request("turn/interrupt", { threadId, turnId });
     return {
       attempted: true,

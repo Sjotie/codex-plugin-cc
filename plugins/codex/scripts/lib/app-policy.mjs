@@ -17,16 +17,18 @@ export const APPS_POLICY_ID = "apps:deny-v1";
 /** Global codex flag: must precede the subcommand, like the peers override. */
 export const APPS_DISABLE_OVERRIDE = "features.apps=false";
 
+// Unanchored on purpose: anything named after the apps server fails closed.
 const APP_SERVER_NAME = /codex_apps/;
+const FORM_MODES = new Set(["form", "openai/form", "openaiForm"]);
 
 /**
  * Whether a non-interactive client may auto-accept an MCP elicitation.
  *
- * Only a standard MCP `form` elicitation from a server that is not the ChatGPT
- * apps server is accepted, as before for local MCP servers. App consent
- * (`codex_apps`), OpenAI-specific forms (`openai/form`, `openaiForm`), URL
- * elicitations (sign-in/consent pages) and anything unrecognised are declined:
- * there is no human here to consent.
+ * Local MCP servers keep the old behavior for form elicitations (also Codex's
+ * own OpenAI form modes, which may carry a local tool-call approval). Declined:
+ * anything from the ChatGPT apps server (`codex_apps`: app consent and app
+ * tool approvals), URL elicitations (sign-in/consent pages nobody opens), and
+ * requests without a server name or with an unknown mode.
  * @param {unknown} params
  * @returns {boolean}
  */
@@ -38,5 +40,5 @@ export function shouldAutoAcceptElicitation(params) {
   if (typeof serverName !== "string" || serverName.length === 0 || APP_SERVER_NAME.test(serverName)) {
     return false;
   }
-  return mode === "form";
+  return typeof mode === "string" && FORM_MODES.has(mode);
 }
