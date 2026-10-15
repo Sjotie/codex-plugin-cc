@@ -487,13 +487,15 @@ async function executeReviewRun(request) {
         stderr: result.stderr,
         stdout: result.reviewText,
         reasoning: result.reasoningSummary
-      }
+      },
+      ...failurePayload(result.failure)
     };
     const rendered = renderNativeReviewResult(
       {
         status: result.status,
         stdout: result.reviewText,
-        stderr: result.stderr
+        stderr: result.stderr,
+        failure: result.failure
       },
       { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
     );
@@ -504,7 +506,8 @@ async function executeReviewRun(request) {
       turnId: result.turnId,
       payload,
       rendered,
-      summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
+      failure: result.failure ?? null,
+      summary: summarizeFailure(result.failure) ?? firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
       jobTitle: `Codex ${reviewName}`,
       jobClass: "review",
       targetLabel: target.label
@@ -542,7 +545,8 @@ async function executeReviewRun(request) {
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
     parseError: parsed.parseError,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    ...failurePayload(result.failure)
   };
 
   return {
@@ -550,12 +554,17 @@ async function executeReviewRun(request) {
     threadId: result.threadId,
     turnId: result.turnId,
     payload,
-    rendered: renderReviewResult(parsed, {
+    failure: result.failure ?? null,
+    rendered: renderReviewResult({ ...parsed, failure: result.failure }, {
       reviewLabel: reviewName,
       targetLabel: context.target.label,
       reasoningSummary: result.reasoningSummary
     }),
-    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
+    summary:
+      summarizeFailure(result.failure) ??
+      parsed.parsed?.summary ??
+      parsed.parseError ??
+      firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
     jobTitle: `Codex ${reviewName}`,
     jobClass: "review",
     targetLabel: context.target.label
@@ -605,6 +614,7 @@ async function executeTaskRun(request) {
     {
       rawOutput,
       failureMessage,
+      failure: result.failure,
       reasoningSummary: result.reasoningSummary
     },
     {
@@ -618,7 +628,8 @@ async function executeTaskRun(request) {
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    ...failurePayload(result.failure)
   };
 
   return {
@@ -627,11 +638,26 @@ async function executeTaskRun(request) {
     turnId: result.turnId,
     payload,
     rendered,
-    summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
+    failure: result.failure ?? null,
+    summary: summarizeFailure(result.failure) ?? firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
     jobTitle: taskMetadata.title,
     jobClass: "task",
     write: Boolean(request.write)
   };
+}
+
+// Payload fields for a failed turn: the failure, and a flag so no caller treats
+// the (possibly present) intermediate output as a finished report.
+function failurePayload(failure) {
+  return failure ? { failure, incomplete: true } : {};
+}
+
+function summarizeFailure(failure) {
+  if (!failure) {
+    return null;
+  }
+  const detail = failure.message ?? (failure.type ? `Codex error type ${failure.type}` : "Codex gave no error text");
+  return `Failed (${failure.class}): ${firstMeaningfulLine(detail, detail)}`;
 }
 
 function buildReviewJobMetadata(reviewName, target) {

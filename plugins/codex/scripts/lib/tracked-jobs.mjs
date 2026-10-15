@@ -152,14 +152,23 @@ function stopTrackedJobIfCancelled(job, logFile) {
     return null;
   }
 
+  // Failure metadata from an earlier attempt of this job does not describe the cancelled run.
+  const staleFailure = Boolean(storedJob.failure);
+  const errorMessage = staleFailure ? "Cancelled by user." : (storedJob.errorMessage ?? "Cancelled by user.");
   upsertJob(job.workspaceRoot, {
     id: job.id,
     status: "cancelled",
     phase: "cancelled",
     pid: storedJob.pid ?? null,
-    errorMessage: storedJob.errorMessage ?? "Cancelled by user.",
+    failure: null,
+    errorMessage,
     completedAt: storedJob.completedAt ?? nowIso()
   });
+  if (staleFailure) {
+    updateJobRecord(job.workspaceRoot, job.id, (existing) =>
+      existing?.status === "cancelled" ? { ...existing, failure: null, errorMessage } : null
+    );
+  }
   appendLogLine(logFile, "Stopped after cancellation.");
   return {
     exitStatus: 0,
@@ -286,7 +295,10 @@ export async function runTrackedJob(job, runner, options = {}) {
         phase: completionStatus === "completed" ? "done" : "failed",
         completedAt,
         result: execution.payload,
-        rendered: execution.rendered
+        rendered: execution.rendered,
+        // Explicit values so a failure from an earlier attempt of this job never survives a later result.
+        failure: execution.failure ?? null,
+        errorMessage: execution.failure ? (execution.failure.message ?? null) : null
       };
     });
     if (completedRecord?.status === "cancelled") {
@@ -313,6 +325,7 @@ export async function runTrackedJob(job, runner, options = {}) {
         status: "failed",
         phase: "failed",
         errorMessage,
+        failure: { class: "runner_error", classifiedFrom: "exception", type: error?.name ?? null, code: error?.code == null ? null : String(error.code), message: errorMessage, details: null, turnStatus: null },
         pid: null,
         completedAt,
         logFile: options.logFile ?? job.logFile ?? existing?.logFile ?? null

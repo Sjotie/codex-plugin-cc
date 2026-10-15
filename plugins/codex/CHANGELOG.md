@@ -22,6 +22,27 @@
   local MCP server are still accepted; anything from `codex_apps`, URL
   elicitations and unknown modes are declined
 
+## Unreleased (fork, Homebase #1795)
+
+- a failed Codex turn now reports Codex's own error. The task, review and
+  adversarial-review results (JSON, text, stored job, `status`, `wait`,
+  `result`) carry `failure` (`class`, `type`, `code`, `message`, `details`,
+  `classifiedFrom`) and `incomplete: true`; the last intermediate message is
+  shown only as "NOT a final report" after the error. `failure.class` is
+  `provider_safety_block` (exact `cyberPolicy` error type, or the literal
+  provider sentence, marked `classifiedFrom: "message-text"`), `provider_error`,
+  `interrupted`, `turn_failed` (failed without error text) or `runner_error`.
+  Nothing is retried, rephrased or rerouted automatically. Errors from
+  subagent threads and retryable errors no longer count against a completed
+  turn, and a later success clears an earlier failure on the same job
+- the failed turn's own error wins over an earlier error notification (an
+  empty notification no longer hides it; a useful earlier one is used only when
+  the final error is absent or empty). Stored jobs with the legacy `error`
+  status get the same "NOT a final report" wrapper as `failed`. `status` shows
+  the error text of failed records that have no structured failure, labelled
+  `failure:unknown_failure`. A cancelled run no longer reports an earlier
+  attempt's failure, and its output is labelled incomplete
+
 ## 1.0.7-sjotie.15 (fork)
 
 - SessionEnd no longer forgets a session's tasks. It used to drop every job of
