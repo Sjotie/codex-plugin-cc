@@ -48,6 +48,12 @@ function connectToEndpoint(endpoint) {
   return net.createConnection({ path: target.path });
 }
 
+/**
+ * @param {string} endpoint
+ * @param {number} [timeoutMs]
+ * @param {{ shouldGiveUp?: () => boolean }} [options] shouldGiveUp ends the wait early, e.g. once the broker child exited.
+ * @returns {Promise<boolean>}
+ */
 export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000, { shouldGiveUp = () => false } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs && !shouldGiveUp()) {

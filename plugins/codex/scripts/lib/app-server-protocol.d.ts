@@ -22,6 +22,7 @@ import type {
   ThreadStartParams as RawThreadStartParams,
   ThreadStartResponse,
   Turn,
+  TurnError,
   TurnInterruptParams,
   TurnInterruptResponse,
   TurnStartParams,
@@ -39,10 +40,18 @@ export type {
   ThreadItem,
   ThreadListParams,
   Turn,
+  TurnError,
   TurnInterruptParams,
   TurnStartParams,
   UserInput
 };
+
+/**
+ * What our own app-server-broker.mjs answers on `initialize`; it answers itself
+ * instead of forwarding to the app-server. `appPolicy` is the broker's app
+ * policy (#1796, app-policy.mjs); a broker from an older plugin leaves it out.
+ */
+export type BrokerInitializeResponse = Pick<InitializeResponse, "userAgent"> & { appPolicy?: string };
 
 export type ThreadStartParams = Omit<RawThreadStartParams, "persistExtendedHistory">;
 export type ThreadResumeParams = Omit<RawThreadResumeParams, "persistExtendedHistory">;

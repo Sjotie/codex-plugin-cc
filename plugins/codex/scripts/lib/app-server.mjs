@@ -3,6 +3,7 @@
  * @typedef {import("./app-server-protocol").AppServerMethod} AppServerMethod
  * @typedef {import("./app-server-protocol").AppServerNotification} AppServerNotification
  * @typedef {import("./app-server-protocol").AppServerNotificationHandler} AppServerNotificationHandler
+ * @typedef {import("./app-server-protocol").BrokerInitializeResponse} BrokerInitializeResponse
  * @typedef {import("./app-server-protocol").ClientInfo} ClientInfo
  * @typedef {import("./app-server-protocol").CodexAppServerClientOptions} CodexAppServerClientOptions
  * @typedef {import("./app-server-protocol").InitializeCapabilities} InitializeCapabilities
@@ -374,6 +375,7 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
       });
     });
 
+    /** @type {BrokerInitializeResponse} */
     const initialized = await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES

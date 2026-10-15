@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { BROKER_SHUTDOWN_ACCEPTED, sendBrokerShutdown } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 import { installFakeCodex, buildEnv } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
@@ -24,20 +25,37 @@ function disconnectedTask(t, behavior, args = [], command = "task") {
   const env = { ...buildEnv(bin), CLAUDE_PLUGIN_DATA: data, CODEX_HOME: data };
   for (const key of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_APP_SERVER_ENDPOINT",
     "CODEX_COMPANION_APP_SERVER_PID_FILE", "CODEX_COMPANION_APP_SERVER_LOG_FILE"]) delete env[key];
-  t.after(() => { for (const dir of [repo, bin, data]) fs.rmSync(dir, { recursive: true, force: true }); });
+  let broker = null;
+  // One hook, so the order holds: ask this fixture's own broker to shut down
+  // (it then ends its fake app-server child itself) while its socket still
+  // exists, and only then remove its repo, socket and pid file. Removing them
+  // first left the broker running until its idle timeout.
+  t.after(async () => {
+    if (broker?.endpoint) {
+      const outcome = await sendBrokerShutdown(broker.endpoint);
+      // A broker removes its pid file as the last step of its own shutdown, so
+      // a refused shutdown with the pid file still there means it may still run.
+      // Say so; never signal a pid from here.
+      if (outcome !== BROKER_SHUTDOWN_ACCEPTED && fs.existsSync(broker.pidFile)) {
+        t.diagnostic(`fixture broker ${broker.pid} did not accept shutdown (${outcome}); it may run until its idle timeout`);
+      }
+    }
+    for (const dir of [repo, bin, data, broker?.sessionDir]) {
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
   // Start explicitly so slow CI cannot silently fall back to direct before
   // the fault injection. These tests must exercise the broker transport.
   const boot = run("node", ["--input-type=module", "-e",
     `import { ensureBrokerSession } from ${JSON.stringify(LIFECYCLE)};
      console.log(JSON.stringify(await ensureBrokerSession(process.cwd(), { timeoutMs: 30000 })));`], { cwd: repo, env });
   assert.equal(boot.status, 0, boot.stderr);
-  const broker = JSON.parse(boot.stdout);
+  broker = JSON.parse(boot.stdout);
   assert.ok(broker?.endpoint, "fixture broker must be ready before task starts");
   env.CODEX_COMPANION_APP_SERVER_ENDPOINT = broker.endpoint;
   const settings = command === "task" ? ["--effort", "high"] : [];
   const result = run("node", [SCRIPT, command, ...args, "--model", "gpt-5.4", ...settings, "inspect this repository"], { cwd: repo, env });
   const brokerLog = fs.readFileSync(broker.logFile, "utf8");
-  t.after(() => fs.rmSync(broker.sessionDir, { recursive: true, force: true }));
   return { result, brokerLog, state: JSON.parse(fs.readFileSync(path.join(bin, "fake-codex-state.json"), "utf8")) };
 }
 

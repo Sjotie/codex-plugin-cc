@@ -5,6 +5,7 @@
  * @typedef {import("./app-server-protocol").ThreadResumeParams} ThreadResumeParams
  * @typedef {import("./app-server-protocol").ThreadStartParams} ThreadStartParams
  * @typedef {import("./app-server-protocol").Turn} Turn
+ * @typedef {import("./app-server-protocol").TurnError} TurnError
  * @typedef {import("./app-server-protocol").UserInput} UserInput
  * @typedef {((update: string | { message: string, phase: string | null, threadId?: string | null, turnId?: string | null, stderrMessage?: string | null, logTitle?: string | null, logBody?: string | null }) => void)} ProgressReporter
  * @typedef {{
@@ -27,7 +28,8 @@
  *   lastAgentMessage: string,
  *   reviewText: string,
  *   reasoningSummary: string[],
- *   error: unknown,
+ *   error: TurnError | null,
+ *   retryableError: TurnError | null,
  *   messages: Array<{ lifecycle: string, phase: string | null, text: string }>,
  *   fileChanges: ThreadItem[],
  *   commandExecutions: ThreadItem[],
@@ -555,6 +557,10 @@ function recordItem(state, item, lifecycle, threadId = null) {
   }
 }
 
+/**
+ * @param {TurnCaptureState} state
+ * @param {AppServerNotification} message
+ */
 function applyTurnNotification(state, message) {
   switch (message.method) {
     case "thread/started":
