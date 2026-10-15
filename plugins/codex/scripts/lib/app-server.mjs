@@ -15,6 +15,7 @@ import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, isBrokerSessionReady, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
+import { APPS_DISABLE_OVERRIDE, APPS_POLICY_ID, shouldAutoAcceptElicitation } from "./app-policy.mjs";
 
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
@@ -31,8 +32,9 @@ export const BROKER_BUSY_RPC_CODE = -32001;
 export const PEERS_MCP_DISABLE_OVERRIDE = "mcp_servers.claude-peers-convex.enabled=false";
 
 // `-c/--config` is a GLOBAL codex flag and must precede the subcommand
-// (`codex [OPTIONS] <COMMAND>`), so it goes before "app-server".
-export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "app-server"];
+// (`codex [OPTIONS] <COMMAND>`), so it goes before "app-server". #1796: ChatGPT
+// apps are off for every child too (app-policy.mjs).
+export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", APPS_DISABLE_OVERRIDE, "app-server"];
 
 /**
  * Build the environment for a spawned app-server child, layering the peers
@@ -79,6 +81,18 @@ function createProtocolError(message, data) {
 function createBrokerConnectionClosedError() {
   const error = /** @type {ProtocolError} */ (new Error("codex app-server connection closed."));
   error.code = "ECONNRESET";
+  return error;
+}
+
+export const BROKER_POLICY_MISMATCH = "BROKER_POLICY_MISMATCH";
+
+function createBrokerPolicyError(reported) {
+  const error = /** @type {ProtocolError} */ (
+    new Error(
+      `Codex broker reports app policy ${reported ?? "none (legacy)"}, expected ${APPS_POLICY_ID}; not reusing it, starting a direct Codex app-server instead.`
+    )
+  );
+  error.code = BROKER_POLICY_MISMATCH;
   return error;
 }
 
@@ -192,17 +206,18 @@ export class AppServerClientBase {
   }
 
   handleServerRequest(message) {
-    // MCP servers (e.g. ChatGPT connectors surfaced as `codex_apps`) request the
-    // operator's consent via an elicitation, which app-server delivers as a
-    // server->client request. This client runs Codex non-interactively, so there
-    // is no human to answer it; blanket-rejecting every server request with
-    // -32601 makes those tool calls fail ("user rejected MCP tool call") on the
-    // background runner and hang on `codex exec` / `codex mcp-server`. Accept the
-    // elicitation so connectors the operator has already enabled can run.
+    // MCP servers request the operator's consent via an elicitation, which
+    // app-server delivers as a server->client request. This client runs Codex
+    // non-interactively, so there is no human to answer it; blanket-rejecting
+    // every server request with -32601 makes those tool calls fail ("user
+    // rejected MCP tool call") on the background runner. A standard form
+    // elicitation from a local MCP server is accepted as before; app consent,
+    // URL and OpenAI-specific forms are declined (#1796, app-policy.mjs).
     if (message.method === "mcpServer/elicitation/request") {
+      const action = shouldAutoAcceptElicitation(message.params) ? "accept" : "decline";
       this.sendMessage({
         id: message.id,
-        result: { action: "accept", content: null, _meta: null }
+        result: { action, content: null, _meta: null }
       });
       return;
     }
@@ -359,10 +374,16 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
       });
     });
 
-    await this.request("initialize", {
+    const initialized = await this.request("initialize", {
       clientInfo: this.options.clientInfo ?? DEFAULT_CLIENT_INFO,
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES
     });
+    // #1796: a broker started by an older plugin (or handed in via
+    // CODEX_COMPANION_APP_SERVER_ENDPOINT) may run its app-server with apps on.
+    // Only a broker that reports the current app policy is used.
+    if (initialized?.appPolicy !== APPS_POLICY_ID) {
+      throw createBrokerPolicyError(initialized?.appPolicy ?? null);
+    }
     this.notify("initialized", {});
   }
 
@@ -410,6 +431,13 @@ export class CodexAppServerClient {
       await client.initialize();
     } catch (error) {
       if (client.transport === "broker") {
+        if (error?.code === BROKER_POLICY_MISMATCH) {
+          // Never reuse a broker under another app policy: run this request on
+          // a direct child instead, and say why on stderr.
+          await client.close().catch(() => {});
+          process.stderr.write(`${error.message}\n`);
+          return CodexAppServerClient.connect(cwd, { ...options, brokerEndpoint: null, disableBroker: true });
+        }
         throw markBrokerTransportError(error);
       }
       throw error;

@@ -7,6 +7,7 @@ import process from "node:process";
 
 import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
+import { APPS_POLICY_ID } from "./lib/app-policy.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
@@ -307,7 +308,8 @@ async function main() {
           send(socket, {
             id: message.id,
             result: {
-              userAgent: "codex-companion-broker"
+              userAgent: "codex-companion-broker",
+              appPolicy: APPS_POLICY_ID
             }
           });
           continue;

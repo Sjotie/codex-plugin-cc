@@ -4137,7 +4137,8 @@ test("setup and status honor --cwd when reading shared session runtime", () => {
   };
 
   saveBrokerSession(targetWorkspace, {
-    endpoint: "unix:/tmp/fake-broker.sock"
+    endpoint: "unix:/tmp/fake-broker.sock",
+    runtime: { appPolicy: "apps:deny-v1" }
   });
 
   const status = run("node", [SCRIPT, "status", "--cwd", targetWorkspace], {

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { binaryAvailable, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
+import { APPS_POLICY_ID } from "./app-policy.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
@@ -25,14 +26,16 @@ export function resolveBrokerRuntimeIdentity(cwd, env = process.env) {
   const codex = binaryAvailable("codex", ["--version"], { cwd, env });
   return {
     pluginVersion: PLUGIN_MANIFEST.version ?? "0.0.0",
-    codexVersion: codex.available ? codex.detail : null
+    codexVersion: codex.available ? codex.detail : null,
+    appPolicy: APPS_POLICY_ID
   };
 }
 
 export function isBrokerRuntimeCurrent(session, runtime) {
   return (
     session?.runtime?.pluginVersion === runtime.pluginVersion &&
-    session?.runtime?.codexVersion === runtime.codexVersion
+    session?.runtime?.codexVersion === runtime.codexVersion &&
+    session?.runtime?.appPolicy === runtime.appPolicy
   );
 }
 
@@ -223,7 +226,9 @@ export async function ensureBrokerSession(cwd, options = {}) {
     // using it and defer the refresh instead of killing an active stream.
     const shutdownOutcome = await sendBrokerShutdown(existing.endpoint);
     if (shutdownOutcome !== BROKER_SHUTDOWN_ACCEPTED) {
-      return existing;
+      // #1796: a busy broker under another app policy is not reused either;
+      // the caller then starts a direct app-server.
+      return existing.runtime?.appPolicy === runtime.appPolicy ? existing : null;
     }
   }
 

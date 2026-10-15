@@ -47,6 +47,7 @@ import {
   isBrokerTransportError
 } from "./app-server.mjs";
 import { isBrokerSessionActive, loadBrokerSession } from "./broker-lifecycle.mjs";
+import { APPS_POLICY_ID } from "./app-policy.mjs";
 import { binaryAvailable } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
@@ -987,11 +988,25 @@ export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) 
     env?.[BROKER_ENDPOINT_ENV] ??
     (isBrokerSessionActive(brokerSession) ? brokerSession.endpoint : null);
   if (endpoint) {
+    // #1796: show which app policy the shared runtime runs under; a broker
+    // under another policy is not reused (runs start a direct app-server).
+    const fromEnv = Boolean(env?.[BROKER_ENDPOINT_ENV]);
+    const brokerAppPolicy = fromEnv ? null : (brokerSession?.runtime?.appPolicy ?? "legacy");
+    if (brokerAppPolicy !== null && brokerAppPolicy !== APPS_POLICY_ID) {
+      return {
+        mode: "direct",
+        label: `direct startup (shared runtime has app policy ${brokerAppPolicy}, not reused)`,
+        detail: `The shared Codex runtime was started under app policy ${brokerAppPolicy}, not ${APPS_POLICY_ID}; runs start a direct app-server until it is replaced.`,
+        endpoint,
+        brokerAppPolicy
+      };
+    }
     return {
       mode: "shared",
-      label: "shared session",
+      label: fromEnv ? "shared session (app policy checked on connect)" : `shared session (${APPS_POLICY_ID})`,
       detail: "This Claude session is configured to reuse one shared Codex runtime.",
-      endpoint
+      endpoint,
+      brokerAppPolicy
     };
   }
 

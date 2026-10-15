@@ -19,12 +19,12 @@ class CapturingClient extends AppServerClientBase {
   }
 }
 
-test("handleServerRequest accepts MCP elicitation requests instead of rejecting them", () => {
+test("handleServerRequest accepts MCP form elicitations from a local server instead of rejecting them", () => {
   const client = new CapturingClient();
   client.handleServerRequest({
     id: 7,
     method: "mcpServer/elicitation/request",
-    params: { threadId: "t1" }
+    params: { serverName: "local", threadId: "t1", mode: "form", message: "ok?", requestedSchema: {} }
   });
   assert.deepEqual(client.sent, [
     { id: 7, result: { action: "accept", content: null, _meta: null } }
@@ -42,7 +42,8 @@ test("handleServerRequest still rejects unknown server requests with -32601", ()
 
 test("app-server spawn args disable the peers MCP via a global -c override before the subcommand", () => {
   // `-c/--config` is a global codex flag and must come before the subcommand.
-  assert.deepEqual(APP_SERVER_SPAWN_ARGS, ["-c", PEERS_MCP_DISABLE_OVERRIDE, "app-server"]);
+  // #1796: ChatGPT apps are disabled the same way.
+  assert.deepEqual(APP_SERVER_SPAWN_ARGS, ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", "features.apps=false", "app-server"]);
   assert.equal(PEERS_MCP_DISABLE_OVERRIDE, "mcp_servers.claude-peers-convex.enabled=false");
 
   const cIndex = APP_SERVER_SPAWN_ARGS.indexOf("-c");

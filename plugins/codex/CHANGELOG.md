@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased (fork, Homebase #1796)
+
+- Codex children started by the companion no longer get the ChatGPT apps
+  (connectors, the `codex_apps` MCP server) of the logged-in account. The
+  `apps` feature is stable and on by default in codex 0.162.1, also with an
+  own `CODEX_HOME` or `--ignore-user-config`, so a background run could call a
+  live connector app. Every app-server child now starts with
+  `-c features.apps=false` next to the peers override; that wins over
+  `[features] apps = true` in config.toml and leaves local `mcp_servers`
+  working. There is no per-run app allowlist (see `scripts/lib/app-policy.mjs`)
+- a broker is only reused when it reports the current app policy
+  (`apps:deny-v1`) on `initialize` and in `broker.json`. A broker from an
+  older plugin, or one handed in via `CODEX_COMPANION_APP_SERVER_ENDPOINT`
+  that does not report it, is not reused: the request runs on a direct
+  app-server and stderr says why. A busy legacy broker is no longer kept in
+  use either. `/codex:setup` and `/codex:status` name a legacy broker
+- MCP elicitations are no longer accepted blindly. A standard `form`
+  elicitation from a local MCP server is still accepted; consent requests
+  from `codex_apps`, OpenAI-specific forms and URL elicitations are declined
+
 ## 1.0.7-sjotie.15 (fork)
 
 - SessionEnd no longer forgets a session's tasks. It used to drop every job of
