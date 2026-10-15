@@ -139,11 +139,11 @@ function failureLines(failure) {
   return lines;
 }
 
-function partialOutputLines(rawOutput) {
+function partialOutputLines(rawOutput, reason = "the turn failed before finishing") {
   if (!rawOutput) {
     return [];
   }
-  return ["", "Incomplete intermediate output (NOT a final report; the turn failed before finishing):", "", ...fenced(rawOutput.trimEnd())];
+  return ["", `Incomplete intermediate output (NOT a final report; ${reason}):`, "", ...fenced(rawOutput.trimEnd())];
 }
 
 function renderFailedResult(title, failure, rawOutput, extra = []) {
@@ -151,14 +151,26 @@ function renderFailedResult(title, failure, rawOutput, extra = []) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+function storedPartialOutput(storedJob) {
+  return (
+    (typeof storedJob?.result?.rawOutput === "string" && storedJob.result.rawOutput) ||
+    (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
+    (typeof storedJob?.rendered === "string" ? storedJob.rendered : "")
+  );
+}
+
 function readFailure(job, storedJob) {
+  // A failure recorded by an earlier attempt of the same job never describes a cancelled run.
+  if (job?.status === "cancelled") {
+    return null;
+  }
   const candidate = storedJob?.failure ?? storedJob?.result?.failure ?? job?.failure ?? null;
   if (candidate && typeof candidate === "object") {
     return candidate;
   }
   // Jobs stored before failures were recorded: a failed job's output is only a partial.
   const hasOutput = Boolean(storedJob?.result?.rawOutput || storedJob?.result?.codex?.stdout || storedJob?.rendered);
-  if (job?.status === "failed" && hasOutput) {
+  if (isFailedJobStatus(job?.status) && hasOutput) {
     return {
       class: "unknown_failure",
       classifiedFrom: "legacy-record",
@@ -219,6 +231,9 @@ function pushJobDetails(lines, job, options = {}) {
   }
   if (job.failure) {
     lines.push(`  ${failureLabel(job.failure)}${job.failure.type ? ` (${job.failure.type})` : ""}: ${oneLine(job.failure.message ?? "no error text from Codex")}`);
+  } else if (isFailedJobStatus(job.status) && oneLine(job.errorMessage ?? "")) {
+    // Legacy, process-exit and dead-worker records carry text but no structured failure.
+    lines.push(`  failure:unknown_failure (no structured error type recorded): ${oneLine(job.errorMessage)}`);
   }
   if (job.phase) {
     lines.push(`  Phase: ${job.phase}`);
@@ -501,12 +516,24 @@ export function renderStoredJobResult(job, storedJob) {
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
   const failure = readFailure(job, storedJob);
   if (failure) {
-    const partial =
-      (typeof storedJob?.result?.rawOutput === "string" && storedJob.result.rawOutput) ||
-      (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
-      (typeof storedJob?.rendered === "string" ? storedJob.rendered : "");
+    const partial = storedPartialOutput(storedJob);
     const output = renderFailedResult(job.title ?? "Codex Result", failure, partial, ["", `Job: ${job.id}`]);
     return threadId ? `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n` : output;
+  }
+  if (job.status === "cancelled") {
+    const partial = storedPartialOutput(storedJob);
+    if (partial) {
+      const lines = [
+        `# ${job.title ?? "Codex Result"} (cancelled)`,
+        "",
+        "Status: cancelled",
+        "",
+        `Job: ${job.id}`,
+        ...partialOutputLines(partial, "the run was cancelled before finishing")
+      ];
+      const output = `${lines.join("\n").trimEnd()}\n`;
+      return threadId ? `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n` : output;
+    }
   }
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
     const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;

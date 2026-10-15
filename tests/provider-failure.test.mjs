@@ -8,8 +8,8 @@ import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { describeProviderFailure } from "../plugins/codex/scripts/lib/codex.mjs";
 import { runTrackedJob } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
-import { readJobFile, resolveJobFile, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
-import { renderStoredJobResult, renderTaskResult } from "../plugins/codex/scripts/lib/render.mjs";
+import { readJobFile, resolveJobFile, updateJobRecord, upsertJob } from "../plugins/codex/scripts/lib/state.mjs";
+import { renderStatusReport, renderStoredJobResult, renderTaskResult, renderWaitResult } from "../plugins/codex/scripts/lib/render.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
@@ -209,4 +209,125 @@ test("provider text cannot break out of its code fence", () => {
   const failure = describeProviderFailure({ message: "line1\n```\n# injected heading", codexErrorInfo: "x" });
   const out = renderTaskResult({ rawOutput: "", failure }, { title: "T" });
   assert.match(out, /````text\nline1\n```\n# injected heading\n````/);
+});
+
+// Four public paths that return a failure: task, native review, structured (adversarial) review, explicit resume.
+// Each entry holds the command's JSON payload plus the stored job that `result --json` then reports.
+function runAllPaths(behavior) {
+  const ctx = setup(behavior);
+  fs.writeFileSync(path.join(ctx.repo, "README.md"), "changed\n");
+  const parse = (r) => JSON.parse(r.stdout);
+  const observe = (args) => {
+    const payload = parse(companion(ctx, args));
+    return { payload, stored: parse(companion(ctx, ["result", "--json"])), text: companion(ctx, ["result"]).stdout };
+  };
+  const task = observe(["task", "--json", "do the synthetic thing"]);
+  return {
+    task,
+    review: observe(["review", "--wait", "--json"]),
+    adversarial: observe(["adversarial-review", "--wait", "--json"]),
+    resume: observe(["task", "--resume-thread", task.payload.threadId, "--json", "resume it"])
+  };
+}
+
+for (const [behavior, expected] of [
+  ["provider-empty-then-final", { type: "cyberPolicy", message: "SYNTHETIC_FINAL_ERROR", class: "provider_safety_block" }],
+  ["provider-earlier-then-final", { type: "cyberPolicy", message: "SYNTHETIC_FINAL_ERROR", class: "provider_safety_block" }],
+  ["provider-useful-then-empty-final", { type: "serverOverloaded", message: "SYNTHETIC_EARLIER_ERROR", class: "provider_error" }],
+  ["provider-useful-then-null-final", { type: "serverOverloaded", message: "SYNTHETIC_EARLIER_ERROR", class: "provider_error" }],
+  ["provider-empty-then-empty-final", { type: null, message: null, class: "provider_error" }]
+]) {
+  test(`final turn error vs earlier notification (${behavior}): payload, stored job, summary and text agree on all four paths`, () => {
+    const paths = runAllPaths(behavior);
+    for (const name of ["task", "review", "adversarial", "resume"]) {
+      const { payload, stored, text } = paths[name];
+      assert.equal(payload.failure.class, expected.class, `${name} class`);
+      assert.equal(payload.failure.type, expected.type, `${name} type`);
+      assert.equal(payload.failure.message, expected.message, `${name} message`);
+      assert.deepEqual(stored.storedJob.failure, payload.failure, `${name} stored failure`);
+      assert.equal(stored.storedJob.errorMessage, expected.message, `${name} stored errorMessage`);
+      if (expected.message) {
+        assert.match(stored.job.summary, new RegExp(expected.message), `${name} summary`);
+        assert.match(text, new RegExp(expected.message), `${name} text`);
+      } else {
+        assert.match(text, /Codex reported no error text/, `${name} text`);
+      }
+    }
+  });
+}
+
+test("legacy error-status records get the same partial wrapper as failed, in result and wait", () => {
+  for (const status of ["failed", "error"]) {
+    for (const stored of [{ result: { rawOutput: "INTERMEDIATE_ONLY" } }, { rendered: "INTERMEDIATE_ONLY\n" }]) {
+      const job = { id: "j", status, title: "T" };
+      for (const render of [renderStoredJobResult, renderWaitResult]) {
+        const out = render(job, { ...stored, errorMessage: "STORAGE_ERROR" });
+        assert.match(out, /NOT a final report/, `${status} ${render.name}`);
+        assert.match(out, /STORAGE_ERROR/);
+        assert.ok(out.indexOf("STORAGE_ERROR") < out.indexOf("INTERMEDIATE_ONLY"));
+      }
+    }
+  }
+  for (const status of ["completed"]) {
+    assert.equal(renderStoredJobResult({ id: "j", status }, { result: { rawOutput: "FINAL" }, errorMessage: "ignored" }).trim(), "FINAL");
+  }
+});
+
+test("status text shows the error text of records without a structured failure, labelled as unknown", () => {
+  for (const status of ["failed", "error"]) {
+    const text = renderStatusReport({
+      workspaceRoot: "/w",
+      sessionRuntime: { label: "direct startup" },
+      config: { stopReviewGate: false },
+      running: [],
+      latestFinished: { id: "j", status, title: "T", kindLabel: "task", errorMessage: "STORAGE_ERROR", phase: "failed" },
+      recent: [],
+      needsReview: false
+    });
+    assert.match(text, /failure:unknown_failure \(no structured error type recorded\): STORAGE_ERROR/);
+    assert.doesNotMatch(text, /provider_safety_block/);
+  }
+  const healthy = renderStatusReport({
+    workspaceRoot: "/w",
+    sessionRuntime: { label: "direct startup" },
+      config: { stopReviewGate: false },
+    running: [],
+    latestFinished: { id: "j", status: "completed", title: "T", kindLabel: "task", errorMessage: "stale", phase: "done" },
+    recent: [],
+    needsReview: false
+  });
+  assert.doesNotMatch(healthy, /failure:/);
+});
+
+test("same-job failed -> retry -> cancel never reports the old provider failure; success and plain failure inverses hold", async () => {
+  const workspace = makeTempDir();
+  const job = { id: "task-cancel-1", workspaceRoot: workspace, title: "T", jobClass: "task", status: "queued", logFile: null };
+  upsertJob(workspace, job);
+  const failure = { class: "provider_error", type: "x", message: "OLD_ERROR" };
+  await runTrackedJob(job, async () => ({ exitStatus: 1, payload: { rawOutput: "old partial" }, rendered: "old partial\n", failure, summary: "s" }));
+  await runTrackedJob(job, async () => {
+    updateJobRecord(workspace, job.id, (existing) => ({ ...existing, status: "cancelled", phase: "cancelled", pid: null }));
+    return { exitStatus: 1, payload: { rawOutput: "partial" }, rendered: "partial\n", failure: { ...failure, message: "NEW_ERROR" }, summary: "s" };
+  });
+  const stored = readJobFile(resolveJobFile(workspace, job.id));
+  assert.equal(stored.status, "cancelled");
+  assert.equal(stored.failure, null);
+  assert.doesNotMatch(String(stored.errorMessage), /OLD_ERROR|NEW_ERROR/);
+  const out = renderWaitResult({ ...stored }, stored);
+  assert.match(out, /Status: cancelled/);
+  assert.doesNotMatch(out, /Status: failed|OLD_ERROR|failure:/);
+  assert.doesNotMatch(out, /^partial$/m, "a cancelled partial is never presented as a bare final report");
+  assert.match(out, /NOT a final report/);
+
+  // Render-level guard: a cancelled job record still carrying an old failure.
+  const guarded = renderStoredJobResult({ id: "j", status: "cancelled" }, { failure, errorMessage: "Cancelled by user.", result: { rawOutput: "old partial" } });
+  assert.doesNotMatch(guarded, /failed|OLD_ERROR/);
+
+  // Inverse: a plain failed run after a cancelled-free retry still reports its own failure.
+  const job2 = { ...job, id: "task-cancel-2" };
+  upsertJob(workspace, job2);
+  await runTrackedJob(job2, async () => ({ exitStatus: 1, payload: { rawOutput: "p" }, rendered: "p\n", failure: { ...failure, message: "NEW_ERROR" }, summary: "s" }));
+  const failed = readJobFile(resolveJobFile(workspace, job2.id));
+  assert.equal(failed.failure.message, "NEW_ERROR");
+  assert.match(renderStoredJobResult({ id: job2.id, status: "failed" }, failed), /NEW_ERROR/);
 });

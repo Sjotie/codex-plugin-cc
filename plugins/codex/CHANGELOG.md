@@ -13,6 +13,13 @@
   Nothing is retried, rephrased or rerouted automatically. Errors from
   subagent threads and retryable errors no longer count against a completed
   turn, and a later success clears an earlier failure on the same job
+- the failed turn's own error wins over an earlier error notification (an
+  empty notification no longer hides it; a useful earlier one is used only when
+  the final error is absent or empty). Stored jobs with the legacy `error`
+  status get the same "NOT a final report" wrapper as `failed`. `status` shows
+  the error text of failed records that have no structured failure, labelled
+  `failure:unknown_failure`. A cancelled run no longer reports an earlier
+  attempt's failure, and its output is labelled incomplete
 
 ## 1.0.7-sjotie.15 (fork)
 

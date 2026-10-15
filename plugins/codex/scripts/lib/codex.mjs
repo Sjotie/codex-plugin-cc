@@ -902,16 +902,33 @@ export function describeProviderFailure(error, fallback = {}) {
   };
 }
 
+function hasErrorContent(error) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const info = readErrorInfo(error.codexErrorInfo ?? error.type ?? null);
+  return Boolean(pickString(error.message) || info.type);
+}
+
+// The failed turn's own error is authoritative. An earlier notification only
+// fills in when the final turn carries no usable error, and an empty error
+// object never hides a usable one.
+function pickTurnError(turnState) {
+  const turnStatus = turnState.finalTurn?.status ?? null;
+  const candidates = [
+    turnState.finalTurn?.error,
+    turnState.error,
+    turnStatus === "failed" ? turnState.retryableError : null
+  ];
+  return candidates.find(hasErrorContent) ?? candidates.find(Boolean) ?? null;
+}
+
 function buildFailure(turnState) {
   if (buildResultStatus(turnState) === 0) {
     return null;
   }
   const turnStatus = turnState.finalTurn?.status ?? null;
-  const error =
-    turnState.error ??
-    turnState.finalTurn?.error ??
-    (turnStatus === "failed" ? turnState.retryableError : null) ??
-    null;
+  const error = pickTurnError(turnState);
   if (error) {
     return describeProviderFailure(error, { turnStatus });
   }
@@ -1218,7 +1235,7 @@ export async function runAppServerReview(cwd, options = {}) {
       reviewText: turnState.reviewText,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
-      error: turnState.error ?? turnState.finalTurn?.error ?? null,
+      error: pickTurnError(turnState),
       failure: buildFailure(turnState),
       stderr: cleanCodexStderr(client.stderr)
     };
@@ -1345,7 +1362,7 @@ export async function runAppServerTurn(cwd, options = {}) {
       finalMessage: turnState.lastAgentMessage,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
-      error: turnState.error ?? turnState.finalTurn?.error ?? null,
+      error: pickTurnError(turnState),
       failure: buildFailure(turnState),
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,

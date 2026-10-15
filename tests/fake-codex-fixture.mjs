@@ -195,7 +195,7 @@ function emitTurnCompleted(threadId, turnId, item) {
     if (failed.error) {
       send({ method: "error", params: { threadId, turnId, willRetry: false, error: failed.error } });
     }
-    send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, failed.turnStatus) } });
+    send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, failed.turnStatus, failed.finalError ?? null) } });
     return;
   }
   if (BEHAVIOR === "provider-subagent-error-then-completed") {
@@ -221,6 +221,16 @@ function providerFailureFor(behavior) {
       return { turnStatus: "failed", error: { message: "SYNTHETIC lookalike", codexErrorInfo: "cyberPolicyOther" } };
     case "provider-retry-then-failed":
       return { turnStatus: "failed", error: null, retryError: { message: "SYNTHETIC retrying", codexErrorInfo: "serverOverloaded" } };
+    case "provider-empty-then-final":
+      return { turnStatus: "failed", error: { message: "", codexErrorInfo: null }, finalError: { message: "SYNTHETIC_FINAL_ERROR", codexErrorInfo: "cyberPolicy" } };
+    case "provider-earlier-then-final":
+      return { turnStatus: "failed", error: { message: "SYNTHETIC_EARLIER_ERROR", codexErrorInfo: "serverOverloaded" }, finalError: { message: "SYNTHETIC_FINAL_ERROR", codexErrorInfo: "cyberPolicy" } };
+    case "provider-useful-then-empty-final":
+      return { turnStatus: "failed", error: { message: "SYNTHETIC_EARLIER_ERROR", codexErrorInfo: "serverOverloaded" }, finalError: { message: "", codexErrorInfo: null } };
+    case "provider-useful-then-null-final":
+      return { turnStatus: "failed", error: { message: "SYNTHETIC_EARLIER_ERROR", codexErrorInfo: "serverOverloaded" }, finalError: null };
+    case "provider-empty-then-empty-final":
+      return { turnStatus: "failed", error: { message: "", codexErrorInfo: null }, finalError: { message: "", codexErrorInfo: null } };
     case "provider-failed-no-error":
       return { turnStatus: "failed", error: null };
     case "provider-interrupted":

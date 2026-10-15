@@ -152,14 +152,23 @@ function stopTrackedJobIfCancelled(job, logFile) {
     return null;
   }
 
+  // Failure metadata from an earlier attempt of this job does not describe the cancelled run.
+  const staleFailure = Boolean(storedJob.failure);
+  const errorMessage = staleFailure ? "Cancelled by user." : (storedJob.errorMessage ?? "Cancelled by user.");
   upsertJob(job.workspaceRoot, {
     id: job.id,
     status: "cancelled",
     phase: "cancelled",
     pid: storedJob.pid ?? null,
-    errorMessage: storedJob.errorMessage ?? "Cancelled by user.",
+    failure: null,
+    errorMessage,
     completedAt: storedJob.completedAt ?? nowIso()
   });
+  if (staleFailure) {
+    updateJobRecord(job.workspaceRoot, job.id, (existing) =>
+      existing?.status === "cancelled" ? { ...existing, failure: null, errorMessage } : null
+    );
+  }
   appendLogLine(logFile, "Stopped after cancellation.");
   return {
     exitStatus: 0,
