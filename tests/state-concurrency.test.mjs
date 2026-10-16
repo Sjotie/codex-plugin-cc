@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -19,8 +19,9 @@ import {
 } from "../plugins/codex/scripts/lib/state.mjs";
 
 const LOCK_FILE_NAME = "state.lock";
+const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STATE_MJS_PATH = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
+  TESTS_DIR,
   "..",
   "plugins",
   "codex",
@@ -94,6 +95,79 @@ test("concurrent upsertJob from multiple processes preserves all jobs and artifa
     }
   } finally {
     fs.unlinkSync(scriptFile);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test 1b (#1822): Test 1 loses a job now and then, and this pins the
+// interleaving that does it. Writer A has just made state.lock appear but has
+// not finished acquiring. Writer B arrives in that moment. B must wait for A.
+// When B takes the lock over instead, both run their read-modify-write at the
+// same time, and whichever saves last drops the other's job from the index
+// and deletes its job file and log.
+// ---------------------------------------------------------------------------
+test("a writer that arrives while another is acquiring the lock waits for it", async () => {
+  const workspace = makeTempDir();
+  const pauseDir = makeTempDir();
+  const hook = pathToFileURL(path.join(TESTS_DIR, "state-lock-pause-hook.mjs")).href;
+  const script = path.join(pauseDir, "writer.mjs");
+  fs.writeFileSync(
+    script,
+    `
+    import fs from "node:fs";
+    import { upsertJob, resolveJobLogFile, writeJobFile } from "${STATE_MJS_PATH}";
+    const [workspace, jobId] = process.argv.slice(2);
+    const logFile = resolveJobLogFile(workspace, jobId);
+    writeJobFile(workspace, jobId, { id: jobId, status: "running" });
+    fs.writeFileSync(logFile, "log\\n");
+    upsertJob(workspace, { id: jobId, status: "running", logFile });
+  `,
+    "utf8"
+  );
+  const marker = (name) => path.join(pauseDir, name);
+  async function waitForMarker(...names) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const found = names.find((name) => fs.existsSync(marker(name)));
+      if (found) return found;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error(`Timed out waiting for ${names.join(" or ")}`);
+  }
+  const writer = (name, jobId, pauseAt) =>
+    spawnAsync(process.execPath, ["--import", hook, script, workspace, jobId], {
+      env: { ...process.env, LOCK_PAUSE_DIR: pauseDir, LOCK_PAUSE_NAME: name, LOCK_PAUSE_AT: pauseAt }
+    });
+
+  await writer("seed", "job-seed", "none");
+
+  const writerA = writer("A", "job-A", "lock-visible");
+  // A writer that exits early is reported by the awaits below, not as an
+  // unhandled rejection while a marker wait is still polling.
+  writerA.catch(() => {});
+  let writerB;
+  try {
+    await waitForMarker("A.paused");
+    writerB = writer("B", "job-B", "state-read");
+    writerB.catch(() => {});
+    // Either B waits on A's lock, or it took the lock over and is now inside
+    // its read-modify-write with a snapshot that lacks job-A.
+    await waitForMarker("B.waiting", "B.paused");
+    fs.writeFileSync(marker("A.go"), "");
+    await writerA;
+  } finally {
+    // Never leave a writer paused, also when a wait above timed out.
+    fs.writeFileSync(marker("A.go"), "");
+    fs.writeFileSync(marker("B.go"), "");
+  }
+  await writerA;
+  await writerB;
+
+  const ids = listJobs(workspace).map((job) => job.id).sort();
+  assert.deepEqual(ids, ["job-A", "job-B", "job-seed"]);
+  for (const jobId of ids) {
+    assert.equal(fs.existsSync(resolveJobFile(workspace, jobId)), true, `job file of ${jobId}`);
+    assert.equal(fs.existsSync(resolveJobLogFile(workspace, jobId)), true, `log of ${jobId}`);
   }
 });
 
@@ -188,6 +262,66 @@ test("corrupt lock file (empty or non-numeric) is treated as stale", () => {
   jobs = listJobs(workspace);
   assert.equal(jobs.length, 2, "Should succeed with corrupt lock file");
   assert.equal(fs.existsSync(lockFile), false, "Corrupt lock should be removed");
+});
+
+// ---------------------------------------------------------------------------
+// Test 3c (#1822): on a file system without hard links, link() fails with one
+// of these codes and the lock is created directly instead.
+// ---------------------------------------------------------------------------
+test("without hard links the lock is created directly and still released", (t) => {
+  for (const code of ["EPERM", "ENOTSUP", "EXDEV"]) {
+    const workspace = makeTempDir();
+    const link = t.mock.method(fs, "linkSync", () => {
+      throw Object.assign(new Error(`link: ${code}`), { code });
+    });
+
+    upsertJob(workspace, { id: `job-${code}`, status: "running" });
+
+    assert.ok(link.mock.callCount() > 0, `${code}: link was attempted`);
+    assert.deepEqual(listJobs(workspace).map((job) => job.id), [`job-${code}`], code);
+    const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
+    assert.deepEqual(lockFiles, [], `${code}: no lock or pending lock file left`);
+    link.mock.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test 3d (#1822): a retried link() over NFS can report EEXIST although the
+// link went through. The writer must see that the lock is its own instead of
+// waiting on itself until the lock times out.
+// ---------------------------------------------------------------------------
+test("a link reported as EEXIST that did go through counts as acquired", (t) => {
+  const workspace = makeTempDir();
+  const realLink = fs.linkSync;
+  t.mock.method(fs, "linkSync", (from, to) => {
+    realLink(from, to);
+    throw Object.assign(new Error("link: EEXIST"), { code: "EEXIST" });
+  });
+
+  const started = Date.now();
+  upsertJob(workspace, { id: "job-nfs", status: "running" });
+
+  assert.ok(Date.now() - started < 2000, "acquired at once, not after the lock timeout");
+  assert.deepEqual(listJobs(workspace).map((job) => job.id), ["job-nfs"]);
+  const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
+  assert.deepEqual(lockFiles, []);
+});
+
+// ---------------------------------------------------------------------------
+// Test 3e (#1822): any other link() error is not taken for "no hard links":
+// it reaches the caller, and neither the lock nor the pending file stays.
+// ---------------------------------------------------------------------------
+test("another link error fails the write and leaves no lock behind", (t) => {
+  const workspace = makeTempDir();
+  t.mock.method(fs, "linkSync", () => {
+    throw Object.assign(new Error("link: EIO"), { code: "EIO" });
+  });
+
+  assert.throws(() => upsertJob(workspace, { id: "job-eio", status: "running" }), { code: "EIO" });
+
+  const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
+  assert.deepEqual(lockFiles, []);
+  assert.deepEqual(listJobs(workspace), []);
 });
 
 // ---------------------------------------------------------------------------

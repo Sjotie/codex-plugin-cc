@@ -20,6 +20,9 @@ export const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting
 const LOCK_FILE_NAME = "state.lock";
 const LOCK_RETRY_DELAY_MS = 50;
 const LOCK_TIMEOUT_MS = 10000;
+// link() errors that mean the file system has no hard links (FAT, some
+// network shares), as opposed to a lock that already exists.
+const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EXDEV"]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -67,8 +70,8 @@ export function ensureStateDir(cwd) {
 // ---------------------------------------------------------------------------
 // File locking — serializes concurrent updateState / saveState calls so the
 // read-modify-write cycle in updateState() is atomic across processes.
-// Uses O_EXCL ("wx") for atomic lock-file creation and records the PID so
-// stale locks from crashed processes can be reclaimed.
+// The lock file holds the owner's PID so stale locks from crashed processes
+// can be reclaimed; publishLock() makes it appear with that PID already in it.
 // ---------------------------------------------------------------------------
 
 function resolveLockFile(cwd) {
@@ -81,15 +84,39 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+// Publish the lock with its PID already in it: write a private file, then
+// link it into place. link() fails with EEXIST just like O_EXCL, but other
+// processes never see an empty state.lock from a live owner. An empty lock
+// reads as stale in acquireLock, so creating the file first and writing the
+// PID second let a second writer take the lock from a live first one, and
+// both then saved state from their own snapshot (#1822).
+function publishLock(lockFile) {
+  const pendingFile = `${lockFile}.${process.pid}`;
+  try {
+    fs.writeFileSync(pendingFile, String(process.pid));
+    fs.linkSync(pendingFile, lockFile);
+  } catch (err) {
+    // A retried link() over NFS can report EEXIST for a link that did go
+    // through; two links on our pending file mean state.lock is ours.
+    if (err.code === "EEXIST" && fs.statSync(pendingFile).nlink === 2) return;
+    if (!LINK_UNSUPPORTED_CODES.has(err.code)) throw err;
+    // No hard links here: create the lock directly, as before #1822. A writer
+    // that arrives between the create and the write can still take it over.
+    const fd = fs.openSync(lockFile, "wx");
+    fs.writeFileSync(fd, String(process.pid));
+    fs.closeSync(fd);
+  } finally {
+    fs.rmSync(pendingFile, { force: true });
+  }
+}
+
 function acquireLock(cwd) {
   ensureStateDir(cwd);
   const lockFile = resolveLockFile(cwd);
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      const fd = fs.openSync(lockFile, "wx");
-      fs.writeFileSync(fd, String(process.pid));
-      fs.closeSync(fd);
+      publishLock(lockFile);
       return true;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
