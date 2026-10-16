@@ -414,6 +414,10 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 }
 
 export class CodexAppServerClient {
+  /**
+   * @param {string} cwd
+   * @param {CodexAppServerClientOptions} [options]
+   */
   static async connect(cwd, options = {}) {
     let brokerEndpoint = null;
     if (!options.disableBroker) {

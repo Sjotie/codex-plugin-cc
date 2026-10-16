@@ -63,6 +63,8 @@ export interface CodexAppServerClientOptions {
   brokerEndpoint?: string;
   disableBroker?: boolean;
   reuseExistingBroker?: boolean;
+  /** Use a broker that does not report the current app policy (#1796); only to interrupt a turn it already runs. */
+  allowLegacyBroker?: boolean;
 }
 
 export interface AppServerMethodMap {

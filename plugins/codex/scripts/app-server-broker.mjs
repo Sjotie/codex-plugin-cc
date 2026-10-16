@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+/** @typedef {import("./lib/app-server-protocol").BrokerInitializeResponse} BrokerInitializeResponse */
+
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -305,13 +307,13 @@ async function main() {
         }
 
         if (message.id !== undefined && message.method === "initialize") {
-          send(socket, {
-            id: message.id,
-            result: {
-              userAgent: "codex-companion-broker",
-              appPolicy: APPS_POLICY_ID
-            }
-          });
+          // Checked against the type the client reads (app-server.mjs).
+          /** @type {BrokerInitializeResponse} */
+          const initializeResult = {
+            userAgent: "codex-companion-broker",
+            appPolicy: APPS_POLICY_ID
+          };
+          send(socket, { id: message.id, result: initializeResult });
           continue;
         }
 

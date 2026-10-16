@@ -13,11 +13,13 @@
     "types": ["node"]
   },
   "include": [
+    "plugins/codex/scripts/app-server-broker.mjs",
     "plugins/codex/scripts/lib/app-server.mjs",
     "plugins/codex/scripts/lib/codex.mjs",
     "plugins/codex/scripts/lib/fs.mjs",
     "plugins/codex/scripts/lib/process.mjs",
     "plugins/codex/scripts/lib/app-server-protocol.d.ts",
-    "plugins/codex/.generated/app-server-types/**/*.ts"
+    "plugins/codex/.generated/app-server-types/**/*.ts",
+    "tests/type-fixtures/*.ts"
   ]
 }
