@@ -498,11 +498,13 @@ function scheduleInferredCompletion(state, lateWindows = 0) {
         completeTurn(state, null, { inferred: true });
         return;
       }
-      emitProgress(state.onProgress, `Quiet period interrupted by a ${Math.round(lagMs)} ms stall; waiting again.`, null);
+      const stall = `Quiet period interrupted by a ${Math.round(lagMs)} ms stall`;
       if (lateWindows + 1 < INFERRED_COMPLETION_MAX_LATE_WINDOWS) {
+        emitProgress(state.onProgress, `${stall}; waiting again.`, null);
         scheduleInferredCompletion(state, lateWindows + 1);
         return;
       }
+      emitProgress(state.onProgress, `${stall}; deciding after one more read (late-window limit reached).`, null);
       setImmediate(() => {
         if (isCurrent()) {
           completeTurn(state, null, { inferred: true });
