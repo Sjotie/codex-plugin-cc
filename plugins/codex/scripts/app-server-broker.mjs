@@ -42,6 +42,17 @@ function send(socket, message) {
   socket.write(`${JSON.stringify(message)}\n`);
 }
 
+/**
+ * The one writer of the broker's `initialize` answer; its parameter is the type
+ * the client reads (app-server.mjs), so the wire reply is checked at build time.
+ * @param {net.Socket} socket
+ * @param {unknown} id
+ * @param {BrokerInitializeResponse} result
+ */
+function sendInitializeResult(socket, id, result) {
+  send(socket, { id, result });
+}
+
 function isInterruptRequest(message) {
   return message?.method === "turn/interrupt";
 }
@@ -307,13 +318,10 @@ async function main() {
         }
 
         if (message.id !== undefined && message.method === "initialize") {
-          // Checked against the type the client reads (app-server.mjs).
-          /** @type {BrokerInitializeResponse} */
-          const initializeResult = {
+          sendInitializeResult(socket, message.id, {
             userAgent: "codex-companion-broker",
             appPolicy: APPS_POLICY_ID
-          };
-          send(socket, { id: message.id, result: initializeResult });
+          });
           continue;
         }
 
