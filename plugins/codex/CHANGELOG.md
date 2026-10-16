@@ -42,6 +42,14 @@
   the error text of failed records that have no structured failure, labelled
   `failure:unknown_failure`. A cancelled run no longer reports an earlier
   attempt's failure, and its output is labelled incomplete
+- under CPU load a failed turn could still end as a clean success (exit 0, no
+  `failure`): the end of a turn without `turn/completed` was inferred 250 ms
+  after the final answer, while the synchronous job-file writes or a stall
+  kept the provider error unread in the pipe. The inference now reads pending
+  data first, measures its delay at the moment it decides and waits again
+  after a stall (at most three times), and an inferred end after a final
+  error is `failed`. A stall is logged as "Quiet period interrupted by a N ms
+  stall"
 
 ## 1.0.7-sjotie.15 (fork)
 
