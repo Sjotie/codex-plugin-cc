@@ -25,6 +25,7 @@
  *   pendingCollaborations: Set<string>,
  *   activeSubagentTurns: Set<string>,
  *   completionTimer: ReturnType<typeof setTimeout> | null,
+ *   lastNotificationAt: number,
  *   lastAgentMessage: string,
  *   reviewText: string,
  *   reasoningSummary: string[],
@@ -394,6 +395,7 @@ function createTurnCaptureState(threadId, options = {}) {
     pendingCollaborations: new Set(),
     activeSubagentTurns: new Set(),
     completionTimer: null,
+    lastNotificationAt: 0,
     lastAgentMessage: "",
     reviewText: "",
     reasoningSummary: [],
@@ -427,9 +429,11 @@ function completeTurn(state, turn = null, options = {}) {
       state.turnId = turn.id;
     }
   } else if (!state.finalTurn) {
+    // An inferred end never turns a turn that already reported a final error
+    // into a success.
     state.finalTurn = {
       id: state.turnId ?? "inferred-turn",
-      status: "completed"
+      status: state.error ? "failed" : "completed"
     };
   }
 
@@ -440,26 +444,46 @@ function completeTurn(state, turn = null, options = {}) {
   state.resolveCompletion(state);
 }
 
-function scheduleInferredCompletion(state) {
-  if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-    return;
-  }
+// How long the turn must stay quiet after the final answer before its end is
+// inferred without a turn/completed.
+const INFERRED_COMPLETION_QUIET_MS = 250;
 
-  if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
+function canInferCompletion(state) {
+  return (
+    !state.completed &&
+    !state.finalTurn &&
+    state.finalAnswerSeen &&
+    state.pendingCollaborations.size === 0 &&
+    state.activeSubagentTurns.size === 0
+  );
+}
+
+function scheduleInferredCompletion(state, delayMs = INFERRED_COMPLETION_QUIET_MS) {
+  if (!canInferCompletion(state)) {
     return;
   }
 
   clearCompletionTimer(state);
   state.completionTimer = setTimeout(() => {
     state.completionTimer = null;
-    if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-      return;
-    }
-    if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
-      return;
-    }
-    completeTurn(state, null, { inferred: true });
-  }, 250);
+    // The event loop runs due timers before it reads sockets and pipes. After
+    // a stall (CPU load, the synchronous job-file writes of a progress
+    // update) an error and turn/completed that already arrived are still
+    // unread here, so let one I/O pass deliver them before deciding.
+    setImmediate(() => {
+      if (!canInferCompletion(state)) {
+        return;
+      }
+      // The quiet period counts from the last notification the turn handled,
+      // not from when this timer was set.
+      const quietMs = Date.now() - state.lastNotificationAt;
+      if (quietMs < INFERRED_COMPLETION_QUIET_MS) {
+        scheduleInferredCompletion(state, Math.max(1, INFERRED_COMPLETION_QUIET_MS - quietMs));
+        return;
+      }
+      completeTurn(state, null, { inferred: true });
+    });
+  }, delayMs);
   state.completionTimer.unref?.();
 }
 
@@ -639,6 +663,7 @@ function applyTurnNotification(state, message) {
     default:
       break;
   }
+  state.lastNotificationAt = Date.now();
 }
 
 async function captureTurn(client, threadId, startRequest, options = {}) {

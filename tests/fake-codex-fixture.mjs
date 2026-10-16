@@ -188,14 +188,15 @@ function emitTurnCompleted(threadId, turnId, item) {
     }
   }
   const failed = providerFailureFor(BEHAVIOR);
+  const failureDelayMs = Number(process.env.FAKE_CODEX_FAILURE_DELAY_MS || 0);
+  if (failed && failureDelayMs > 0) {
+    // The provider error arrives in a later write than the final answer, as it
+    // does from a real app-server.
+    setTimeout(() => sendFailure(threadId, turnId, failed), failureDelayMs);
+    return;
+  }
   if (failed) {
-    if (failed.retryError) {
-      send({ method: "error", params: { threadId, turnId, willRetry: true, error: failed.retryError } });
-    }
-    if (failed.error) {
-      send({ method: "error", params: { threadId, turnId, willRetry: false, error: failed.error } });
-    }
-    send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, failed.turnStatus, failed.finalError ?? null) } });
+    sendFailure(threadId, turnId, failed);
     return;
   }
   if (BEHAVIOR === "provider-subagent-error-then-completed") {
@@ -206,6 +207,16 @@ function emitTurnCompleted(threadId, turnId, item) {
     send({ method: "error", params: { threadId, turnId, willRetry: true, error: { message: "Reconnecting 1/5", codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } } } });
   }
   send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, "completed") } });
+}
+
+function sendFailure(threadId, turnId, failed) {
+  if (failed.retryError) {
+    send({ method: "error", params: { threadId, turnId, willRetry: true, error: failed.retryError } });
+  }
+  if (failed.error) {
+    send({ method: "error", params: { threadId, turnId, willRetry: false, error: failed.error } });
+  }
+  send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, failed.turnStatus, failed.finalError ?? null) } });
 }
 
 function providerFailureFor(behavior) {
