@@ -268,8 +268,8 @@ test("corrupt lock file (empty or non-numeric) is treated as stale", () => {
 // Test 3c (#1822): on a file system without hard links, link() fails with one
 // of these codes and the lock is created directly instead.
 // ---------------------------------------------------------------------------
-test("without hard links the lock is created directly and still released", (t) => {
-  for (const code of ["EPERM", "ENOTSUP", "EXDEV"]) {
+for (const code of ["EPERM", "ENOTSUP", "EXDEV", "ENOSYS", "EINVAL"]) {
+  test(`without hard links (${code}) the lock is created directly and still released`, (t) => {
     const workspace = makeTempDir();
     const link = t.mock.method(fs, "linkSync", () => {
       throw Object.assign(new Error(`link: ${code}`), { code });
@@ -277,13 +277,12 @@ test("without hard links the lock is created directly and still released", (t) =
 
     upsertJob(workspace, { id: `job-${code}`, status: "running" });
 
-    assert.ok(link.mock.callCount() > 0, `${code}: link was attempted`);
-    assert.deepEqual(listJobs(workspace).map((job) => job.id), [`job-${code}`], code);
+    assert.ok(link.mock.callCount() > 0, "link was attempted");
+    assert.deepEqual(listJobs(workspace).map((job) => job.id), [`job-${code}`]);
     const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
-    assert.deepEqual(lockFiles, [], `${code}: no lock or pending lock file left`);
-    link.mock.restore();
-  }
-});
+    assert.deepEqual(lockFiles, [], "no lock or pending lock file left");
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Test 3d (#1822): a retried link() over NFS can report EEXIST although the
@@ -310,19 +309,22 @@ test("a link reported as EEXIST that did go through counts as acquired", (t) => 
 // ---------------------------------------------------------------------------
 // Test 3e (#1822): any other link() error is not taken for "no hard links":
 // it reaches the caller, and neither the lock nor the pending file stays.
+// EACCES is one of them on purpose: it can be a real permission problem.
 // ---------------------------------------------------------------------------
-test("another link error fails the write and leaves no lock behind", (t) => {
-  const workspace = makeTempDir();
-  t.mock.method(fs, "linkSync", () => {
-    throw Object.assign(new Error("link: EIO"), { code: "EIO" });
+for (const code of ["EIO", "EACCES"]) {
+  test(`another link error (${code}) fails the write and leaves no lock behind`, (t) => {
+    const workspace = makeTempDir();
+    t.mock.method(fs, "linkSync", () => {
+      throw Object.assign(new Error(`link: ${code}`), { code });
+    });
+
+    assert.throws(() => upsertJob(workspace, { id: `job-${code}`, status: "running" }), { code });
+
+    const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
+    assert.deepEqual(lockFiles, []);
+    assert.deepEqual(listJobs(workspace), []);
   });
-
-  assert.throws(() => upsertJob(workspace, { id: "job-eio", status: "running" }), { code: "EIO" });
-
-  const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
-  assert.deepEqual(lockFiles, []);
-  assert.deepEqual(listJobs(workspace), []);
-});
+}
 
 // ---------------------------------------------------------------------------
 // Test 4: atomic write — state.json is never partially written.

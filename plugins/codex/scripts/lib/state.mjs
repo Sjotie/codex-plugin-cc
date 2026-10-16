@@ -21,8 +21,9 @@ const LOCK_FILE_NAME = "state.lock";
 const LOCK_RETRY_DELAY_MS = 50;
 const LOCK_TIMEOUT_MS = 10000;
 // link() errors that mean the file system has no hard links (FAT, some
-// network shares), as opposed to a lock that already exists.
-const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EXDEV"]);
+// SMB, sshfs and FUSE mounts), as opposed to a lock that already exists.
+// EACCES stays out: it can also be a real permission problem.
+const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EXDEV", "ENOSYS", "EINVAL"]);
 
 function nowIso() {
   return new Date().toISOString();
