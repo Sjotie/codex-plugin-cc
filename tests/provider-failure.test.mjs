@@ -339,9 +339,11 @@ test("same-job failed -> retry -> cancel never reports the old provider failure;
 function runStalledTask(behavior, extraEnv) {
   const ctx = setup(behavior);
   const preload = pathToFileURL(path.join(ROOT, "tests", "stall-after-final-answer.mjs")).href;
+  const dataDir = makeTempDir();
   const env = {
     ...ctx.env,
     ...extraEnv,
+    CLAUDE_PLUGIN_DATA: dataDir,
     NODE_OPTIONS: `${ctx.env.NODE_OPTIONS ?? ""} --import="${preload}"`.trim()
   };
   const task = spawnSync("node", [SCRIPT, "task", "--json", "do the synthetic thing"], {
@@ -351,7 +353,12 @@ function runStalledTask(behavior, extraEnv) {
     timeout: 60_000
   });
   assert.equal(task.error, undefined, "the task must end on its own");
-  return { task, payload: JSON.parse(task.stdout) };
+  const jobLog = fs
+    .readdirSync(dataDir, { recursive: true })
+    .filter((file) => String(file).endsWith(".log"))
+    .map((file) => fs.readFileSync(path.join(dataDir, String(file)), "utf8"))
+    .join("\n");
+  return { task, payload: JSON.parse(task.stdout), jobLog };
 }
 
 test("a stall after the final answer does not hide the provider failure that is already in the pipe", () => {
@@ -376,23 +383,29 @@ test("a final error without turn/completed ends the turn as failed, not complete
 });
 
 test("a stall between the inference timer and its check does not hide a provider failure", () => {
-  const { task, payload } = runStalledTask("provider-safety-block", {
+  const { task, payload, jobLog } = runStalledTask("provider-safety-block", {
     FAKE_CODEX_FAILURE_DELAY_MS: "1500",
     STALL_BEFORE_INFERENCE_CHECK_MS: "3000"
   });
   assert.match(task.stderr, /stalled 3000 ms before the inference check/, "the preload must have stalled the companion");
+  assert.match(jobLog, /Quiet period interrupted by a \d+ ms stall/, "the check itself must have seen the stall");
   assert.notEqual(task.status, 0, "a failed turn must not exit 0");
   assert.equal(payload.failure?.class, "provider_safety_block");
   assert.equal(payload.incomplete, true);
 });
 
-test("under a stall that never ends the inferred turn end still comes, after a bounded number of late windows", () => {
-  const { task, payload } = runStalledTask("provider-unknown-error", {
-    FAKE_CODEX_FAILURE_WITHOUT_TURN_COMPLETED: "1",
-    STALL_REPEATEDLY_AFTER_FINAL_ANSWER_MS: "120"
+for (const [label, delayMs] of [["read with the final answer", "0"], ["arriving during the stalls", "500"]]) {
+  test(`under a stall that never ends the inferred turn end still comes after a bounded number of late windows (error ${label})`, () => {
+    const { task, payload, jobLog } = runStalledTask("provider-unknown-error", {
+      FAKE_CODEX_FAILURE_DELAY_MS: delayMs,
+      FAKE_CODEX_FAILURE_WITHOUT_TURN_COMPLETED: "1",
+      STALL_REPEATEDLY_AFTER_FINAL_ANSWER_MS: "120"
+    });
+    assert.match(task.stderr, /stalling 120 ms per timers phase/, "the preload must have stalled the companion");
+    const lateWindows = jobLog.match(/Quiet period interrupted by a \d+ ms stall/g) ?? [];
+    assert.ok(lateWindows.length >= 3, `expected at least 3 late windows, saw ${lateWindows.length}`);
+    assert.notEqual(task.status, 0);
+    assert.equal(payload.failure?.class, "provider_error");
+    assert.equal(payload.failure?.turnStatus, "failed");
   });
-  assert.match(task.stderr, /stalling 120 ms per timers phase/, "the preload must have stalled the companion");
-  assert.notEqual(task.status, 0);
-  assert.equal(payload.failure?.class, "provider_error");
-  assert.equal(payload.failure?.turnStatus, "failed");
-});
+}

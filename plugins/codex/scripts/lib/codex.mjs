@@ -26,7 +26,6 @@
  *   activeSubagentTurns: Set<string>,
  *   completionTimer: ReturnType<typeof setTimeout> | null,
  *   completionGeneration: number,
- *   lateCompletionWindows: number,
  *   lastAgentMessage: string,
  *   reviewText: string,
  *   reasoningSummary: string[],
@@ -397,7 +396,6 @@ function createTurnCaptureState(threadId, options = {}) {
     activeSubagentTurns: new Set(),
     completionTimer: null,
     completionGeneration: 0,
-    lateCompletionWindows: 0,
     lastAgentMessage: "",
     reviewText: "",
     reasoningSummary: [],
@@ -460,8 +458,8 @@ const INFERRED_COMPLETION_QUIET_MS = 250;
 // listening the whole time: the process was stalled (CPU load, the
 // synchronous job-file writes of a progress update) while data could arrive.
 const INFERRED_COMPLETION_MAX_LAG_MS = 50;
-// After this many late windows in a row the inference decides on the state it
-// has, so a machine that never catches up still ends the turn.
+// After this many late windows in a row the inference decides after one more
+// I/O pass, so a machine that never catches up still ends the turn.
 const INFERRED_COMPLETION_MAX_LATE_WINDOWS = 3;
 
 function canInferCompletion(state) {
@@ -474,16 +472,14 @@ function canInferCompletion(state) {
   );
 }
 
-function scheduleInferredCompletion(state, { afterLateWindow = false } = {}) {
+function scheduleInferredCompletion(state, lateWindows = 0) {
   if (!canInferCompletion(state)) {
     return;
   }
 
   clearCompletionTimer(state);
-  if (!afterLateWindow) {
-    state.lateCompletionWindows = 0;
-  }
   const generation = state.completionGeneration;
+  const isCurrent = () => generation === state.completionGeneration && canInferCompletion(state);
   const dueAt = performance.now() + INFERRED_COMPLETION_QUIET_MS;
   state.completionTimer = setTimeout(() => {
     state.completionTimer = null;
@@ -491,19 +487,27 @@ function scheduleInferredCompletion(state, { afterLateWindow = false } = {}) {
     // error and turn/completed that arrived during a stall are still unread
     // here. One I/O pass delivers them before anything is decided.
     setImmediate(() => {
-      if (generation !== state.completionGeneration || !canInferCompletion(state)) {
+      if (!isCurrent()) {
         return;
       }
       // Measured here, at the decision, so a stall after the timer fired (a
       // synchronous write in the I/O pass, another check-phase callback)
       // counts too. Nothing awaits between this and completeTurn.
       const lagMs = performance.now() - dueAt;
-      if (lagMs > INFERRED_COMPLETION_MAX_LAG_MS && state.lateCompletionWindows < INFERRED_COMPLETION_MAX_LATE_WINDOWS) {
-        state.lateCompletionWindows += 1;
-        scheduleInferredCompletion(state, { afterLateWindow: true });
+      if (lagMs <= INFERRED_COMPLETION_MAX_LAG_MS) {
+        completeTurn(state, null, { inferred: true });
         return;
       }
-      completeTurn(state, null, { inferred: true });
+      emitProgress(state.onProgress, `Quiet period interrupted by a ${Math.round(lagMs)} ms stall; waiting again.`, null);
+      if (lateWindows + 1 < INFERRED_COMPLETION_MAX_LATE_WINDOWS) {
+        scheduleInferredCompletion(state, lateWindows + 1);
+        return;
+      }
+      setImmediate(() => {
+        if (isCurrent()) {
+          completeTurn(state, null, { inferred: true });
+        }
+      });
     });
   }, INFERRED_COMPLETION_QUIET_MS);
   state.completionTimer.unref?.();
