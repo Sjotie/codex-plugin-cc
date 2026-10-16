@@ -25,7 +25,7 @@
  *   pendingCollaborations: Set<string>,
  *   activeSubagentTurns: Set<string>,
  *   completionTimer: ReturnType<typeof setTimeout> | null,
- *   lastNotificationAt: number,
+ *   completionGeneration: number,
  *   lastAgentMessage: string,
  *   reviewText: string,
  *   reasoningSummary: string[],
@@ -395,7 +395,7 @@ function createTurnCaptureState(threadId, options = {}) {
     pendingCollaborations: new Set(),
     activeSubagentTurns: new Set(),
     completionTimer: null,
-    lastNotificationAt: 0,
+    completionGeneration: 0,
     lastAgentMessage: "",
     reviewText: "",
     reasoningSummary: [],
@@ -409,6 +409,8 @@ function createTurnCaptureState(threadId, options = {}) {
 }
 
 function clearCompletionTimer(state) {
+  // A newer generation also voids a check that is already queued.
+  state.completionGeneration += 1;
   if (state.completionTimer) {
     clearTimeout(state.completionTimer);
     state.completionTimer = null;
@@ -437,7 +439,9 @@ function completeTurn(state, turn = null, options = {}) {
     };
   }
 
-  if (options.inferred) {
+  if (options.inferred && state.finalTurn.status === "failed") {
+    emitProgress(state.onProgress, "Turn end inferred: Codex reported an error and sent no turn/completed.", "failed");
+  } else if (options.inferred) {
     emitProgress(state.onProgress, "Turn completion inferred after the main thread finished and subagent work drained.", "finalizing");
   }
 
@@ -447,6 +451,10 @@ function completeTurn(state, turn = null, options = {}) {
 // How long the turn must stay quiet after the final answer before its end is
 // inferred without a turn/completed.
 const INFERRED_COMPLETION_QUIET_MS = 250;
+// A timer that fires later than this was not listening for the whole quiet
+// period: the process was stalled (CPU load, the synchronous job-file writes
+// of a progress update) while data could arrive.
+const INFERRED_COMPLETION_MAX_LAG_MS = 50;
 
 function canInferCompletion(state) {
   return (
@@ -458,32 +466,31 @@ function canInferCompletion(state) {
   );
 }
 
-function scheduleInferredCompletion(state, delayMs = INFERRED_COMPLETION_QUIET_MS) {
+function scheduleInferredCompletion(state) {
   if (!canInferCompletion(state)) {
     return;
   }
 
   clearCompletionTimer(state);
+  const generation = state.completionGeneration;
+  const dueAt = performance.now() + INFERRED_COMPLETION_QUIET_MS;
   state.completionTimer = setTimeout(() => {
     state.completionTimer = null;
-    // The event loop runs due timers before it reads sockets and pipes. After
-    // a stall (CPU load, the synchronous job-file writes of a progress
-    // update) an error and turn/completed that already arrived are still
-    // unread here, so let one I/O pass deliver them before deciding.
+    const lagMs = performance.now() - dueAt;
+    // The event loop runs due timers before it reads sockets and pipes, so an
+    // error and turn/completed that arrived during a stall are still unread
+    // here. One I/O pass delivers them before anything is decided.
     setImmediate(() => {
-      if (!canInferCompletion(state)) {
+      if (generation !== state.completionGeneration || !canInferCompletion(state)) {
         return;
       }
-      // The quiet period counts from the last notification the turn handled,
-      // not from when this timer was set.
-      const quietMs = Date.now() - state.lastNotificationAt;
-      if (quietMs < INFERRED_COMPLETION_QUIET_MS) {
-        scheduleInferredCompletion(state, Math.max(1, INFERRED_COMPLETION_QUIET_MS - quietMs));
+      if (lagMs > INFERRED_COMPLETION_MAX_LAG_MS) {
+        scheduleInferredCompletion(state);
         return;
       }
       completeTurn(state, null, { inferred: true });
     });
-  }, delayMs);
+  }, INFERRED_COMPLETION_QUIET_MS);
   state.completionTimer.unref?.();
 }
 
@@ -641,6 +648,8 @@ function applyTurnNotification(state, message) {
           state.retryableError = message.params.error;
         } else {
           state.error = message.params.error;
+          // Give the failed turn/completed a full quiet period to arrive.
+          scheduleInferredCompletion(state);
         }
       }
       const counts = !fromOtherThread && message.params.willRetry !== true;
@@ -663,7 +672,6 @@ function applyTurnNotification(state, message) {
     default:
       break;
   }
-  state.lastNotificationAt = Date.now();
 }
 
 async function captureTurn(client, threadId, startRequest, options = {}) {

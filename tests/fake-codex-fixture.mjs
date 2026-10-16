@@ -216,6 +216,9 @@ function sendFailure(threadId, turnId, failed) {
   if (failed.error) {
     send({ method: "error", params: { threadId, turnId, willRetry: false, error: failed.error } });
   }
+  if (process.env.FAKE_CODEX_FAILURE_WITHOUT_TURN_COMPLETED === "1") {
+    return;
+  }
   send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, failed.turnStatus, failed.finalError ?? null) } });
 }
 

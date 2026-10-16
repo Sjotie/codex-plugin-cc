@@ -15,6 +15,8 @@ fs.appendFileSync = function (file, data, ...rest) {
     setImmediate(() => {
       const until = Date.now() + stallMs;
       while (Date.now() < until) {}
+      // Lets the test check that the stall really happened.
+      process.stderr.write(`[stall-after-final-answer] stalled ${stallMs} ms\n`);
     });
   }
   return result;

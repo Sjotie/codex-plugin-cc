@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
@@ -335,18 +335,35 @@ test("same-job failed -> retry -> cancel never reports the old provider failure;
 // #1795/#1796: under CPU load the companion can stall right after it reads the final
 // answer, while the provider error and the failed turn/completed are already waiting in
 // the pipe. That stall must not let the completion inference report a clean success.
-test("a stall after the final answer does not hide the provider failure that is already in the pipe", () => {
-  const ctx = setup("provider-safety-block");
+function runStalledTask(behavior, extraEnv) {
+  const ctx = setup(behavior);
+  const preload = pathToFileURL(path.join(ROOT, "tests", "stall-after-final-answer.mjs")).href;
   const env = {
     ...ctx.env,
-    FAKE_CODEX_FAILURE_DELAY_MS: "100",
-    STALL_AFTER_FINAL_ANSWER_MS: "600",
-    NODE_OPTIONS: `${ctx.env.NODE_OPTIONS ?? ""} --import=${path.join(ROOT, "tests", "stall-after-final-answer.mjs")}`.trim()
+    ...extraEnv,
+    NODE_OPTIONS: `${ctx.env.NODE_OPTIONS ?? ""} --import="${preload}"`.trim()
   };
   const task = run("node", [SCRIPT, "task", "--json", "do the synthetic thing"], { cwd: ctx.repo, env });
-  const payload = JSON.parse(task.stdout);
+  return { task, payload: JSON.parse(task.stdout) };
+}
+
+test("a stall after the final answer does not hide the provider failure that is already in the pipe", () => {
+  const { task, payload } = runStalledTask("provider-safety-block", {
+    FAKE_CODEX_FAILURE_DELAY_MS: "100",
+    STALL_AFTER_FINAL_ANSWER_MS: "600"
+  });
+  assert.match(task.stderr, /\[stall-after-final-answer\] stalled 600 ms/, "the preload must have stalled the companion");
   assert.notEqual(task.status, 0, "a failed turn must not exit 0");
   assert.equal(payload.failure?.class, "provider_safety_block");
   assert.equal(payload.failure?.type, "cyberPolicy");
+  assert.equal(payload.incomplete, true);
+});
+
+test("a final error without turn/completed ends the turn as failed, not completed", () => {
+  const { task, payload } = runStalledTask("provider-unknown-error", { FAKE_CODEX_FAILURE_WITHOUT_TURN_COMPLETED: "1" });
+  assert.notEqual(task.status, 0);
+  assert.equal(payload.failure?.class, "provider_error");
+  assert.equal(payload.failure?.type, "httpConnectionFailed");
+  assert.equal(payload.failure?.turnStatus, "failed");
   assert.equal(payload.incomplete, true);
 });
