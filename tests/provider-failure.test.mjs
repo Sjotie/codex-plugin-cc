@@ -362,8 +362,10 @@ function runStalledTask(behavior, extraEnv) {
 }
 
 test("a stall after the final answer does not hide the provider failure that is already in the pipe", () => {
+  const signalFile = path.join(makeTempDir(), "stalled");
   const { task, payload } = runStalledTask("provider-safety-block", {
-    FAKE_CODEX_FAILURE_DELAY_MS: "100",
+    FAKE_CODEX_FAILURE_AFTER_FILE: signalFile,
+    STALL_SIGNAL_FILE: signalFile,
     STALL_AFTER_FINAL_ANSWER_MS: "600"
   });
   assert.match(task.stderr, /\[stall-after-final-answer\] stalled 600 ms/, "the preload must have stalled the companion");
@@ -383,8 +385,10 @@ test("a final error without turn/completed ends the turn as failed, not complete
 });
 
 test("a stall between the inference timer and its check does not hide a provider failure", () => {
+  const signalFile = path.join(makeTempDir(), "stalled");
   const { task, payload, jobLog } = runStalledTask("provider-safety-block", {
-    FAKE_CODEX_FAILURE_DELAY_MS: "1500",
+    FAKE_CODEX_FAILURE_AFTER_FILE: signalFile,
+    STALL_SIGNAL_FILE: signalFile,
     STALL_BEFORE_INFERENCE_CHECK_MS: "3000"
   });
   assert.match(task.stderr, /stalled 3000 ms before the inference check/, "the preload must have stalled the companion");

@@ -8,6 +8,8 @@
 // STALL_BEFORE_INFERENCE_CHECK_MS: one freeze in the check phase just ahead of the
 //   first setImmediate queued after the final answer (the completion inference
 //   check), so the stall falls after the inference timer fired but before it decides.
+// With STALL_SIGNAL_FILE set, both single freezes first create that file, so the fake
+// codex (FAKE_CODEX_FAILURE_AFTER_FILE) sends its data while the companion is frozen.
 // STALL_REPEATEDLY_AFTER_FINAL_ANSWER_MS: a freeze of this length on every timers
 //   phase from the final answer on, so every later timer fires late.
 import fs from "node:fs";
@@ -19,6 +21,12 @@ const isCompanion = path.basename(process.argv[1] ?? "") === "codex-companion.mj
 const stallAfterMs = Number(process.env.STALL_AFTER_FINAL_ANSWER_MS || 0);
 const stallBeforeCheckMs = Number(process.env.STALL_BEFORE_INFERENCE_CHECK_MS || 0);
 const stallRepeatedlyMs = Number(process.env.STALL_REPEATEDLY_AFTER_FINAL_ANSWER_MS || 0);
+
+function signalStall() {
+  if (process.env.STALL_SIGNAL_FILE) {
+    fs.writeFileSync(process.env.STALL_SIGNAL_FILE, "stalled\n");
+  }
+}
 
 function freeze(ms) {
   const until = Date.now() + ms;
@@ -32,6 +40,7 @@ function stallingSetImmediate(callback, ...args) {
   if (stallBeforeCheckMs > 0 && finalAnswerSeen && !checkStalled) {
     checkStalled = true;
     realSetImmediate(() => {
+      signalStall();
       freeze(stallBeforeCheckMs);
       process.stderr.write(`[stall-after-final-answer] stalled ${stallBeforeCheckMs} ms before the inference check\n`);
     });
@@ -47,6 +56,7 @@ function stallingAppendFileSync(file, data, ...rest) {
     finalAnswerSeen = true;
     if (stallAfterMs > 0) {
       realSetImmediate(() => {
+        signalStall();
         freeze(stallAfterMs);
         process.stderr.write(`[stall-after-final-answer] stalled ${stallAfterMs} ms\n`);
       });

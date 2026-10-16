@@ -189,6 +189,17 @@ function emitTurnCompleted(threadId, turnId, item) {
   }
   const failed = providerFailureFor(BEHAVIOR);
   const failureDelayMs = Number(process.env.FAKE_CODEX_FAILURE_DELAY_MS || 0);
+  const failureAfterFile = process.env.FAKE_CODEX_FAILURE_AFTER_FILE || "";
+  if (failed && failureAfterFile) {
+    // Waits until the test's preload signals that the companion is stalled.
+    const poll = setInterval(() => {
+      if (fs.existsSync(failureAfterFile)) {
+        clearInterval(poll);
+        sendFailure(threadId, turnId, failed);
+      }
+    }, 10);
+    return;
+  }
   if (failed && failureDelayMs > 0) {
     // The provider error arrives in a later write than the final answer, as it
     // does from a real app-server.
