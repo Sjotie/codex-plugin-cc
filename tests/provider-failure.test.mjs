@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -343,7 +344,13 @@ function runStalledTask(behavior, extraEnv) {
     ...extraEnv,
     NODE_OPTIONS: `${ctx.env.NODE_OPTIONS ?? ""} --import="${preload}"`.trim()
   };
-  const task = run("node", [SCRIPT, "task", "--json", "do the synthetic thing"], { cwd: ctx.repo, env });
+  const task = spawnSync("node", [SCRIPT, "task", "--json", "do the synthetic thing"], {
+    cwd: ctx.repo,
+    env,
+    encoding: "utf8",
+    timeout: 60_000
+  });
+  assert.equal(task.error, undefined, "the task must end on its own");
   return { task, payload: JSON.parse(task.stdout) };
 }
 
@@ -366,4 +373,26 @@ test("a final error without turn/completed ends the turn as failed, not complete
   assert.equal(payload.failure?.type, "httpConnectionFailed");
   assert.equal(payload.failure?.turnStatus, "failed");
   assert.equal(payload.incomplete, true);
+});
+
+test("a stall between the inference timer and its check does not hide a provider failure", () => {
+  const { task, payload } = runStalledTask("provider-safety-block", {
+    FAKE_CODEX_FAILURE_DELAY_MS: "1500",
+    STALL_BEFORE_INFERENCE_CHECK_MS: "3000"
+  });
+  assert.match(task.stderr, /stalled 3000 ms before the inference check/, "the preload must have stalled the companion");
+  assert.notEqual(task.status, 0, "a failed turn must not exit 0");
+  assert.equal(payload.failure?.class, "provider_safety_block");
+  assert.equal(payload.incomplete, true);
+});
+
+test("under a stall that never ends the inferred turn end still comes, after a bounded number of late windows", () => {
+  const { task, payload } = runStalledTask("provider-unknown-error", {
+    FAKE_CODEX_FAILURE_WITHOUT_TURN_COMPLETED: "1",
+    STALL_REPEATEDLY_AFTER_FINAL_ANSWER_MS: "120"
+  });
+  assert.match(task.stderr, /stalling 120 ms per timers phase/, "the preload must have stalled the companion");
+  assert.notEqual(task.status, 0);
+  assert.equal(payload.failure?.class, "provider_error");
+  assert.equal(payload.failure?.turnStatus, "failed");
 });
