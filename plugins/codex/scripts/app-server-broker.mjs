@@ -104,6 +104,14 @@ async function main() {
     removeBrokerSessionDir(dir, { keepLog: code !== 0, root: process.env[BROKER_TMPDIR_ENV] || os.tmpdir() });
   });
 
+  // Until the server exists there is nothing to shut down gracefully, but a signal during
+  // the app-server connect must still end in a normal exit so the hook above runs.
+  // Registered with the hook, not after the pid file: a signal in between would skip the cleanup.
+  const exitBeforeServer = () => process.exit(0);
+  for (const signal of SHUTDOWN_SIGNALS) {
+    process.once(signal, exitBeforeServer);
+  }
+
   const [subcommand, ...argv] = process.argv.slice(2);
   if (subcommand !== "serve") {
     throw new Error("Usage: node scripts/app-server-broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>]");
@@ -123,13 +131,6 @@ async function main() {
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
   writePidFile(pidFile);
   ownedPidFile = pidFile;
-  // Until the server exists there is nothing to shut down gracefully, but a signal during
-  // the app-server connect must still end in a normal exit so the hook above runs.
-  const exitBeforeServer = () => process.exit(0);
-  for (const signal of SHUTDOWN_SIGNALS) {
-    process.once(signal, exitBeforeServer);
-  }
-
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
   let activeRequestSocket = null;
   let activeStreamSocket = null;
