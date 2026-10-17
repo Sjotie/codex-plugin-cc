@@ -223,19 +223,23 @@ export async function isBrokerSessionReady(session, timeoutMs = 150) {
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
   const runtime = resolveBrokerRuntimeIdentity(cwd, options.env);
-  if (existing && (await isBrokerSessionReady(existing))) {
+  if (existing && isBrokerSessionActive(existing)) {
     if (isBrokerRuntimeCurrent(existing, runtime)) {
-      return existing;
-    }
-    // The plugin or codex CLI was upgraded since this broker spawned, so its
-    // long-lived app-server child still runs the old version (upstream #468).
-    // Ask it to shut down; while it is busy serving another client, keep
-    // using it and defer the refresh instead of killing an active stream.
-    const shutdownOutcome = await sendBrokerShutdown(existing.endpoint);
-    if (shutdownOutcome !== BROKER_SHUTDOWN_ACCEPTED) {
-      // #1796: a busy broker under another app policy is not reused either;
-      // the caller then starts a direct app-server.
-      return existing.runtime?.appPolicy === runtime.appPolicy ? existing : null;
+      if (await isBrokerSessionReady(existing)) {
+        return existing;
+      }
+    } else {
+      // The plugin or codex CLI was upgraded since this broker spawned
+      // (upstream #468). Ask for shutdown before probing readiness: the probe
+      // can still be connected when shutdown arrives and make this otherwise
+      // idle broker report busy (#1997).
+      const shutdownOutcome = await sendBrokerShutdown(existing.endpoint);
+      if (shutdownOutcome !== BROKER_SHUTDOWN_ACCEPTED && (await isBrokerSessionReady(existing))) {
+        // Preserve a live broker that refused shutdown; only a matching app
+        // policy may be reused (#1796). A dead endpoint still falls through
+        // to replacement, just as it does for a current runtime.
+        return existing.runtime?.appPolicy === runtime.appPolicy ? existing : null;
+      }
     }
   }
 

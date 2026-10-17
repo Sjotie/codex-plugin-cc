@@ -4277,7 +4277,7 @@ test("ensureBrokerSession refreshes an idle broker after a plugin or codex upgra
   // Simulate a plugin/codex upgrade: the stored runtime no longer matches.
   saveBrokerSession(repo, {
     ...firstSession,
-    runtime: { pluginVersion: "0.0.1", codexVersion: "codex 0.0.1" }
+    runtime: { ...firstSession.runtime, pluginVersion: "0.0.1", codexVersion: "codex 0.0.1" }
   });
 
   const secondTask = run("node", [SCRIPT, "task", "runs on a refreshed broker"], {
