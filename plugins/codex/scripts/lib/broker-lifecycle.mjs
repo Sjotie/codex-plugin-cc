@@ -9,6 +9,7 @@ import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs
 import { binaryAvailable, terminateProcessTree } from "./process.mjs";
 import { resolveStateDir } from "./state.mjs";
 import { APPS_POLICY_ID } from "./app-policy.mjs";
+import { BROKER_SESSION_DIR_PREFIX, sweepOrphanedBrokerSessionDirs } from "./broker-session-cleanup.mjs";
 
 export const PID_FILE_ENV = "CODEX_COMPANION_APP_SERVER_PID_FILE";
 export const LOG_FILE_ENV = "CODEX_COMPANION_APP_SERVER_LOG_FILE";
@@ -39,7 +40,7 @@ export function isBrokerRuntimeCurrent(session, runtime) {
   );
 }
 
-export function createBrokerSessionDir(prefix = "cxc-") {
+export function createBrokerSessionDir(prefix = BROKER_SESSION_DIR_PREFIX) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
@@ -249,6 +250,9 @@ export async function ensureBrokerSession(cwd, options = {}) {
     });
     clearBrokerSession(cwd);
   }
+
+  // #1962: a SIGKILLed broker cannot remove its own directory; clear those before adding one.
+  await sweepOrphanedBrokerSessionDirs(options.sweep).catch(() => {});
 
   const sessionDir = createBrokerSessionDir();
   const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;

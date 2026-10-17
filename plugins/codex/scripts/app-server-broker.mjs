@@ -11,6 +11,7 @@ import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { APPS_POLICY_ID } from "./lib/app-policy.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
+import { removeBrokerSessionDir } from "./lib/broker-session-cleanup.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
@@ -92,6 +93,19 @@ async function main() {
   const listenTarget = parseBrokerEndpoint(endpoint);
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
   writePidFile(pidFile);
+  // #1962: the session directory (pid file, socket, log) is this broker's own. Remove it on
+  // every way out, including signals and a failed start. After an error exit broker.log stays,
+  // since it holds the reason; the next start's sweep removes that directory. SIGKILL is
+  // covered by the same sweep.
+  if (pidFile) {
+    process.on("exit", (code) => removeBrokerSessionDir(path.dirname(pidFile), { keepLog: code !== 0 }));
+  }
+  // Until the server exists there is nothing to shut down gracefully, but a signal during
+  // the app-server connect must still end in a normal exit so the hook above runs.
+  const exitBeforeServer = () => process.exit(0);
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.once(signal, exitBeforeServer);
+  }
 
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
   let activeRequestSocket = null;
@@ -427,12 +441,21 @@ async function main() {
     socket.on("error", releaseSocket);
   });
 
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.off(signal, exitBeforeServer);
+  }
+
   process.on("SIGTERM", async () => {
     await shutdown(server);
     process.exit(0);
   });
 
   process.on("SIGINT", async () => {
+    await shutdown(server);
+    process.exit(0);
+  });
+
+  process.on("SIGHUP", async () => {
     await shutdown(server);
     process.exit(0);
   });
