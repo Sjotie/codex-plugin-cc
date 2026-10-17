@@ -125,6 +125,48 @@ test("a broker still starting (no app-server yet) removes its session directory 
   assert.equal(fs.existsSync(sessionDir), false);
 });
 
+test("a second broker on the same directory refuses to start and leaves the first one untouched", POSIX, async (t) => {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  const sessionDir = makeSessionDir(makeTempDir());
+  const first = startBroker(t, { binDir, sessionDir });
+  assert.equal(await waitForBrokerEndpoint(first.endpoint, 10000), true);
+
+  const second = startBroker(t, { binDir, sessionDir });
+  const { code } = await second.exited;
+  assert.notEqual(code, 0);
+
+  assert.equal(fs.readFileSync(path.join(sessionDir, "broker.pid"), "utf8").trim(), String(first.child.pid));
+  assert.equal(await waitForBrokerEndpoint(first.endpoint, 2000), true);
+  assert.equal(await shutdownBroker(first.endpoint), "accepted");
+  await first.exited;
+  assert.equal(fs.existsSync(sessionDir), false);
+});
+
+test("a broker does not remove a pid file another broker took over", POSIX, async (t) => {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  const sessionDir = makeSessionDir(makeTempDir());
+  const { child, endpoint, exited } = startBroker(t, { binDir, sessionDir });
+  assert.equal(await waitForBrokerEndpoint(endpoint, 10000), true);
+  fs.writeFileSync(path.join(sessionDir, "broker.pid"), `${process.pid}\n`);
+
+  child.kill("SIGTERM");
+  await exited;
+  assert.ok(fs.existsSync(path.join(sessionDir, "broker.pid")));
+});
+
+test("removeBrokerSessionDir only works inside the root", POSIX, () => {
+  const root = makeTempDir();
+  const outside = makeTempDir();
+  const inside = makeSessionDir(root);
+  const nested = fs.mkdtempSync(path.join(fs.mkdtempSync(path.join(outside, "sub-")), "cxc-"));
+  assert.equal(removeBrokerSessionDir(nested, { root }), false);
+  assert.ok(fs.existsSync(nested));
+  assert.equal(removeBrokerSessionDir(inside, { root }), true);
+  assert.equal(fs.existsSync(inside), false);
+});
+
 test("removeBrokerSessionDir refuses symlinks, files and other names", POSIX, () => {
   const base = makeTempDir();
   const target = makeTempDir();

@@ -11,7 +11,7 @@ import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { APPS_POLICY_ID } from "./lib/app-policy.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
-import { removeBrokerSessionDir } from "./lib/broker-session-cleanup.mjs";
+import { isPidAlive, readBrokerPidFile, removeBrokerSessionDir } from "./lib/broker-session-cleanup.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
@@ -58,9 +58,15 @@ function isInterruptRequest(message) {
   return message?.method === "turn/interrupt";
 }
 
+// A second broker started on the same pid file must not take it over: it would fail on the
+// socket and its exit hook would then remove the directory of the broker that is still running.
 function writePidFile(pidFile) {
   if (!pidFile) {
     return;
+  }
+  const holder = readBrokerPidFile(path.dirname(pidFile));
+  if (holder && holder !== process.pid && isPidAlive(holder)) {
+    throw new Error(`A broker (pid ${holder}) is already running for ${path.dirname(pidFile)}.`);
   }
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
   fs.writeFileSync(pidFile, `${process.pid}\n`, "utf8");
@@ -75,6 +81,24 @@ function resolveTimeoutMs(value, fallbackMs) {
 }
 
 async function main() {
+  // #1962: the session directory (pid file, socket, log) is this broker's own. Remove it on
+  // every way out, including signals and a failed start. After an error exit broker.log stays,
+  // since it holds the reason; the next start's sweep removes that directory. SIGKILL is
+  // covered by the same sweep. Registered first so no later startup step can skip it, and it
+  // acts only on a pid file this process wrote and no other broker has taken over since.
+  let ownedPidFile = null;
+  process.on("exit", (code) => {
+    if (!ownedPidFile) {
+      return;
+    }
+    const dir = path.dirname(ownedPidFile);
+    const holder = readBrokerPidFile(dir);
+    if (holder && holder !== process.pid) {
+      return;
+    }
+    removeBrokerSessionDir(dir, { keepLog: code !== 0 });
+  });
+
   const [subcommand, ...argv] = process.argv.slice(2);
   if (subcommand !== "serve") {
     throw new Error("Usage: node scripts/app-server-broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>]");
@@ -93,13 +117,7 @@ async function main() {
   const listenTarget = parseBrokerEndpoint(endpoint);
   const pidFile = options["pid-file"] ? path.resolve(options["pid-file"]) : null;
   writePidFile(pidFile);
-  // #1962: the session directory (pid file, socket, log) is this broker's own. Remove it on
-  // every way out, including signals and a failed start. After an error exit broker.log stays,
-  // since it holds the reason; the next start's sweep removes that directory. SIGKILL is
-  // covered by the same sweep.
-  if (pidFile) {
-    process.on("exit", (code) => removeBrokerSessionDir(path.dirname(pidFile), { keepLog: code !== 0 }));
-  }
+  ownedPidFile = pidFile;
   // Until the server exists there is nothing to shut down gracefully, but a signal during
   // the app-server connect must still end in a normal exit so the hook above runs.
   const exitBeforeServer = () => process.exit(0);
@@ -266,7 +284,9 @@ async function main() {
         }
         await appClient.close().catch(() => {});
         await serverClosed;
-        if (pidFile) {
+        // The pid file goes last: while it names this live process the start-sweep treats the
+        // directory as alive, so a half-closed broker is never taken for dead.
+        if (pidFile && [null, process.pid].includes(readBrokerPidFile(path.dirname(pidFile)))) {
           fs.rmSync(pidFile, { force: true });
         }
       })();

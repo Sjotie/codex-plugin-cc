@@ -22,17 +22,24 @@ const BROKER_LOG_FILE = "broker.log";
 /**
  * Removes a broker session directory. Refuses anything that is not a real
  * directory (never a symlink) named like a broker session directory.
+ * The directory must sit inside root (default os.tmpdir(), compared by realpath), so a
+ * look-alike name elsewhere is never touched.
  * With keepLog the directory stays and only broker.log is left in it, so the cause of a
  * failed exit remains readable until the next start's sweep removes the directory.
  * @returns {boolean} whether the directory (or, with keepLog, its other contents) was removed
  */
-export function removeBrokerSessionDir(dir, { keepLog = false } = {}) {
+export function removeBrokerSessionDir(dir, { keepLog = false, root = os.tmpdir() } = {}) {
   try {
     if (!dir || !isBrokerSessionDirName(path.basename(dir))) {
       return false;
     }
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory()) {
+      return false;
+    }
+    const realRoot = fs.realpathSync(root);
+    const realParent = fs.realpathSync(path.dirname(dir));
+    if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep)) {
       return false;
     }
     if (keepLog) {
@@ -50,7 +57,7 @@ export function removeBrokerSessionDir(dir, { keepLog = false } = {}) {
   }
 }
 
-function isPidAlive(pid) {
+export function isPidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
@@ -60,7 +67,7 @@ function isPidAlive(pid) {
   }
 }
 
-function readPidFile(dir) {
+export function readBrokerPidFile(dir) {
   try {
     const pid = Number.parseInt(fs.readFileSync(path.join(dir, "broker.pid"), "utf8").trim(), 10);
     return Number.isInteger(pid) && pid > 0 ? pid : null;
@@ -127,9 +134,9 @@ export async function sweepOrphanedBrokerSessionDirs({
         stat.isDirectory() &&
         ours &&
         now - stat.mtimeMs >= minAgeMs &&
-        !isPidAlive(readPidFile(dir) ?? Number.NaN) &&
+        !isPidAlive(readBrokerPidFile(dir) ?? Number.NaN) &&
         (await isEndpointUnreachable(createBrokerEndpoint(dir, platform), probeTimeoutMs));
-      if (dead && removeBrokerSessionDir(dir)) {
+      if (dead && removeBrokerSessionDir(dir, { root: tmpdir })) {
         removed.push(dir);
       } else {
         kept += 1;
