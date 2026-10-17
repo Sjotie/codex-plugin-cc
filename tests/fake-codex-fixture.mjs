@@ -624,10 +624,13 @@ rl.on("line", (line) => {
 	        // slow-turn-start: a prompt containing "slow" gets its response late,
 	        // so the client can disconnect before it arrives.
 	        const turnStartDelayMs = BEHAVIOR === "slow-turn-start" && prompt.includes("slow") ? 800 : 0;
+	        const subagentBeforeResponse =
+	          BEHAVIOR === "with-subagent-before-turn-response" ||
+	          BEHAVIOR === "with-subagent-name-update-before-turn-response";
 	        if (turnStartDelayMs > 0) {
 	          const responseId = message.id;
 	          setTimeout(() => send({ id: responseId, result: { turn: buildTurn(turnId) } }), turnStartDelayMs);
-	        } else {
+	        } else if (!subagentBeforeResponse) {
 	          send({ id: message.id, result: { turn: buildTurn(turnId) } });
 	        }
 
@@ -638,7 +641,8 @@ rl.on("line", (line) => {
         if (
           BEHAVIOR === "with-subagent" ||
           BEHAVIOR === "with-late-subagent-message" ||
-          BEHAVIOR === "with-subagent-no-main-turn-completed"
+          BEHAVIOR === "with-subagent-no-main-turn-completed" ||
+          subagentBeforeResponse
         ) {
           const subThread = nextThread(state, thread.cwd, true);
           const subThreadRecord = ensureThread(state, subThread.id);
@@ -646,7 +650,24 @@ rl.on("line", (line) => {
           saveState(state);
           const subTurnId = nextTurnId(state);
 
-          send({ method: "thread/started", params: { thread: { ...buildThread(subThreadRecord), name: "design-challenger", agentNickname: "design-challenger" } } });
+          if (subagentBeforeResponse) {
+            // These must stay outside the captured turn when the buffer replays.
+            for (const [foreignThreadId, foreignTurnId, text] of [
+              ["unrelated-thread", turnId, "UNRELATED_THREAD_MESSAGE"],
+              [thread.id, "previous-turn", "STALE_TURN_MESSAGE"]
+            ]) {
+              send({ method: "item/completed", params: {
+                threadId: foreignThreadId, turnId: foreignTurnId,
+                item: { type: "agentMessage", id: text, text, phase: "final_answer" }
+              } });
+            }
+          }
+          if (BEHAVIOR === "with-subagent-name-update-before-turn-response") {
+            // An already-existing subagent may first appear as a name update.
+            send({ method: "thread/name/updated", params: { threadId: subThread.id, threadName: "design-challenger" } });
+          } else {
+            send({ method: "thread/started", params: { thread: { ...buildThread(subThreadRecord), name: "design-challenger", agentNickname: "design-challenger" } } });
+          }
           send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
           send({
             method: "item/started",
@@ -740,6 +761,11 @@ rl.on("line", (line) => {
           }
           if (BEHAVIOR !== "with-subagent-no-main-turn-completed") {
             send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
+          }
+          if (subagentBeforeResponse) {
+            // No timer: every notification is on the wire before the response,
+            // so exercising buffered replay does not depend on process timing.
+            send({ id: message.id, result: { turn: buildTurn(turnId) } });
           }
           break;
         }

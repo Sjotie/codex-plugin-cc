@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.7-sjotie.20 (fork, Homebase #1924)
+
+- Subagent names remain in task logs when `thread/started` or
+  `thread/name/updated` arrives before the `turn/start` response. Buffered
+  notifications now use the same routing as live notifications; unrelated
+  threads and stale turns are still excluded from the captured output.
+
 ## Unreleased (fork, Homebase #1796)
 
 - Codex children started by the companion no longer get the ChatGPT apps

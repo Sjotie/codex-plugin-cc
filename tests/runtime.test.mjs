@@ -1383,33 +1383,51 @@ test("task logs reasoning summaries and assistant messages to the job log", () =
   assert.match(log, /Handled the requested task/);
 });
 
-test("task logs subagent reasoning and messages with a subagent prefix", () => {
-  const repo = makeTempDir();
-  const binDir = makeTempDir();
-  installFakeCodex(binDir, "with-subagent");
-  initGitRepo(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-  run("git", ["add", "README.md"], { cwd: repo });
-  run("git", ["commit", "-m", "init"], { cwd: repo });
+for (const behavior of [
+  "with-subagent",
+  "with-subagent-before-turn-response",
+  "with-subagent-name-update-before-turn-response"
+]) {
+  test(`task logs subagent reasoning and messages with a subagent prefix (${behavior})`, (t) => {
+    const repo = makeTempDir();
+    const binDir = makeTempDir();
+    installFakeCodex(binDir, behavior);
+    initGitRepo(repo);
+    t.after(() => {
+      const pid = loadBrokerSession(repo)?.pid;
+      if (pid) {
+        try {
+          terminateProcessTree(pid);
+        } catch {}
+      }
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(binDir, { recursive: true, force: true });
+    });
+    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+    run("git", ["add", "README.md"], { cwd: repo });
+    run("git", ["commit", "-m", "init"], { cwd: repo });
 
-  const result = run("node", [SCRIPT, "task", "challenge the current design"], {
-    cwd: repo,
-    env: buildEnv(binDir)
+    const result = run("node", [SCRIPT, "task", "challenge the current design"], {
+      cwd: repo,
+      env: buildEnv(binDir)
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "Handled the requested task.\nTask prompt accepted.\n");
+    const stateDir = resolveStateDir(repo);
+    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+    const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
+    assert.doesNotMatch(log, /UNRELATED_THREAD_MESSAGE|STALE_TURN_MESSAGE/);
+    assert.match(log, /Starting subagent design-challenger via collaboration tool: wait\./);
+    assert.match(log, /Subagent design-challenger reasoning:/);
+    assert.match(log, /Questioned the retry strategy and the cache invalidation boundaries\./);
+    assert.match(log, /Subagent design-challenger:/);
+    assert.match(
+      log,
+      /The design assumes retries are harmless, but they can duplicate side effects without stronger idempotency guarantees\./
+    );
   });
-
-  assert.equal(result.status, 0, result.stderr);
-  const stateDir = resolveStateDir(repo);
-  const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
-  const log = fs.readFileSync(state.jobs[0].logFile, "utf8");
-  assert.match(log, /Starting subagent design-challenger via collaboration tool: wait\./);
-  assert.match(log, /Subagent design-challenger reasoning:/);
-  assert.match(log, /Questioned the retry strategy and the cache invalidation boundaries\./);
-  assert.match(log, /Subagent design-challenger:/);
-  assert.match(
-    log,
-    /The design assumes retries are harmless, but they can duplicate side effects without stronger idempotency guarantees\./
-  );
-});
+}
 
 test("task waits for the main thread to complete before returning the final result", () => {
   const repo = makeTempDir();

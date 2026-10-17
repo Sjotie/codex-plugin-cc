@@ -699,6 +699,21 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
 
+  /** @param {AppServerNotification} message */
+  function dispatchNotification(message) {
+    // Thread metadata can introduce a subagent before it belongs to this turn.
+    // Use the same routing for live events and events buffered before the reply.
+    if (
+      message.method === "thread/started" ||
+      message.method === "thread/name/updated" ||
+      belongsToTurn(state, message)
+    ) {
+      applyTurnNotification(state, message);
+    } else {
+      previousHandler?.(message);
+    }
+  }
+
   client.setNotificationHandler((message) => {
     if (message.method === "turn/started" && message.params.threadId === threadId) {
       options.onTurnStarted?.(message.params.turn.id);
@@ -708,19 +723,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       return;
     }
 
-    if (message.method === "thread/started" || message.method === "thread/name/updated") {
-      applyTurnNotification(state, message);
-      return;
-    }
-
-    if (!belongsToTurn(state, message)) {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-        return;
-    }
-
-    applyTurnNotification(state, message);
+    dispatchNotification(message);
   });
 
   try {
@@ -731,13 +734,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       state.threadTurnIds.set(state.threadId, state.turnId);
     }
     for (const message of state.bufferedNotifications) {
-      if (belongsToTurn(state, message)) {
-        applyTurnNotification(state, message);
-      } else {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-      }
+      dispatchNotification(message);
     }
     state.bufferedNotifications.length = 0;
 

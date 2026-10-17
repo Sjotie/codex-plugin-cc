@@ -89,7 +89,9 @@ function isEndpointUnreachable(endpoint, timeoutMs) {
     };
     const timer = setTimeout(() => finish(false), timeoutMs);
     socket.on("connect", () => finish(false));
-    socket.on("error", (error) => finish(error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
+    socket.on("error", (/** @type {NodeJS.ErrnoException} */ error) =>
+      finish(error?.code === "ENOENT" || error?.code === "ECONNREFUSED")
+    );
   });
 }
 
