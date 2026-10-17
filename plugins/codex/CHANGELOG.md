@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.7-sjotie.21 (fork, Homebase #1997)
+
+- `ensureBrokerSession` asks a stale idle broker to shut down before it opens
+  its own readiness connection. The readiness probe could still be connected
+  when the shutdown request arrived, so the broker rejected its own refresh as
+  busy (flaky under CPU load). A genuinely busy broker is still preserved and
+  the busy guard is unchanged.
+
 ## 1.0.7-sjotie.20 (fork, Homebase #1924)
 
 - Subagent names remain in task logs when `thread/started` or
