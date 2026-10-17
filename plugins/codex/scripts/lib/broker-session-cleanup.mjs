@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.mjs";
+import { isProcessAlive } from "./process.mjs";
 
 export const BROKER_SESSION_DIR_PREFIX = "cxc-";
 // fs.mkdtempSync appends exactly six characters from [A-Za-z0-9].
@@ -22,8 +23,8 @@ const BROKER_LOG_FILE = "broker.log";
 /**
  * Removes a broker session directory. Refuses anything that is not a real
  * directory (never a symlink) named like a broker session directory.
- * The directory must sit inside root (default os.tmpdir(), compared by realpath), so a
- * look-alike name elsewhere is never touched.
+ * The directory must be a direct child of root (default os.tmpdir(), compared by realpath),
+ * so a look-alike name elsewhere is never touched.
  * With keepLog the directory stays and only broker.log is left in it, so the cause of a
  * failed exit remains readable until the next start's sweep removes the directory.
  * @returns {boolean} whether the directory (or, with keepLog, its other contents) was removed
@@ -39,7 +40,7 @@ export function removeBrokerSessionDir(dir, { keepLog = false, root = os.tmpdir(
     }
     const realRoot = fs.realpathSync(root);
     const realParent = fs.realpathSync(path.dirname(dir));
-    if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep)) {
+    if (realParent !== realRoot) {
       return false;
     }
     if (keepLog) {
@@ -48,22 +49,15 @@ export function removeBrokerSessionDir(dir, { keepLog = false, root = os.tmpdir(
           fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
         }
       }
+      if (fs.readdirSync(dir).length === 0) {
+        fs.rmdirSync(dir);
+      }
     } else {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     return true;
   } catch {
     return false;
-  }
-}
-
-export function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM: the process exists but belongs to someone else.
-    return error?.code === "EPERM";
   }
 }
 
@@ -134,7 +128,7 @@ export async function sweepOrphanedBrokerSessionDirs({
         stat.isDirectory() &&
         ours &&
         now - stat.mtimeMs >= minAgeMs &&
-        !isPidAlive(readBrokerPidFile(dir) ?? Number.NaN) &&
+        !isProcessAlive(readBrokerPidFile(dir)) &&
         (await isEndpointUnreachable(createBrokerEndpoint(dir, platform), probeTimeoutMs));
       if (dead && removeBrokerSessionDir(dir, { root: tmpdir })) {
         removed.push(dir);

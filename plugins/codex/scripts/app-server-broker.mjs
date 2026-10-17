@@ -4,6 +4,7 @@
 
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
@@ -11,8 +12,12 @@ import { parseArgs } from "./lib/args.mjs";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
 import { APPS_POLICY_ID } from "./lib/app-policy.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
-import { isPidAlive, readBrokerPidFile, removeBrokerSessionDir } from "./lib/broker-session-cleanup.mjs";
+import { readBrokerPidFile, removeBrokerSessionDir } from "./lib/broker-session-cleanup.mjs";
+import { isProcessAlive } from "./lib/process.mjs";
 
+// Set by the process that created the session directory, in case its TMPDIR differs from ours.
+const BROKER_TMPDIR_ENV = "CODEX_COMPANION_BROKER_TMPDIR";
+const SHUTDOWN_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"];
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 const BROKER_IDLE_TIMEOUT_ENV = "CODEX_COMPANION_BROKER_IDLE_TIMEOUT_MS";
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -65,7 +70,7 @@ function writePidFile(pidFile) {
     return;
   }
   const holder = readBrokerPidFile(path.dirname(pidFile));
-  if (holder && holder !== process.pid && isPidAlive(holder)) {
+  if (holder && holder !== process.pid && isProcessAlive(holder)) {
     throw new Error(`A broker (pid ${holder}) is already running for ${path.dirname(pidFile)}.`);
   }
   fs.mkdirSync(path.dirname(pidFile), { recursive: true });
@@ -96,7 +101,7 @@ async function main() {
     if (holder && holder !== process.pid) {
       return;
     }
-    removeBrokerSessionDir(dir, { keepLog: code !== 0 });
+    removeBrokerSessionDir(dir, { keepLog: code !== 0, root: process.env[BROKER_TMPDIR_ENV] || os.tmpdir() });
   });
 
   const [subcommand, ...argv] = process.argv.slice(2);
@@ -121,7 +126,7 @@ async function main() {
   // Until the server exists there is nothing to shut down gracefully, but a signal during
   // the app-server connect must still end in a normal exit so the hook above runs.
   const exitBeforeServer = () => process.exit(0);
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  for (const signal of SHUTDOWN_SIGNALS) {
     process.once(signal, exitBeforeServer);
   }
 
@@ -461,24 +466,16 @@ async function main() {
     socket.on("error", releaseSocket);
   });
 
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  for (const signal of SHUTDOWN_SIGNALS) {
     process.off(signal, exitBeforeServer);
   }
 
-  process.on("SIGTERM", async () => {
-    await shutdown(server);
-    process.exit(0);
-  });
-
-  process.on("SIGINT", async () => {
-    await shutdown(server);
-    process.exit(0);
-  });
-
-  process.on("SIGHUP", async () => {
-    await shutdown(server);
-    process.exit(0);
-  });
+  for (const signal of SHUTDOWN_SIGNALS) {
+    process.on(signal, async () => {
+      await shutdown(server);
+      process.exit(0);
+    });
+  }
 
   server.on("listening", () => scheduleIdleShutdown(server));
   // The broker proxies every request to the single app-server child spawned

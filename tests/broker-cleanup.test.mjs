@@ -59,12 +59,12 @@ async function shutdownBroker(endpoint) {
   return outcome;
 }
 
-function startBroker(t, { binDir, sessionDir }) {
+function startBroker(t, { binDir, sessionDir, isolatePath = false }) {
   const endpoint = createBrokerEndpoint(sessionDir);
   const child = spawn(
     process.execPath,
     [BROKER, "serve", "--endpoint", endpoint, "--cwd", makeTempDir(), "--pid-file", path.join(sessionDir, "broker.pid")],
-    { env: buildEnv(binDir), stdio: "ignore" }
+    { env: { ...(isolatePath ? { ...process.env, PATH: binDir } : buildEnv(binDir)), CODEX_COMPANION_BROKER_TMPDIR: path.dirname(sessionDir) }, stdio: "ignore" }
   );
   t.after(() => {
     if (child.exitCode === null) {
@@ -112,7 +112,7 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
 test("a broker still starting (no app-server yet) removes its session directory when stopped", POSIX, async (t) => {
   // No codex on PATH: the broker never gets past connecting to its app-server.
   const sessionDir = makeSessionDir(makeTempDir());
-  const { child, exited } = startBroker(t, { binDir: makeTempDir(), sessionDir });
+  const { child, exited } = startBroker(t, { binDir: makeTempDir(), sessionDir, isolatePath: true });
   for (let i = 0; i < 200 && !fs.existsSync(path.join(sessionDir, "broker.pid")); i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
@@ -156,11 +156,12 @@ test("a broker does not remove a pid file another broker took over", POSIX, asyn
   assert.ok(fs.existsSync(path.join(sessionDir, "broker.pid")));
 });
 
-test("removeBrokerSessionDir only works inside the root", POSIX, () => {
+test("removeBrokerSessionDir only works on a direct child of the root", POSIX, () => {
   const root = makeTempDir();
   const outside = makeTempDir();
   const inside = makeSessionDir(root);
   const nested = fs.mkdtempSync(path.join(fs.mkdtempSync(path.join(outside, "sub-")), "cxc-"));
+  assert.equal(removeBrokerSessionDir(nested, { root: outside }), false);
   assert.equal(removeBrokerSessionDir(nested, { root }), false);
   assert.ok(fs.existsSync(nested));
   assert.equal(removeBrokerSessionDir(inside, { root }), true);
@@ -188,11 +189,17 @@ test("removeBrokerSessionDir refuses symlinks, files and other names", POSIX, ()
 });
 
 test("removeBrokerSessionDir with keepLog leaves only broker.log", () => {
-  const dir = makeSessionDir(makeTempDir());
+  const root = makeTempDir();
+  const dir = makeSessionDir(root);
   fs.writeFileSync(path.join(dir, "broker.pid"), "1\n");
   fs.writeFileSync(path.join(dir, "broker.log"), "why it died\n");
-  assert.equal(removeBrokerSessionDir(dir, { keepLog: true }), true);
+  assert.equal(removeBrokerSessionDir(dir, { keepLog: true, root }), true);
   assert.deepEqual(fs.readdirSync(dir), ["broker.log"]);
+
+  const bare = makeSessionDir(root);
+  fs.writeFileSync(path.join(bare, "broker.pid"), "1\n");
+  removeBrokerSessionDir(bare, { keepLog: true, root });
+  assert.equal(fs.existsSync(bare), false);
 });
 
 test("a broker that exits with an error keeps its log but nothing else, and the sweep then clears it", POSIX, async (t) => {
@@ -206,7 +213,7 @@ test("a broker that exits with an error keeps its log but nothing else, and the 
   const child = spawn(
     process.execPath,
     [BROKER, "serve", "--endpoint", endpoint, "--cwd", path.join(base, "missing"), "--pid-file", path.join(sessionDir, "broker.pid")],
-    { env: buildEnv(binDir), stdio: ["ignore", logFd, logFd] }
+    { env: { ...buildEnv(binDir), CODEX_COMPANION_BROKER_TMPDIR: base }, stdio: ["ignore", logFd, logFd] }
   );
   t.after(() => child.kill());
   const { code } = await new Promise((resolve) => child.once("exit", (c) => resolve({ code: c })));

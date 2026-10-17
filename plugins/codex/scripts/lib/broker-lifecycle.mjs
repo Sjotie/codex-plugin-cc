@@ -269,7 +269,7 @@ export async function ensureBrokerSession(cwd, options = {}) {
     endpoint,
     pidFile,
     logFile,
-    env: options.env ?? process.env
+    env: { ...(options.env ?? process.env), CODEX_COMPANION_BROKER_TMPDIR: path.dirname(sessionDir) }
   });
 
   let childExited = false;
