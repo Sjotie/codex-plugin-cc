@@ -98,6 +98,33 @@ test("concurrent upsertJob from multiple processes preserves all jobs and artifa
   }
 });
 
+// 50 writers at once (#1822): the five-writer test above loses a job only now
+// and then, so this one raises the odds of a lost update.
+test("50 concurrent upsertJob writers lose no job", async () => {
+  const workspace = makeTempDir();
+  const count = 50;
+  const script = `
+    import { upsertJob, resolveJobLogFile, writeJobFile } from "${STATE_MJS_PATH}";
+    const [workspace, jobId] = process.argv.slice(2);
+    writeJobFile(workspace, jobId, { id: jobId, status: "running" });
+    upsertJob(workspace, { id: jobId, status: "running", logFile: resolveJobLogFile(workspace, jobId) });
+  `;
+  const scriptFile = path.join(os.tmpdir(), `concurrent-50-${Date.now()}-${process.pid}.mjs`);
+  fs.writeFileSync(scriptFile, script, "utf8");
+  try {
+    await Promise.all(
+      Array.from({ length: count }, (_, i) => spawnAsync("node", [scriptFile, workspace, `job-${i}`]))
+    );
+    const ids = listJobs(workspace).map((j) => j.id).sort();
+    assert.equal(ids.length, count, `Expected ${count} jobs, got ${ids.length}`);
+    for (let i = 0; i < count; i++) {
+      assert.equal(fs.existsSync(resolveJobFile(workspace, `job-${i}`)), true, `job-${i}.json missing`);
+    }
+  } finally {
+    fs.unlinkSync(scriptFile);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Test 1b (#1822): Test 1 loses a job now and then, and this pins the
 // interleaving that does it. Writer A has just made state.lock appear but has
