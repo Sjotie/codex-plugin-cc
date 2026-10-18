@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.7-sjotie.22 (fork, Homebase #1822)
+
+- `state.lock` is published with its PID already in it (written to a private
+  file and linked into place). A writer that arrived between the create and the
+  PID write read an empty lock as stale, took it from a live owner, and one of
+  the two then dropped the other's job from the index and deleted its files.
+  Where hard links are unsupported (EPERM, ENOTSUP, EXDEV, ENOSYS, EINVAL) the
+  old direct create is used, with the old race.
+
 ## 1.0.7-sjotie.21 (fork, Homebase #1997)
 
 - `ensureBrokerSession` asks a stale idle broker to shut down before it opens
