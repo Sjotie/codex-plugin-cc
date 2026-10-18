@@ -98,8 +98,8 @@ test("concurrent upsertJob from multiple processes preserves all jobs and artifa
   }
 });
 
-// 50 writers at once (#1822): the five-writer test above loses a job only now
-// and then, so this one raises the odds of a lost update.
+// 50 writers at once (#1822): a stress check on top of the deterministic test
+// below. Against the old lock it loses jobs in most runs, not in every run.
 test("50 concurrent upsertJob writers lose no job", async () => {
   const workspace = makeTempDir();
   const count = 50;

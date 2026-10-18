@@ -94,18 +94,21 @@ function sleepSync(ms) {
 function publishLock(lockFile) {
   const pendingFile = `${lockFile}.${process.pid}`;
   try {
+    // Outside the link catch: a failed write is not "no hard links".
     fs.writeFileSync(pendingFile, String(process.pid));
-    fs.linkSync(pendingFile, lockFile);
-  } catch (err) {
-    // A retried link() over NFS can report EEXIST for a link that did go
-    // through; two links on our pending file mean state.lock is ours.
-    if (err.code === "EEXIST" && fs.statSync(pendingFile).nlink === 2) return;
-    if (!LINK_UNSUPPORTED_CODES.has(err.code)) throw err;
-    // No hard links here: create the lock directly, as before #1822. A writer
-    // that arrives between the create and the write can still take it over.
-    const fd = fs.openSync(lockFile, "wx");
-    fs.writeFileSync(fd, String(process.pid));
-    fs.closeSync(fd);
+    try {
+      fs.linkSync(pendingFile, lockFile);
+    } catch (err) {
+      // A retried link() over NFS can report EEXIST for a link that did go
+      // through; two links on our pending file mean state.lock is ours.
+      if (err.code === "EEXIST" && fs.statSync(pendingFile).nlink === 2) return;
+      if (!LINK_UNSUPPORTED_CODES.has(err.code)) throw err;
+      // No hard links here: create the lock directly, as before #1822. A writer
+      // that arrives between the create and the write can still take it over.
+      const fd = fs.openSync(lockFile, "wx");
+      fs.writeFileSync(fd, String(process.pid));
+      fs.closeSync(fd);
+    }
   } finally {
     fs.rmSync(pendingFile, { force: true });
   }
