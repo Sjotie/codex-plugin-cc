@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { stateMjsFor } from "./old-trees.mjs";
 
 const WRITER = fileURLToPath(new URL("./writer.mjs", import.meta.url));
+const LOCK_ACTOR = fileURLToPath(new URL("./lock-actor.mjs", import.meta.url));
 
 // Which state.mjs the writers under test load: "new" (this checkout), "o1" or "o2".
 export const IMPL = process.env.STATE_LOCK_TEST_IMPL ?? "new";
@@ -54,7 +55,9 @@ export function scenario(t, { pluginData: sharedPluginData } = {}) {
   });
 
   const start = (role, { impl = IMPL, mode = "owner", gates = {}, linkError, nodePath } = {}) => {
-    const child = spawn(nodePath ?? process.execPath, [WRITER], {
+    // The extra argv makes the writer a plugin process for the seal scan (design §5
+    // matches any argv element ending in /scripts/codex-companion.mjs).
+    const child = spawn(nodePath ?? process.execPath, [WRITER, "/plugin/scripts/codex-companion.mjs", "task-worker"], {
       env: childEnv({
         WRITER_STATE_MJS: stateMjsFor(impl),
         WRITER_WORKSPACE: workspace,
@@ -80,6 +83,34 @@ export function scenario(t, { pluginData: sharedPluginData } = {}) {
     return handle;
   };
 
+  // A new-code maintenance or holder process (lock-actor.mjs).
+  const actor = (role, op, gates = [], { nodePath, extraEnv, execArgs = [] } = {}) => {
+    const child = spawn(nodePath ?? process.execPath, [...execArgs, LOCK_ACTOR], {
+      env: childEnv({
+        ACTOR_WORKSPACE: workspace,
+        ACTOR_BARRIERS: barriers,
+        ACTOR_ROLE: role,
+        ACTOR_OP: JSON.stringify(op),
+        ACTOR_GATES: JSON.stringify(gates),
+        ...(extraEnv ?? {})
+      }),
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.stdout.resume();
+    const exit = new Promise((resolve) => child.once("exit", (code, sig) => resolve({ code, signal: sig, stderr })));
+    const handle = { role, child, exit, pid: child.pid };
+    children.push(handle);
+    return handle;
+  };
+  const result = (role) => {
+    const file = eventPath(`${role}.done`);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8") || "null") : undefined;
+  };
+
   t.after(async () => {
     for (const { child } of children) {
       if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
@@ -88,7 +119,7 @@ export function scenario(t, { pluginData: sharedPluginData } = {}) {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  return { root, workspace, barriers, pluginData, has, signal, wait, start, errors, childEnv, expose };
+  return { root, workspace, barriers, pluginData, has, signal, wait, start, actor, result, errors, childEnv, expose };
 }
 
 // An external process that tries to take the new kernel lock once and reports

@@ -369,7 +369,9 @@ export function upsertJob(cwd, jobPatch) {
   });
 }
 
-export function updateJobRecord(cwd, jobId, mutate) {
+// indexExtra: fields set on the index entry only, after the record (for the
+// index copy of a restored job, which clears completedAt and cancelledAt).
+export function updateJobRecord(cwd, jobId, mutate, indexExtra = null) {
   return withStateLock(cwd, (ctx) => {
     const jobFile = resolveJobFile(cwd, jobId);
     let existing = null;
@@ -395,12 +397,14 @@ export function updateJobRecord(cwd, jobId, mutate) {
       state.jobs.unshift({
         createdAt: timestamp,
         updatedAt: timestamp,
-        ...nextJob
+        ...nextJob,
+        ...(indexExtra ?? {})
       });
     } else {
       state.jobs[existingIndex] = {
         ...state.jobs[existingIndex],
         ...nextJob,
+        ...(indexExtra ?? {}),
         updatedAt: timestamp
       };
     }

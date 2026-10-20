@@ -361,11 +361,10 @@ export function settleCancellationAfterTermination(
     errorMessage: CANCELLATION_TERMINATION_FAILED_MESSAGE
   };
   // JSON and index in one locked update, JSON first (design §6.2, A7).
-  updateJobRecord(workspaceRoot, job.id, () => ({
-    ...restoredJob,
+  updateJobRecord(workspaceRoot, job.id, () => restoredJob, {
     completedAt: job.completedAt ?? null,
     cancelledAt: job.cancelledAt ?? null
-  }));
+  });
 
   return {
     processStopped: false,
