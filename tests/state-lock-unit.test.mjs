@@ -495,6 +495,7 @@ test("N30d1–d5: unreadable fds, unreadable or empty argv, comm and kernel thre
     { pid: 14, stat: "EACCES" }, // d4: argv and comm unreadable
     { pid: 15, argv: [], comm: "node" }, // d5
     { pid: 16, argv: [], comm: "kworker/0:1", flags: 0x00200000 }, // d5: kernel thread
+    { pid: 20, argv: [], comm: "node", flags: 0x00200000 }, // d5: a kernel thread is skipped on its flag alone
     { pid: 17, argv: "EACCES", comm: "bun" },
     { pid: 18, argv: plugin, fds: ["/x/lib/fenced-lock.protocol-1"], comm: "node" },
     { pid: 19, argv: ["node", "/srv/app.js"], comm: "node" }
@@ -508,6 +509,7 @@ test("N30d1–d5: unreadable fds, unreadable or empty argv, comm and kernel thre
   assert.equal(by[14]?.verdict, "unproven", "d4");
   assert.equal(by[15]?.verdict, "unproven", "d5");
   assert.equal(by[16], undefined, "d5: kernel thread");
+  assert.equal(by[20], undefined, "d5: kernel thread with a runtime-like comm");
   assert.equal(by[17]?.verdict, "unproven", "bun with unreadable argv");
   assert.equal(by[18]?.verdict, "new");
   assert.equal(by[19], undefined, "a node process of another program");
@@ -631,6 +633,20 @@ test("N32f: the target dies after SIGTERM and its pid is reused before SIGKILL: 
   assert.equal(r.outcomes[0].outcome, "identity-changed", JSON.stringify(r));
   assert.equal(r.result, "sealed");
   assert.equal(s.sealed(), true);
+});
+
+test("N32f (no grace): the identity is read again right before SIGKILL, not taken from before SIGTERM", (t) => {
+  // graceMs 0: one poll after SIGTERM still sees the target, the read right
+  // before SIGKILL sees a reused pid. Only that last read can stop the SIGKILL.
+  let afterTerm = 0;
+  const s = stopOldWith(t, [TARGET], (p, signals) => {
+    if (signals.length === 0) return alive();
+    afterTerm += 1;
+    return afterTerm === 1 ? alive() : alive({ start: "555" });
+  });
+  const r = s.lock.stopOld({ graceMs: 0 });
+  assert.deepEqual(s.signals.map(([, sig]) => sig), ["SIGTERM"], "SIGKILL went to the process that reused the pid");
+  assert.equal(r.outcomes[0].outcome, "identity-changed");
 });
 
 test("N32g: EPERM is not gone: outcome eperm, not ok, no seal", (t) => {
