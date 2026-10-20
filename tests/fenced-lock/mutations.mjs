@@ -87,8 +87,8 @@ export const MUTATIONS = [
     id: "scan-every-round",
     rule: "N27d: wait rounds read only S0",
     file: FL,
-    from: "      const rest = r.S0.filter((p) => aliveIn(o, p));\n      if (rest.length === 0) {\n        writeRecord",
-    to: "      writeSealRecord();\n      r = readRecord();\n      const rest = r.S0.filter((p) => aliveIn(o, p));\n      if (rest.length === 0) {\n        writeRecord",
+    from: "      const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n      if (rest.length === 0) {\n        writeRecord",
+    to: "      writeSealRecord();\n      r = readRecord();\n      const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n      if (rest.length === 0) {\n        writeRecord",
     tests: [[SEAL, "N27d"]]
   },
   {
@@ -167,8 +167,8 @@ export const MUTATIONS = [
     id: "A-held-during-grace",
     rule: "N32c: signals and grace outside A",
     file: FL,
-    from: "        targets = r.S0.filter((p) => aliveIn(o, p));\n      } finally {\n        unlock(h);\n      }",
-    to: "        targets = r.S0.filter((p) => aliveIn(o, p));\n      } finally {\n        globalThis.__heldDuringGrace = h;\n      }",
+    from: "        targets = r.S0.filter((p) => stillWaitingOn(o, p));\n      } finally {\n        unlock(h);\n      }",
+    to: "        targets = r.S0.filter((p) => stillWaitingOn(o, p));\n      } finally {\n        globalThis.__heldDuringGrace = h;\n      }",
     tests: [[SEAL, "N32c"]]
   },
   {
