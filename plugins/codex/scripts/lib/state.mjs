@@ -107,6 +107,53 @@ export function openStateLock(cwd) {
   return openFencedLock(resolveLockPath(cwd), stateLockOptions(cwd));
 }
 
+// For state-lock --all: a state directory found on disk, without a workspace.
+export function openStateLockAt(stateDir) {
+  return openFencedLock(path.join(stateDir, LOCK_NAME), stateLockOptions(stateDir));
+}
+
+// Every directory that can hold state directories: the plugin data dir of
+// this process (when set) and the /tmp fallback.
+export function resolveStateRoots() {
+  const roots = [];
+  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
+  if (pluginDataDir) roots.push(path.join(pluginDataDir, "state"));
+  roots.push(FALLBACK_STATE_ROOT_DIR);
+  return roots;
+}
+
+// Diagnosis for state-lock status (design §6.3, §6.5): job files without an
+// index entry (orphans, e.g. after a crash between commit and prune), and
+// index members whose JSON cannot be read (never pruned).
+export function artifactReport(stateDir) {
+  const jobsDir = path.join(stateDir, JOBS_DIR_NAME);
+  let indexed = [];
+  try {
+    indexed = JSON.parse(fs.readFileSync(path.join(stateDir, STATE_FILE_NAME), "utf8")).jobs ?? [];
+  } catch {
+    indexed = [];
+  }
+  const ids = new Set(indexed.map((job) => job.id));
+  let names = [];
+  try {
+    names = fs.readdirSync(jobsDir);
+  } catch {
+    names = [];
+  }
+  const orphans = names.filter((name) => /\.(json|log)$/.test(name) && !ids.has(name.replace(/\.(json|log)$/, "")));
+  const unreadable = indexed
+    .filter((job) => {
+      try {
+        const record = JSON.parse(fs.readFileSync(path.join(jobsDir, `${job.id}.json`), "utf8"));
+        return !record || record.id !== job.id;
+      } catch (error) {
+        return error?.code !== "ENOENT";
+      }
+    })
+    .map((job) => job.id);
+  return { indexed: indexed.length, orphans, unreadable };
+}
+
 function withStateLock(cwd, fn) {
   ensureStateDir(cwd);
   const lock = openStateLock(cwd);

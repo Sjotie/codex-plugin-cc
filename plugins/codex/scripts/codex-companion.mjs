@@ -48,6 +48,7 @@ import {
   waitForTerminalJob
 } from "./lib/job-control.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
+import { runStateLockCommand } from "./lib/state-lock-cli.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -92,7 +93,8 @@ function printUsage() {
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs wait <job-id> [--timeout <seconds>|--timeout-ms <ms>] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
-      "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
+      "  node scripts/codex-companion.mjs cancel [job-id] [--json]",
+      "  node scripts/codex-companion.mjs state-lock <status|drain-check|adopt-legacy|seal|stop-old|unfence> [--help]"
     ].join("\n")
   );
 }
@@ -1322,6 +1324,12 @@ async function main() {
   const [subcommand, ...argv] = process.argv.slice(2);
   if (!subcommand || subcommand === "help" || subcommand === "--help") {
     printUsage();
+    return;
+  }
+
+  // state-lock has its own commands, each with its own --help (#1916).
+  if (subcommand === "state-lock") {
+    process.exitCode = await runStateLockCommand(argv);
     return;
   }
 

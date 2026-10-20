@@ -13,7 +13,7 @@
 //   WRITER_ROLE        name of this writer (also the job id)
 //   WRITER_MODE        owner (hold the section until <role>.release), quick, crash
 //                      (exit inside the section, skipping every finally)
-//   WRITER_GATES       JSON {point: "pause" | "kill"}
+//   WRITER_GATES       JSON {point: "pause" | "kill" | {action, nth}}
 //   WRITER_LINK_ERROR  make link() to state.lock fail with this code
 //
 // Gate points:
@@ -59,11 +59,15 @@ const waitFor = (name) => {
   }
 };
 
-const fired = new Set();
+// A gate is "pause" or "kill" (first occurrence of the point) or {action, nth}.
+const seen = new Map();
 function gate(point) {
-  const action = gates[point];
-  if (!action || fired.has(point)) return;
-  fired.add(point);
+  const spec = gates[point];
+  if (!spec) return;
+  const count = (seen.get(point) ?? 0) + 1;
+  seen.set(point, count);
+  const { action, nth = 1 } = typeof spec === "string" ? { action: spec } : spec;
+  if (count !== nth) return;
   if (action === "kill") {
     process.kill(process.pid, "SIGKILL");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10_000);

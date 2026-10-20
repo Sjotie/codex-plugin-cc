@@ -622,13 +622,17 @@ function aliveIn(o, p) {
   return !String(id.state).startsWith("Z");
 }
 
-// "same" | "gone" | "changed" for a stop-old target, re-read right before a signal.
+// "same" | "gone" | "changed" | "unverified" for a stop-old target, re-read
+// right before a signal. "unverified": same pid and start time, but the argv
+// is empty or unreadable (a process that is exiting has released its memory);
+// never signalled, only polled until it is gone.
 function identityNow(o, target) {
   const id = readIdentity(o, target);
   if (id.gone || String(id.state).startsWith("Z")) return { status: "gone" };
   if (target.start !== null && id.start !== target.start) return { status: "changed" };
   if (target.script) {
     const argv = id.argv ?? [];
+    if (argv.length === 0) return { status: "unverified" };
     const at = argv.findIndex((arg) => arg.endsWith(`/scripts/${target.script}`) || arg.endsWith(`\\scripts\\${target.script}`));
     if (at === -1) return { status: "changed" };
     if (target.sub && !String(argv[at + 1] ?? "").startsWith(target.sub)) return { status: "changed" };
@@ -1084,7 +1088,7 @@ export function openFencedLock(fencePath, options = {}) {
     try {
       out.residues = residues();
     } catch (error) {
-      out.residues = [{ error: error.code }];
+      out.residues = error.code === "ENOENT" ? [] : [{ error: error.code }];
     }
     if (st?.isDirectory()) {
       out.record = readRecord();
@@ -1306,35 +1310,42 @@ export function openFencedLock(fencePath, options = {}) {
           throw error;
         }
       };
-      let c = check();
-      if (c.status === "gone") return { ...who, outcome: "already-gone" };
-      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identiteit onleesbaar" };
-      if (c.stopped) {
-        const e = send("SIGCONT");
-        if (e === "eperm") return { ...who, outcome: "eperm" };
-      }
-      c = check();
-      if (c.status === "gone") return { ...who, outcome: "already-gone" };
-      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      const term = send("SIGTERM");
-      if (term === "eperm") return { ...who, outcome: "eperm" };
       const waitGone = (ms) => {
         const end = performance.now() + ms;
         for (;;) {
           const now = check();
           if (now.status === "gone") return "gone";
           if (now.status === "changed") return "changed";
-          if (performance.now() >= end) return "same";
+          if (performance.now() >= end) return now.status;
           sleepSync(50);
         }
       };
+      // Settle "unverified" (an exiting process) before deciding to signal.
+      const settled = () => {
+        const c = check();
+        return c.status === "unverified" ? { status: waitGone(500) } : c;
+      };
+      let c = settled();
+      if (c.status === "gone") return { ...who, outcome: "already-gone" };
+      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
+      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identiteit niet te bevestigen" };
+      if (c.stopped) {
+        const e = send("SIGCONT");
+        if (e === "eperm") return { ...who, outcome: "eperm" };
+      }
+      c = settled();
+      if (c.status === "gone") return { ...who, outcome: "already-gone" };
+      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
+      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identiteit niet te bevestigen" };
+      const term = send("SIGTERM");
+      if (term === "eperm") return { ...who, outcome: "eperm" };
       const afterTerm = waitGone(graceMs);
       if (afterTerm === "gone") return { ...who, outcome: "terminated" };
       if (afterTerm === "changed") return { ...who, outcome: "identity-changed" };
-      c = check();
+      c = settled();
       if (c.status === "gone") return { ...who, outcome: "terminated" };
-      if (c.status !== "same") return { ...who, outcome: "identity-changed" };
+      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
+      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identiteit niet te bevestigen" };
       const k = send("SIGKILL");
       if (k === "eperm") return { ...who, outcome: "eperm" };
       const afterKill = waitGone(2_000);
