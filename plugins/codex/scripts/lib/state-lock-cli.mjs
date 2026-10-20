@@ -31,7 +31,8 @@ one entry per state directory; exit code 1 while any directory waits.`,
 
 Lists the plugin processes on this kernel (Linux) or machine (macOS) with pid,
 start time, argv and verdict: new (holds the protocol marker), unproven, or
-no-lock-path (an old broker). result is "drained" when nothing is unproven.
+no-lock-path (an old broker). result is "drained" when nothing is unproven,
+"moved" when the procfs at /proc changed during the scan (nothing decided).
 The process running this command is reported under "self" and not counted.
 Exit code 0 when drained, 2 when not.`,
   "adopt-legacy": `Usage: codex-companion state-lock adopt-legacy --cwd <dir> --expect-dev <d> --expect-ino <i> --expect-sha <sha256>
@@ -39,8 +40,9 @@ Exit code 0 when drained, 2 when not.`,
 
 Moves a dead old state.lock file to state.lock.quarantine-* and puts up the
 fence in the same holding. Take the expected values from state-lock status.
-Refuses when the values differ, when the drain-check is not "drained", or
-outside the init PID namespace without a declaration. Exit code 0 only when
+Refuses when the values differ, when the drain-check is not "drained" (also
+when /proc changed during it), or outside the init PID namespace without a
+declaration. Exit code 0 only when
 the moved object was the expected one and the fence stands.`,
   seal: `Usage: codex-companion state-lock seal --cwd <dir> --declare-cross-namespace "<who, which namespaces, how drained>"
 
@@ -52,7 +54,8 @@ When the record was made in another procfs (status: waitingOn.kind "foreign",
 e.g. by the host while this runs in a container), this namespace cannot see
 the recorded processes. Then seal scans here instead, under the declaration,
 which so also vouches that the processes of the replaced record are gone; the
-replaced record is kept in the new one (replacedForeign). Prefer sealing from
+replaced record is kept in the new one (replacedForeign, with that declaration
+as vouchedBy), also through later scans. Prefer sealing from
 the init PID namespace when there is one: any state change there, or
 state-lock stop-old, scans again and judges every process. A sealed record is
 never changed.`,

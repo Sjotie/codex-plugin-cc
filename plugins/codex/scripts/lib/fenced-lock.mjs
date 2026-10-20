@@ -551,14 +551,56 @@ function scanProcesses(o) {
   return { self: { pid: process.pid, start: null, matched: false }, processes: [] };
 }
 
+// What a process sees right now (design v2.13): its domain and the procfs at
+// /proc. The procfs a scan read (Linux) is named by its device, the boot id,
+// and whether it shows the init PID namespace. S0 holds pids and start times
+// as that procfs shows them; only a reader that sees the same numbering can
+// judge them. Elsewhere a missing pid is not a dead process (v2.12).
+function viewOf(o) {
+  const domain = o.domain ? o.domain() : domainVerdict({ platform: o.platform, procRoot: o.procRoot });
+  return { domain, proc: procIdentity(o, domain) };
+}
+
+function procIdentity(o, domain) {
+  if (o.procIdentity) return o.procIdentity();
+  if (o.platform !== "linux") return null;
+  let dev = null;
+  try {
+    dev = String(fs.statSync(o.procRoot).dev);
+  } catch {
+    dev = null;
+  }
+  // init comes from this reader's own domain, never from the record.
+  return { dev, bootId: bootId(), init: domain.verdict === "initial" };
+}
+
+// Did the view change between two reads? Then whatever was read from /proc
+// in between may come from either procfs, and counts for neither.
+function sameView(o, a, b) {
+  if (o.platform !== "linux") return true;
+  return (
+    a.domain.verdict === b.domain.verdict &&
+    (a.proc?.dev ?? null) === (b.proc?.dev ?? null) &&
+    (a.proc?.bootId ?? null) === (b.proc?.bootId ?? null) &&
+    (a.proc?.init ?? null) === (b.proc?.init ?? null)
+  );
+}
+
+const PROC_MOVED = "the procfs at /proc changed while it was read; nothing was decided on it, try again";
+
 export function drainCheck(options = {}) {
   const o = withDefaults(options);
-  const domain = o.domain ? o.domain() : domainVerdict({ platform: o.platform, procRoot: o.procRoot });
+  // The scan counts only when the view after it is the one before (v2.13):
+  // a remount with hidepid during the scan hides processes, it does not end them.
+  const before = viewOf(o);
   const { self, processes } = scanProcesses(o);
+  const moved = o.platform === "linux" && !sameView(o, before, viewOf(o));
+  const domain = before.domain;
   const newCount = processes.filter((p) => p.verdict === "new").length;
   const unprovenCount = processes.filter((p) => p.verdict === "unproven").length;
   return {
-    result: unprovenCount === 0 ? "drained" : "not-drained",
+    result: moved ? "moved" : unprovenCount === 0 ? "drained" : "not-drained",
+    ...(moved ? { detail: PROC_MOVED } : {}),
     verdict: domain.verdict,
     reason: domain.reason,
     scope: domain.scope,
@@ -860,49 +902,17 @@ export function openFencedLock(fencePath, options = {}) {
   let viewMemo = null;
   function hereNow() {
     if (keepView && viewMemo) return viewMemo;
-    const domain = o.domain ? o.domain() : domainVerdict({ platform: o.platform, procRoot: o.procRoot });
-    const here = { domain, proc: procIdentity(domain) };
-    if (keepView && domain.verdict !== "unknown") viewMemo = here;
+    const here = viewOf(o);
+    if (keepView && here.domain.verdict !== "unknown") viewMemo = here;
     return here;
   }
-
-  // The procfs a scan read (Linux): its device, the boot id, and whether it
-  // shows the init PID namespace. S0 holds pids and start times as that
-  // procfs shows them; only a reader that sees the same numbering can judge
-  // them. Elsewhere a missing pid is not a dead process (v2.12).
-  function procIdentity(domain) {
-    if (o.procIdentity) return o.procIdentity();
-    if (o.platform !== "linux") return null;
-    let dev = null;
-    try {
-      dev = String(fs.statSync(o.procRoot).dev);
-    } catch {
-      dev = null;
-    }
-    // init comes from this reader's own domain, never from the record.
-    return { dev, bootId: bootId(), init: domain.verdict === "initial" };
-  }
-
-  // Did the view change between two reads? Then whatever was read from /proc
-  // in between may come from either procfs, and counts for neither.
-  function sameView(a, b) {
-    if (o.platform !== "linux") return true;
-    return (
-      a.domain.verdict === b.domain.verdict &&
-      (a.proc?.dev ?? null) === (b.proc?.dev ?? null) &&
-      (a.proc?.bootId ?? null) === (b.proc?.bootId ?? null) &&
-      (a.proc?.init ?? null) === (b.proc?.init ?? null)
-    );
-  }
-
-  const PROC_MOVED = "the procfs at /proc changed while it was read; nothing was decided on it, try again";
 
   // Every decision on /proc reads goes through here: fn reads /proc, and its
   // result counts only when the view after the reads is still view (Linux;
   // elsewhere, or without a view, always). -> { moved: true } | { moved: false, value }
   function inView(view, fn) {
     const value = fn();
-    if (view && o.platform === "linux" && !sameView(view, hereNow())) return { moved: true };
+    if (view && o.platform === "linux" && !sameView(o, view, hereNow())) return { moved: true };
     return { moved: false, value };
   }
 
@@ -934,14 +944,16 @@ export function openFencedLock(fencePath, options = {}) {
   // during the scan.
   function writeSealRecord({ declaration, replaced = null, view = null } = {}) {
     const here = hereNow();
-    if (view && !sameView(view, here)) return false;
+    if (view && !sameView(o, view, here)) return false;
     const previous = readRecord();
     const publishedAt = previous?.publishedAt ?? nowIso();
     // A declaration speaks for the namespace it was made in: it carries over
     // only to a scan of the same procfs.
     const same = Boolean(previous && sameProc(previous, here));
     const decl = declaration ?? (same ? previous.declaration : null) ?? null;
-    const replacedForeign = replaced ?? (same ? previous.replacedForeign : null) ?? null;
+    // The audit of what an operator's declaration vouched for stays on every
+    // later scan, also of another procfs (it carries its own declaration).
+    const replacedForeign = replaced ?? previous?.replacedForeign ?? null;
     const found = residues(); // first the residue check, then the scan (I5b, I6)
     const domain = here.domain;
     const head = {
@@ -1320,7 +1332,12 @@ export function openFencedLock(fencePath, options = {}) {
               }
             })
           : [];
-      const drain = drainCheck({ ...o, domain: () => domain });
+      // The drain check reads the view itself, before and after its scan; the
+      // domain checked above must still be the one it saw.
+      const drain = drainCheck(o);
+      if (drain.result === "moved" || drain.verdict !== domain.verdict) {
+        throw new FencedLockError("ADOPT_MOVED", `${PROC_MOVED} (domain ${domain.verdict} at the start, ${drain.verdict} during the drain check)`, { drain });
+      }
       if (drain.result !== "drained") {
         throw new FencedLockError("ADOPT_NOT_DRAINED", `drain-check: ${drain.unprovenCount} unproven plugin process(es)`, { drain });
       }
@@ -1410,7 +1427,19 @@ export function openFencedLock(fencePath, options = {}) {
           // The replaced record stays in the new one (replacedForeign).
           const written = writeSealRecord({
             declaration: domainDeclaration,
-            replaced: r ? { verdict: r.verdict, verdictReason: r.verdictReason, declaration: r.declaration ?? null, scanProc: r.scanProc ?? null, S0: r.S0, residues: r.residues } : null,
+            replaced: r
+              ? {
+                  vouchedBy: domainDeclaration,
+                  replacedAt: nowIso(),
+                  verdict: r.verdict,
+                  verdictReason: r.verdictReason,
+                  declaration: r.declaration ?? null,
+                  scanProc: r.scanProc ?? null,
+                  S0: r.S0,
+                  residues: r.residues,
+                  ...(r.replacedForeign ? { replacedForeign: r.replacedForeign } : {})
+                }
+              : null,
             view: here
           });
           if (!written) return { result: "waiting", reason: PROC_MOVED, record: readRecord() };

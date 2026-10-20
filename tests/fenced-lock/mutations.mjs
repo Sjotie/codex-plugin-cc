@@ -351,8 +351,8 @@ export const MUTATIONS = [
     id: "init-from-own-domain",
     rule: "v2.12 R9g: init comes from the reader's own domain",
     file: FL,
-    from: "    return { dev, bootId: bootId(), init: domain.verdict === \"initial\" };",
-    to: "    return { dev, bootId: bootId(), init: true };",
+    from: "  return { dev, bootId: bootId(), init: domain.verdict === \"initial\" };",
+    to: "  return { dev, bootId: bootId(), init: true };",
     tests: [[UNIT, "R9g"]]
   },
   {
@@ -373,17 +373,17 @@ export const MUTATIONS = [
   },
   {
     id: "replaced-foreign-dropped",
-    rule: "v2.12 R9j: replacedForeign stays within the same procfs",
+    rule: "v2.14 R9j/R9j2: replacedForeign stays on every later scan, also of another procfs",
     file: FL,
-    from: "(same ? previous.replacedForeign : null)",
-    to: "null",
+    from: "    const replacedForeign = replaced ?? previous?.replacedForeign ?? null;",
+    to: "    const replacedForeign = replaced ?? null;",
     tests: [[UNIT, "R9j"]]
   },
   {
     id: "unknown-domain-cached",
     rule: "v2.12 R9k: a passing unknown verdict is read again (macOS, where the verdict is kept)",
     file: FL,
-    from: "    if (keepView && domain.verdict !== \"unknown\") viewMemo = here;",
+    from: "    if (keepView && here.domain.verdict !== \"unknown\") viewMemo = here;",
     to: "    if (keepView) viewMemo = here;",
     tests: [[UNIT, "R9k"]]
   },
@@ -415,7 +415,7 @@ export const MUTATIONS = [
     id: "rescan-from-another-view",
     rule: "v2.13: a rescan runs only in the view that decided it",
     file: FL,
-    from: "    if (view && !sameView(view, here)) return false;\n",
+    from: "    if (view && !sameView(o, view, here)) return false;\n",
     to: "",
     tests: [[UNIT, "R10f"]]
   },
@@ -439,7 +439,7 @@ export const MUTATIONS = [
     id: "view-check-off",
     rule: "v2.13: inView is the one place that compares the view after the reads",
     file: FL,
-    from: "    if (view && o.platform === \"linux\" && !sameView(view, hereNow())) return { moved: true };",
+    from: "    if (view && o.platform === \"linux\" && !sameView(o, view, hereNow())) return { moved: true };",
     to: "",
     tests: [[UNIT, "R10c|R10e|R10g"], ["tests/state-lock-sol-r3.test.mjs", "probe"]]
   },
@@ -451,6 +451,30 @@ export const MUTATIONS = [
     from: "          out.waitingOn = shown.moved ?",
     to: "          out.waitingOn = false ?",
     tests: [[UNIT, "R10g"]]
+  },
+  {
+    id: "drain-ignores-move",
+    rule: "v2.14 R10h: a drain check during which /proc changes is not drained",
+    file: FL,
+    from: "  const moved = o.platform === \"linux\" && !sameView(o, before, viewOf(o));",
+    to: "  const moved = false;",
+    tests: [[UNIT, "R10h|R10i"]]
+  },
+  {
+    id: "adopt-ignores-move",
+    rule: "v2.14 R10i: adopt-legacy checks the drain check's view and domain",
+    file: FL,
+    from: "      if (drain.result === \"moved\" || drain.verdict !== domain.verdict) {",
+    to: "      if (false) {",
+    tests: [[UNIT, "R10i"]]
+  },
+  {
+    id: "vouched-by-dropped",
+    rule: "v2.14 R9j2: the replaced record names the declaration that vouched for it",
+    file: FL,
+    from: "                  vouchedBy: domainDeclaration,\n",
+    to: "",
+    tests: [[UNIT, "R9j2"]]
   },
   {
     id: "no-assertOwned-before-rename",

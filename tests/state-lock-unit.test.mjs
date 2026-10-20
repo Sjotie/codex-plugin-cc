@@ -2,6 +2,7 @@
 // U6, U7, N30b–d5, N31d/g, N32d–l). Pure functions get table tests; the scan
 // runs against real child processes, made visible through a scan scope that
 // only this test process applies (tests/fenced-lock/scan-scope.mjs).
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -1364,4 +1365,65 @@ test("R10g: status shows no argv read from another procfs than the one judged", 
   movedNow = false;
   reads = 10;
   assert.equal(lock.status().waitingOn.kind, "processes", "positive control");
+});
+
+// ---- v2.14 (Muse r4): the drain check and adopt read the view too ---------
+
+const HIDDEN = () => ({ verdict: "unknown", reason: "/proc mounted with hidepid=2", scope: "t" });
+
+// A drain check whose scan is the moment /proc is remounted with hidepid: from
+// then on the old processes are hidden, not gone.
+function drainLock(F, { remountDuringScan, processes = [] }) {
+  let domain = INITIAL;
+  return openFencedLock(F, {
+    ...PLUGIN_OPTS,
+    domain: () => domain(),
+    procIdentity: () => ({ dev: "Y", bootId: "boot-1", init: domain === INITIAL }),
+    scanner: () => {
+      if (remountDuringScan) domain = HIDDEN;
+      return { self: { pid: process.pid, start: null, matched: true }, processes };
+    },
+    identityReader: () => ({ gone: true }),
+    markerReader: () => false,
+    platform: "linux"
+  });
+}
+
+test("R10h: a drain check during which /proc changes is not drained", (t) => {
+  const F = path.join(tmpdir(t), "state.lock");
+  assert.equal(drainLock(F, { remountDuringScan: false }).drainCheck().result, "drained", "positive control");
+  const moved = drainLock(F, { remountDuringScan: true }).drainCheck();
+  assert.equal(moved.result, "moved", JSON.stringify(moved));
+  assert.match(moved.detail, /procfs at \/proc changed/);
+});
+
+test("R10i: adopt-legacy moves nothing when /proc changes during its drain check", (t) => {
+  const make = (remountDuringScan) => {
+    const F = path.join(tmpdir(t), "state.lock");
+    fs.writeFileSync(F, "");
+    const st = fs.statSync(F, { bigint: true });
+    const sha = crypto.createHash("sha256").update("").digest("hex");
+    const lock = drainLock(F, { remountDuringScan });
+    return { F, run: () => lock.adoptLegacy({ expectDev: String(st.dev), expectIno: String(st.ino), expectSha: sha }) };
+  };
+  const control = make(false);
+  assert.equal(control.run().ok, true, "positive control: the adopt goes through");
+  assert.ok(fs.statSync(control.F).isDirectory());
+  const moved = make(true);
+  assert.throws(moved.run, (error) => error.code === "ADOPT_MOVED");
+  assert.ok(fs.statSync(moved.F).isFile(), "the old lock file was not moved");
+});
+
+test("R9j2: replacedForeign, with the declaration that vouched for it, stays when the init namespace scans the record again", (t) => {
+  const r = boundRecord(t, { verdict: "initial", scanProc: { ...PROC_B, init: true } });
+  assert.equal(boundLock(r.F, { here: PROC_A, domain: NESTED }).seal({ domainDeclaration: "op: the host's old processes are gone" }).result, "sealed");
+  const sealed = r.read();
+  // Reopen as unsealed (a later fence on the same directory) and let the init namespace scan it again.
+  fs.writeFileSync(path.join(r.F, "fence.json"), JSON.stringify({ ...sealed, sealedAt: null }));
+  const h = boundLock(r.F, { here: { ...PROC_B, init: true }, domain: INITIAL }).tryAcquire();
+  assert.ok(h);
+  const after = r.read();
+  assert.equal(after.declaration, null, "the declaration itself is per procfs");
+  assert.equal(after.replacedForeign.vouchedBy, "op: the host's old processes are gone");
+  assert.deepEqual(after.replacedForeign.S0.map((p) => p.pid), [TARGET.pid]);
 });
