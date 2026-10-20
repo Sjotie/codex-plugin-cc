@@ -70,14 +70,25 @@ test("inherited procfs: a nested reader that shares the host procfs judges the h
   const lock = openFencedLock(F, { argvMatch: argvMatchFn });
   assert.equal(lock.tryAcquire(), null, "precondition: the host waits");
   assert.ok(lock.status().record.S0.some((p) => p.pid === child.pid), "precondition: the old process is in S0");
-  const script = `const {openFencedLock,domainVerdict}=await import(process.argv[1]);const l=openFencedLock(process.argv[2]);const h=l.tryAcquire();console.log(JSON.stringify({domain:domainVerdict().verdict,acquired:!!h,record:l.status().record}));if(h)l.release(h);`;
-  const run = spawnSync("unshare", ["-r", "-p", "-f", process.execPath, "--input-type=module", "-e", script, MODULE, F], { encoding: "utf8" });
-  assert.equal(run.status, 0, run.stderr);
-  const out = JSON.parse(run.stdout);
+  const script = `const {openFencedLock,domainVerdict}=await import(process.argv[1]);const l=openFencedLock(process.argv[2]);const h=l.tryAcquire();const st=l.status();console.log(JSON.stringify({domain:domainVerdict().verdict,acquired:!!h,record:st.record,waitingOn:st.waitingOn}));if(h)l.release(h);`;
+  const nested = () => {
+    const run = spawnSync("unshare", ["-r", "-p", "-f", process.execPath, "--input-type=module", "-e", script, MODULE, F], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    return JSON.parse(run.stdout);
+  };
+  const out = nested();
   assert.equal(out.domain, "nested");
   assert.equal(aliveOnHost(child.pid), true);
   assert.equal(out.acquired, false, JSON.stringify(out));
   assert.equal(out.record.sealedAt, null);
+  // It refused because it judged the old process alive, not because it took
+  // the record for foreign: the shared procfs shows the same pids.
+  assert.equal(out.waitingOn.kind, "processes", JSON.stringify(out.waitingOn));
+  assert.ok(out.waitingOn.processes.some((p) => p.pid === child.pid));
+  child.kill("SIGKILL");
+  await new Promise((r) => child.once("exit", r));
+  const after = nested();
+  assert.equal(after.acquired, true, `the nested reader judges the host record and seals once the old process is gone: ${JSON.stringify(after)}`);
 });
 
 test("reverse route: a record made in a nested own procfs (with a declaration) is scanned again by the host, which then waits for its own old process", async (t) => {

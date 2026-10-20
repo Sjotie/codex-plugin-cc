@@ -600,7 +600,7 @@ function scanProc() {
   try {
     bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   } catch {}
-  return LINUX ? { dev: String(fs.statSync("/proc").dev), bootId } : null;
+  return LINUX ? { dev: String(fs.statSync("/proc").dev), bootId, init: true } : null;
 }
 
 function fencedDir(t, S0) {
@@ -975,4 +975,100 @@ test("R7 (grace): a target that opens the marker during the grace after SIGTERM 
   assert.match(r.outcomes[0].detail, /no further signal after SIGTERM/);
   assert.match(r.outcomes[1].detail, /never signalled/);
   assert.equal(r.result, "sealed");
+});
+
+// ---------------------------------------------------------------------------
+// v2.12 (Sol round 2): the seal record is bound to the procfs of its scan.
+// These run everywhere: the procfs identity and the domain are injected.
+// ---------------------------------------------------------------------------
+
+const PROC_A = { dev: "A", bootId: "boot-1", init: false };
+const PROC_B = { dev: "B", bootId: "boot-1", init: false };
+const NESTED = () => ({ verdict: "nested", reason: "PID namespace pid:[9]", scope: "test" });
+
+function boundRecord(t, fields) {
+  const { F, recordPath } = fencedDir(t, [TARGET]);
+  const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  fs.writeFileSync(recordPath, JSON.stringify({ ...record, ...fields }));
+  const read = () => JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  return { F, read };
+}
+
+// alivePids: the pids that look alive from here (the recorded ones do not).
+function boundLock(F, { here, domain, processes = [], signals = [], alivePids = [] }) {
+  return openFencedLock(F, {
+    ...PLUGIN_OPTS,
+    domain,
+    procIdentity: () => here,
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes }),
+    identityReader: (p) => (alivePids.includes(p.pid) ? { start: p.start, state: "S", argv: PLUGIN_ARGV, comm: "node" } : { gone: true }),
+    markerReader: () => false,
+    kill: (pid, sig) => signals.push([pid, sig]),
+    platform: "linux"
+  });
+}
+
+test("R9a: a nested reader of another procfs never judges the record: no seal, no rescan, status foreign", (t) => {
+  const { F, read } = boundRecord(t, { verdict: "initial", scanProc: { ...PROC_B, init: true } });
+  const before = read();
+  const lock = boundLock(F, { here: PROC_A, domain: NESTED });
+  assert.equal(lock.tryAcquire(), null, "a pid it cannot see is not a dead one");
+  assert.deepEqual(read(), before, "the record was neither sealed nor replaced");
+  assert.equal(lock.status().waitingOn.kind, "foreign");
+});
+
+test("R9b: in the init namespace a record from another procfs is scanned again; two init-namespace procfs mounts agree", (t) => {
+  // Another boot: scanned again, the S0 of the new scan counts.
+  const other = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-0", init: true } });
+  const fresh = { ...TARGET, pid: 7777, start: "777" };
+  const lock = boundLock(other.F, { here: { dev: "Y", bootId: "boot-1", init: true }, domain: INITIAL, processes: [{ ...fresh, verdict: "unproven" }], alivePids: [7777] });
+  assert.equal(lock.status().waitingOn.kind, "rescan");
+  assert.equal(lock.tryAcquire(), null);
+  assert.deepEqual(other.read().S0.map((p) => p.pid), [7777]);
+  assert.equal(other.read().scanProc.bootId, "boot-1");
+  // Same boot, both in the init namespace, different procfs mounts (docker --pid=host): no rescan.
+  const same = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-1", init: true } });
+  const lock2 = boundLock(same.F, { here: { dev: "Y", bootId: "boot-1", init: true }, domain: INITIAL, processes: [{ ...fresh, verdict: "unproven" }] });
+  const h = lock2.tryAcquire();
+  assert.ok(h, "the recorded old process is gone (identity reader), so the seal comes from the same record");
+  lock2.release(h);
+  assert.deepEqual(same.read().S0.map((p) => p.pid), [TARGET.pid], "not scanned again");
+});
+
+test("R9c: a declaration carries over only within the same procfs", (t) => {
+  // Same procfs: the residue is gone, the rescan keeps the declaration.
+  const a = boundRecord(t, { verdict: "nested", declaration: "D", scanProc: PROC_A, residues: [{ name: "state.lock.1", kind: "file", nlink: 2 }], S0: null });
+  boundLock(a.F, { here: PROC_A, domain: NESTED }).tryAcquire();
+  assert.equal(a.read().declaration, "D");
+  // Another procfs, read from the init namespace: the rescan drops it.
+  const b = boundRecord(t, { verdict: "nested", declaration: "D", scanProc: PROC_B });
+  boundLock(b.F, { here: { ...PROC_A, init: true }, domain: INITIAL }).tryAcquire();
+  assert.equal(b.read().declaration, null);
+  assert.equal(b.read().verdict, "initial");
+});
+
+test("R9d: a residue record from another procfs is not rescanned by a nested reader", (t) => {
+  const r = boundRecord(t, { verdict: "initial", scanProc: { ...PROC_B, init: true }, residues: [{ name: "state.lock.1", kind: "file", nlink: 2 }], S0: null });
+  const before = r.read();
+  assert.equal(boundLock(r.F, { here: PROC_A, domain: NESTED }).tryAcquire(), null);
+  assert.deepEqual(r.read(), before);
+});
+
+test("R9e: seal --declare-cross-namespace on a foreign record scans here under the declaration and keeps the replaced record", (t) => {
+  const r = boundRecord(t, { verdict: "initial", scanProc: { ...PROC_B, init: true } });
+  const result = boundLock(r.F, { here: PROC_A, domain: NESTED }).seal({ domainDeclaration: "operator: the host's old processes are gone" });
+  assert.equal(result.result, "sealed", JSON.stringify(result));
+  const after = r.read();
+  assert.equal(after.declaration, "operator: the host's old processes are gone");
+  assert.deepEqual(after.scanProc, PROC_A);
+  assert.deepEqual(after.replacedForeign.S0.map((p) => p.pid), [TARGET.pid], "the replaced record is kept");
+});
+
+test("R9f: stop-old in the init namespace scans a record from another procfs again before choosing targets", (t) => {
+  const r = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-0", init: true } });
+  const signals = [];
+  const result = boundLock(r.F, { here: { dev: "Y", bootId: "boot-1", init: true }, domain: INITIAL, signals }).stopOld({ graceMs: 50 });
+  assert.deepEqual(signals, [], "the foreign pids were never signalled");
+  assert.equal(result.result, "sealed", JSON.stringify(result));
+  assert.equal(r.read().scanProc.bootId, "boot-1");
 });

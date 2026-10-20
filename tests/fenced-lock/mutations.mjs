@@ -39,16 +39,16 @@ export const MUTATIONS = [
     id: "residue-gone-reuses-old-S0",
     rule: "I6: after the residue disappears, a new scan instead of the old S0",
     file: FL,
-    from: "        writeSealRecord(); // a new check and a new scan, after T_r\n        r = readRecord();",
-    to: "        writeRecord({ ...r, residues: [], S0: [] });\n        r = readRecord();",
+    from: "        }\n        // residue gone, or rescan",
+    to: "          writeRecord({ ...r, residues: [], S0: [] });\n          r = readRecord();\n          continue;\n        }\n        // residue gone, or rescan",
     tests: [[SEAL, "N31a|N31f"]]
   },
   {
     id: "no-rescan-from-initial",
     rule: "v2.7: the first initial-domain process scans again",
     file: FL,
-    from: "      if (r.verdict !== \"initial\" && !r.declaration && currentDomain().verdict === \"initial\") {",
-    to: "      if (false) {",
+    from: "    if (!same || (here.verdict === \"initial\" && r.verdict !== \"initial\" && !r.declaration)) return { state: \"rescan\" };",
+    to: "    if (!same) return { state: \"rescan\" };",
     tests: [[SEAL, "N32b"]]
   },
   {
@@ -79,16 +79,16 @@ export const MUTATIONS = [
     id: "missing-record-is-empty-S0",
     rule: "N27e: a missing record means a new scan, never an empty S0",
     file: FL,
-    from: "      if (!r) {\n        writeSealRecord();\n        r = readRecord();\n        if (!r) return { reason: \"seal record unreadable after writing\" };\n      }\n      if (r.sealedAt)",
-    to: "      if (!r) return { sealed: true };\n      if (r.sealedAt)",
+    from: "      if (!r) {\n        writeSealRecord();\n        r = readRecord();\n        if (!r) return { reason: \"seal record unreadable after writing\" };\n      }\n      for (let round",
+    to: "      if (!r) return { sealed: true };\n      for (let round",
     tests: [[SEAL, "N27e|N27g"]]
   },
   {
     id: "scan-every-round",
     rule: "N27d: wait rounds read only S0",
     file: FL,
-    from: "      const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n      if (rest.length === 0) {\n        writeRecord",
-    to: "      writeSealRecord();\n      r = readRecord();\n      const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n      if (rest.length === 0) {\n        writeRecord",
+    from: "    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    return rest.length",
+    to: "    writeSealRecord();\n    r = readRecord();\n    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    return rest.length",
     tests: [[SEAL, "N27d"]]
   },
   {
@@ -308,6 +308,54 @@ export const MUTATIONS = [
     tests: [["tests/state-lock-sol-r2.test.mjs", "probe|reverse"]]
   },
   {
+    id: "foreign-judged",
+    rule: "v2.12 R9a: a reader of another procfs never judges the record",
+    file: FL,
+    from: "    if (!same && here.verdict !== \"initial\") return { state: \"foreign\" };",
+    to: "",
+    tests: [[UNIT, "R9a"], ["tests/state-lock-sol-r2.test.mjs", "probe"]]
+  },
+  {
+    id: "no-init-key",
+    rule: "v2.12 R9b: two procfs mounts in the init namespace agree",
+    file: FL,
+    from: "    if (here.init && there.init) return true;\n",
+    to: "",
+    tests: [[UNIT, "R9b"]]
+  },
+  {
+    id: "declaration-carries-anywhere",
+    rule: "v2.12 R9c: a declaration carries over only within the same procfs",
+    file: FL,
+    from: "(previous && sameProc(previous) ? previous.declaration : null)",
+    to: "previous?.declaration",
+    tests: [[UNIT, "R9c"]]
+  },
+  {
+    id: "residue-rescan-foreign",
+    rule: "v2.12 R9d: a nested reader never rescans a foreign residue record",
+    file: FL,
+    from: "          if (!sameProc(r) && currentDomain().verdict !== \"initial\") return { reason: foreignReason(r) };",
+    to: "",
+    tests: [[UNIT, "R9d"]]
+  },
+  {
+    id: "seal-stamps-foreign",
+    rule: "v2.12 R9e: a declaration on a foreign record scans here, it is not stamped on it",
+    file: FL,
+    from: "        if (r && sameProc(r)) {",
+    to: "        if (r) {",
+    tests: [[UNIT, "R9e"]]
+  },
+  {
+    id: "stop-old-keeps-foreign",
+    rule: "v2.12 R9f: stop-old scans a foreign record again before choosing targets",
+    file: FL,
+    from: "          if (r.verdict !== \"initial\" || !sameProc(r)) {",
+    to: "          if (r.verdict !== \"initial\") {",
+    tests: [[UNIT, "R9f"]]
+  },
+  {
     id: "no-assertOwned-before-rename",
     rule: "A6/§6: assertOwned before every rename",
     file: STATE,
@@ -332,6 +380,14 @@ function runTests(file, pattern) {
 }
 
 const only = process.argv.slice(2);
+if (process.env.MUTATIONS_LIST_ONLY) {
+  for (const m of MUTATIONS) {
+    const n = fs.readFileSync(path.join(ROOT, m.file), "utf8").split(m.from).length - 1;
+    if (n !== 1) console.log(`BAD ${m.id} ${n}`);
+  }
+  console.log(`checked ${MUTATIONS.length}`);
+  process.exit(0);
+}
 let bad = 0;
 for (const m of MUTATIONS.filter((x) => only.length === 0 || only.includes(x.id))) {
   const file = path.join(ROOT, m.file);
