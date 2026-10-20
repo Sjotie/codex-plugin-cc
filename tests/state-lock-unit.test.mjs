@@ -1143,3 +1143,191 @@ test("R9k: a passing unknown domain verdict is read again, not kept for the life
   assert.ok(h, "initial on the next attempt: scanned again and sealed");
   lock.release(h);
 });
+
+test("R9k2: macOS keeps a definitive verdict per lock, but a passing unknown is read again", (t) => {
+  const { F, recordPath } = fencedDir(t, []);
+  fs.rmSync(recordPath); // no record yet: the first acquire scans and records the verdict
+  let canary = false;
+  const lock = openFencedLock(F, {
+    ...PLUGIN_OPTS,
+    domain: () => (canary ? INITIAL() : { verdict: "unknown", reason: "macOS: canary failed (ps failed)", scope: "t" }),
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    identityReader: () => ({ gone: true }),
+    markerReader: () => false,
+    platform: "darwin"
+  });
+  assert.equal(lock.tryAcquire(), null, "unknown: the seal needs a declaration");
+  canary = true;
+  const h = lock.tryAcquire();
+  assert.ok(h, "initial on the next attempt: scanned again and sealed");
+  lock.release(h);
+});
+
+// ---- v2.13 (Sol r3): the view is read for every judgment, never kept ------
+
+// procRoot as a symlink the test points elsewhere: a mount of another procfs
+// on /proc, as this process sees it (another device under the same path).
+function movableProc(t) {
+  const link = path.join(tmpdir(t), "proc");
+  fs.symlinkSync("/proc", link);
+  const moveTo = (target) => {
+    fs.rmSync(link);
+    fs.symlinkSync(target, link);
+  };
+  return { link, moveTo };
+}
+
+function viewLock(F, { procRoot, domain, alive, signals = [] }) {
+  return openFencedLock(F, {
+    ...PLUGIN_OPTS,
+    procRoot,
+    domain,
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    identityReader: (p) => (alive() ? { start: p.start, state: "S", argv: PLUGIN_ARGV, comm: "node" } : { gone: true }),
+    markerReader: () => false,
+    kill: (pid, sig) => signals.push([pid, sig]),
+    platform: "linux"
+  });
+}
+
+test("R10a: a new procfs on /proc under a lock that already judged makes the record foreign, not sealable (Sol r3)", (t) => {
+  if (!LINUX || fs.statSync("/proc").dev === fs.statSync("/sys").dev) {
+    t.skip("Linux with /proc and /sys on different devices");
+    return;
+  }
+  // Sol's repro: nested, the host procfs inherited (same device as the record), then a new procfs mounted.
+  const r = boundRecord(t, { verdict: "initial", scanProc: scanProc() });
+  const before = r.read();
+  const { link, moveTo } = movableProc(t);
+  let visible = true; // the old process: visible in the host procfs, not in the new one
+  const lock = viewLock(r.F, { procRoot: link, domain: NESTED, alive: () => visible });
+  assert.equal(lock.status().waitingOn.kind, "processes", "precondition: the same procfs judges and sees the old process");
+  moveTo("/sys");
+  visible = false;
+  assert.equal(lock.tryAcquire(), null, "a pid missing from the new procfs is not a dead process");
+  assert.deepEqual(r.read(), before, "neither sealed nor replaced");
+  assert.equal(lock.status().waitingOn.kind, "foreign");
+});
+
+test("R10b: a domain verdict that changes under the lock is read again (initial, then nested)", (t) => {
+  if (!LINUX || fs.statSync("/proc").dev === fs.statSync("/sys").dev) {
+    t.skip("Linux with /proc and /sys on different devices");
+    return;
+  }
+  // The record comes from another init-namespace procfs: only init on both sides ties them.
+  const r = boundRecord(t, { verdict: "initial", scanProc: { ...scanProc(), dev: "another-procfs" } });
+  const before = r.read();
+  const { link, moveTo } = movableProc(t);
+  let domain = INITIAL;
+  let visible = true;
+  const lock = viewLock(r.F, { procRoot: link, domain: () => domain(), alive: () => visible });
+  assert.equal(lock.status().waitingOn.kind, "processes", "precondition: init on both sides, judged here");
+  domain = NESTED;
+  moveTo("/sys");
+  visible = false;
+  assert.equal(lock.tryAcquire(), null);
+  assert.deepEqual(r.read(), before);
+  assert.equal(lock.status().waitingOn.kind, "foreign");
+});
+
+test("R10c: the procfs changing during a judgment gives no seal", (t) => {
+  const make = (flipOnRead) => {
+    const r = boundRecord(t, { verdict: "nested", declaration: "D", scanProc: PROC_A });
+    let flipped = false;
+    const lock = openFencedLock(r.F, {
+      ...PLUGIN_OPTS,
+      domain: NESTED,
+      procIdentity: () => (flipped ? PROC_B : PROC_A),
+      scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+      // the liveness read of the old process: here another procfs comes on /proc
+      identityReader: () => {
+        flipped = flipOnRead;
+        return { gone: true };
+      },
+      markerReader: () => false,
+      platform: "linux"
+    });
+    return { r, lock };
+  };
+  const control = make(false);
+  const h = control.lock.tryAcquire();
+  assert.ok(h, "positive control: the same judgment without the change seals");
+  control.lock.release(h);
+  const { r, lock } = make(true);
+  const before = r.read();
+  assert.equal(lock.tryAcquire(), null, "the liveness read went to a procfs that is no longer the judged one");
+  assert.deepEqual(r.read(), before);
+});
+
+test("R10d: a scan during which the procfs changes is not written", (t) => {
+  // The init namespace scans a record from another boot again; the procfs changes during that scan.
+  const r = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-0", init: true } });
+  const before = r.read();
+  const here = { dev: "Y", bootId: "boot-1", init: true };
+  let scanned = false;
+  const lock = openFencedLock(r.F, {
+    ...PLUGIN_OPTS,
+    domain: INITIAL,
+    procIdentity: () => (scanned ? { ...here, dev: "Z" } : here),
+    scanner: () => {
+      scanned = true;
+      return { self: { pid: process.pid, start: null, matched: true }, processes: [] };
+    },
+    identityReader: () => ({ gone: true }),
+    markerReader: () => false,
+    platform: "linux"
+  });
+  assert.equal(lock.tryAcquire(), null);
+  assert.deepEqual(r.read(), before, "the record of the other boot stays; the scan counts for neither procfs");
+});
+
+test("R10e: stop-old sends no signal once the procfs on /proc is no longer the one the targets were chosen in", (t) => {
+  const Y = { dev: "Y", bootId: "boot-1", init: true };
+  const run = (changeAt) => {
+    const r = boundRecord(t, { verdict: "initial", scanProc: Y });
+    let reads = 0;
+    const signals = [];
+    const lock = openFencedLock(r.F, {
+      ...PLUGIN_OPTS,
+      domain: INITIAL,
+      // view read 1: the targets are chosen; 2: right after the choice; 3: before the first signal
+      procIdentity: () => (++reads >= changeAt ? { ...Y, dev: "Z", init: false } : Y),
+      scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+      identityReader: (p) => ({ start: p.start, state: "S", argv: PLUGIN_ARGV, comm: "node" }),
+      markerReader: () => false,
+      kill: (pid, sig) => signals.push([pid, sig]),
+      platform: "linux"
+    });
+    return { result: lock.stopOld({ graceMs: 0 }), signals };
+  };
+  const control = run(Infinity);
+  assert.deepEqual(control.signals.map(([, sig]) => sig), ["SIGTERM", "SIGKILL"], "positive control: without the change both signals go");
+  const atSignal = run(3);
+  assert.deepEqual(atSignal.signals, [], "no signal into another procfs's numbering");
+  const outcome = atSignal.result.outcomes.find((x) => x.pid === TARGET.pid);
+  assert.equal(outcome.outcome, "still-alive");
+  assert.match(outcome.detail, /procfs at \/proc changed/);
+  assert.equal(atSignal.result.ok, false);
+  const atChoice = run(2);
+  assert.deepEqual(atChoice.signals, []);
+  assert.equal(atChoice.result.result, "moved");
+});
+
+test("R10f: a rescan runs only in the view that decided it", (t) => {
+  // The init namespace decides to scan a record from another boot again; by the
+  // scan, /proc shows a nested procfs, which must not replace that record.
+  const r = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-0", init: true } });
+  const before = r.read();
+  let reads = 0;
+  const lock = openFencedLock(r.F, {
+    ...PLUGIN_OPTS,
+    domain: () => (reads >= 1 ? NESTED() : INITIAL()),
+    procIdentity: () => (++reads >= 2 ? PROC_A : { dev: "Y", bootId: "boot-0", init: true }),
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    identityReader: () => ({ gone: true }),
+    markerReader: () => false,
+    platform: "linux"
+  });
+  assert.equal(lock.tryAcquire(), null);
+  assert.deepEqual(r.read(), before, "the record of the other procfs stays");
+});

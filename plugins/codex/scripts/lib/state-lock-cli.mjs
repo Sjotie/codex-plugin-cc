@@ -23,7 +23,8 @@ Every command prints JSON. Run state-lock <command> --help for its options.`,
   status: `Usage: codex-companion state-lock status [--cwd <dir> | --all]
 
 Prints the lock state as JSON: fence or old lock file, the seal record, what an
-unsealed fence waits for (O2 residue, old processes, domain), the owner, the
+unsealed fence waits for (O2 residue, old processes, domain, a record from
+another procfs, a /proc that changed while it was read), the owner, the
 protocol names and the job artifacts (orphans, unreadable records). With --all,
 one entry per state directory; exit code 1 while any directory waits.`,
   "drain-check": `Usage: codex-companion state-lock drain-check

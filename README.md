@@ -360,6 +360,9 @@ What `status` can report, and what to do:
   are gone, `state-lock seal --declare-cross-namespace "<…>"` here.
 - **`rescan`**: the record was made elsewhere; the next state change (or
   `state-lock stop-old`) in this namespace scans again.
+- **`moved`**: another procfs was mounted on `/proc` while the lock read it
+  (a sandbox that mounts its own `/proc`). Nothing was decided on those reads;
+  the next state change reads `/proc` again.
 
 To go back to an older plugin version (the older version cannot pass the fence):
 

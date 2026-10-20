@@ -47,8 +47,8 @@ export const MUTATIONS = [
     id: "no-rescan-from-initial",
     rule: "v2.7: the first initial-domain process scans again",
     file: FL,
-    from: "    if (!sameProc(r) || (here.verdict === \"initial\" && r.verdict !== \"initial\" && !r.declaration)) return { state: \"rescan\" };",
-    to: "    if (!sameProc(r)) return { state: \"rescan\" };",
+    from: "    if (!sameProc(r, here) || (here.domain.verdict === \"initial\" && r.verdict !== \"initial\" && !r.declaration)) return { state: \"rescan\", here };",
+    to: "    if (!sameProc(r, here)) return { state: \"rescan\", here };",
     tests: [[SEAL, "N32b"]]
   },
   {
@@ -79,7 +79,7 @@ export const MUTATIONS = [
     id: "missing-record-is-empty-S0",
     rule: "N27e: a missing record means a new scan, never an empty S0",
     file: FL,
-    from: "      if (!r) {\n        writeSealRecord();\n        r = readRecord();\n        if (!r) return { reason: \"seal record unreadable after writing\" };\n      }\n      for (let round",
+    from: "      if (!r) {\n        if (!writeSealRecord()) return { reason: PROC_MOVED };\n        r = readRecord();\n        if (!r) return { reason: \"seal record unreadable after writing\" };\n      }\n      for (let round",
     to: "      if (!r) return { sealed: true };\n      for (let round",
     tests: [[SEAL, "N27e|N27g"]]
   },
@@ -87,8 +87,8 @@ export const MUTATIONS = [
     id: "scan-every-round",
     rule: "N27d: wait rounds read only S0",
     file: FL,
-    from: "    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    return rest.length",
-    to: "    writeSealRecord();\n    r = readRecord();\n    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    return rest.length",
+    from: "    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    // A pid missing",
+    to: "    writeSealRecord();\n    r = readRecord();\n    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    // A pid missing",
     tests: [[SEAL, "N27d"]]
   },
   {
@@ -167,8 +167,8 @@ export const MUTATIONS = [
     id: "A-held-during-grace",
     rule: "N32c: signals and grace outside A",
     file: FL,
-    from: "        targets = r.S0.filter((p) => stillWaitingOn(o, p));\n      } finally {\n        unlock(h);\n      }",
-    to: "        targets = r.S0.filter((p) => stillWaitingOn(o, p));\n      } finally {\n        globalThis.__heldDuringGrace = h;\n      }",
+    from: "      } finally {\n        unlock(h);\n      }\n    }\n    // 2. Signals",
+    to: "      } finally {\n        globalThis.__heldDuringGrace = h;\n      }\n    }\n    // 2. Signals",
     tests: [[SEAL, "N32c"]]
   },
   {
@@ -295,8 +295,8 @@ export const MUTATIONS = [
     id: "stop-old-any-namespace",
     rule: "v2.11 R8: stop-old signals only from the init PID namespace",
     file: FL,
-    from: "        if (o.platform === \"linux\") {\n          const here = currentDomain();",
-    to: "        if (false) {\n          const here = currentDomain();",
+    from: "        if (o.platform === \"linux\") {\n          view = hereNow();",
+    to: "        if (false) {\n          view = hereNow();",
     tests: [[UNIT, "R8"], [SEAL, "R8"]]
   },
   {
@@ -311,7 +311,7 @@ export const MUTATIONS = [
     id: "foreign-judged",
     rule: "v2.12 R9a: a reader of another procfs never judges the record",
     file: FL,
-    from: "    if (!canJudge(r)) return { state: \"foreign\" };\n",
+    from: "    if (!canJudge(r, here)) return { state: \"foreign\", here };\n",
     to: "",
     tests: [[UNIT, "R9a|R9d"], ["tests/state-lock-sol-r2.test.mjs", "probe"]]
   },
@@ -319,7 +319,7 @@ export const MUTATIONS = [
     id: "no-init-key",
     rule: "v2.12 R9b: two procfs mounts in the init namespace agree",
     file: FL,
-    from: "    if (here.init && there.init) return true;\n",
+    from: "    if (mine.init && there.init) return true;\n",
     to: "",
     tests: [[UNIT, "R9b"]]
   },
@@ -335,7 +335,7 @@ export const MUTATIONS = [
     id: "seal-stamps-foreign",
     rule: "v2.12 R9e: a declaration on a foreign record scans here, it is not stamped on it",
     file: FL,
-    from: "        if (r && sameProc(r)) {",
+    from: "        if (r && sameProc(r, here)) {",
     to: "        if (r) {",
     tests: [[UNIT, "R9e"]]
   },
@@ -343,7 +343,7 @@ export const MUTATIONS = [
     id: "stop-old-keeps-foreign",
     rule: "v2.12 R9f: stop-old scans a foreign record again before choosing targets",
     file: FL,
-    from: "          if (r.verdict !== \"initial\" || !sameProc(r)) {",
+    from: "          if (r.verdict !== \"initial\" || !sameProc(r, view)) {",
     to: "          if (r.verdict !== \"initial\") {",
     tests: [[UNIT, "R9f"]]
   },
@@ -351,16 +351,16 @@ export const MUTATIONS = [
     id: "init-from-own-domain",
     rule: "v2.12 R9g: init comes from the reader's own domain",
     file: FL,
-    from: "    return { ...procMemo, init: currentDomain().verdict === \"initial\" };",
-    to: "    return { ...procMemo, init: true };",
+    from: "    return { dev, bootId: bootId(), init: domain.verdict === \"initial\" };",
+    to: "    return { dev, bootId: bootId(), init: true };",
     tests: [[UNIT, "R9g"]]
   },
   {
     id: "boot-id-required",
     rule: "v2.12 R9h: an unreadable boot id is not compared",
     file: FL,
-    from: "    if (here.bootId && there.bootId && here.bootId !== there.bootId) return false;",
-    to: "    if (!here.bootId || !there.bootId || here.bootId !== there.bootId) return false;",
+    from: "    if (mine.bootId && there.bootId && mine.bootId !== there.bootId) return false;",
+    to: "    if (!mine.bootId || !there.bootId || mine.bootId !== there.bootId) return false;",
     tests: [[UNIT, "R9h"]]
   },
   {
@@ -381,11 +381,59 @@ export const MUTATIONS = [
   },
   {
     id: "unknown-domain-cached",
-    rule: "v2.12 R9k: a passing unknown verdict is read again",
+    rule: "v2.12 R9k: a passing unknown verdict is read again (macOS, where the verdict is kept)",
     file: FL,
-    from: "    if (d.verdict !== \"unknown\") domainMemo = d;",
-    to: "    domainMemo = d;",
+    from: "    if (keepView && domain.verdict !== \"unknown\") viewMemo = here;",
+    to: "    if (keepView) viewMemo = here;",
     tests: [[UNIT, "R9k"]]
+  },
+  {
+    id: "view-kept-per-lock",
+    rule: "v2.13 Sol r3: on Linux the view (domain and procfs) is read for every judgment, never kept per lock",
+    file: FL,
+    from: "  const keepView = o.platform !== \"linux\";",
+    to: "  const keepView = true;",
+    tests: [[UNIT, "R10a|R10b"], ["tests/state-lock-sol-r3.test.mjs", "probe"]]
+  },
+  {
+    id: "judge-ignores-move",
+    rule: "v2.13 R10c: liveness reads count only when the procfs is still the judged one",
+    file: FL,
+    from: "    if (!sameView(here, hereNow())) return { state: \"moved\", here };\n",
+    to: "",
+    tests: [[UNIT, "R10c"]]
+  },
+  {
+    id: "scan-ignores-move",
+    rule: "v2.13 R10d: a scan during which the procfs changed is not written",
+    file: FL,
+    from: "    if (!sameView(here, hereNow())) return false;\n    writeRecord({ ...head, residues: [], S0",
+    to: "    writeRecord({ ...head, residues: [], S0",
+    tests: [[UNIT, "R10d"]]
+  },
+  {
+    id: "rescan-from-another-view",
+    rule: "v2.13: a rescan runs only in the view that decided it",
+    file: FL,
+    from: "    if (view && !sameView(view, here)) return false;\n",
+    to: "",
+    tests: [[UNIT, "R10f"]]
+  },
+  {
+    id: "signal-ignores-move",
+    rule: "v2.13 R10e: no signal once the procfs is not the one the targets were chosen in",
+    file: FL,
+    from: "        if (view && !sameView(view, hereNow())) return result(",
+    to: "        if (false) return result(",
+    tests: [[UNIT, "R10e"]]
+  },
+  {
+    id: "choice-ignores-move",
+    rule: "v2.13 R10e: the target choice counts only when the procfs did not change during it",
+    file: FL,
+    from: "        if (view && !sameView(view, hereNow())) return { ok: false, result: \"moved\"",
+    to: "        if (false) return { ok: false, result: \"moved\"",
+    tests: [[UNIT, "R10e"]]
   },
   {
     id: "no-assertOwned-before-rename",
