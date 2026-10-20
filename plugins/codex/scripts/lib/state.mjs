@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { openFencedLock } from "./fenced-lock.mjs";
+import { StateLockTimeout, StateLockUnavailable, openFencedLock } from "./fenced-lock.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -295,13 +295,20 @@ function readEffective(cwd, job) {
   return { source: "unknown" };
 }
 
+// Field values from two separately parsed files: objects (failure) compare by content.
+function sameValue(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function applyEffective(job, effective) {
   if (effective.source !== "json") {
     return job;
   }
   let next = job;
   for (const field of EFFECTIVE_FIELDS) {
-    if (Object.hasOwn(effective.record, field) && effective.record[field] !== job[field]) {
+    if (Object.hasOwn(effective.record, field) && !sameValue(effective.record[field], job[field])) {
       next = next === job ? { ...job } : next;
       next[field] = effective.record[field];
     }
@@ -532,7 +539,22 @@ function workerGone(job) {
   return isWaitingJobStatus(job.status) && Number.isInteger(job.pid) && job.pid > 0 && !isProcessAlive(job.pid);
 }
 
-function needsReconcile(cwd, job) {
+// stateMtimeMs: mtime of state.json. A job file older than the index was
+// written before the last index commit, so the index already holds it; only
+// newer job files (a crash between the two writes) are read.
+function needsReconcile(cwd, job, stateMtimeMs) {
+  if (workerGone(job)) {
+    return true;
+  }
+  let jobMtimeMs;
+  try {
+    jobMtimeMs = fs.statSync(resolveJobFile(cwd, job.id)).mtimeMs;
+  } catch {
+    return false;
+  }
+  if (stateMtimeMs !== null && jobMtimeMs < stateMtimeMs) {
+    return false;
+  }
   const effective = readEffective(cwd, job);
   if (effective.source === "unknown") {
     return false;
@@ -575,12 +597,31 @@ function reconcileUnderLock(cwd) {
 }
 
 export function listJobs(cwd) {
+  let stateMtimeMs = null;
+  try {
+    stateMtimeMs = fs.statSync(resolveStateFile(cwd)).mtimeMs;
+  } catch {
+    stateMtimeMs = null;
+  }
   const state = loadState(cwd);
   // Lock-free first look: only take the lock when something needs a change.
-  if (!state.jobs.some((job) => needsReconcile(cwd, job))) {
+  if (!state.jobs.some((job) => needsReconcile(cwd, job, stateMtimeMs))) {
     return state.jobs;
   }
-  return reconcileUnderLock(cwd);
+  try {
+    return reconcileUnderLock(cwd);
+  } catch (error) {
+    if (!(error instanceof StateLockUnavailable || error instanceof StateLockTimeout)) {
+      throw error;
+    }
+    // Reading never depends on the lock: show the effective status of every
+    // job without writing, and say why nothing was reconciled.
+    process.stderr.write(`state: job list not reconciled (${error.message})\n`);
+    return state.jobs.map((job) => {
+      const effective = readEffective(cwd, job);
+      return effective.source === "unknown" ? job : applyEffective(job, effective);
+    });
+  }
 }
 
 export function setConfig(cwd, key, value) {

@@ -238,7 +238,11 @@ async function buildSetupReport(cwd, actionsTaken = []) {
 
   const nextSteps = [];
   if (!stateLockStatus.available) {
-    nextSteps.push(`Upgrade Node.js to 22.13 or later; the plugin's state lock needs node:sqlite (now ${process.version}).`);
+    nextSteps.push(
+      sqlite.reason === "WINDOWS"
+        ? "The plugin's state lock is not supported on Windows yet (#1916); jobs cannot be tracked here."
+        : `Upgrade Node.js to 22.13 or later; the plugin's state lock needs node:sqlite (now ${process.version}).`
+    );
   }
   if (!codexStatus.available) {
     nextSteps.push("Install Codex with `npm install -g @openai/codex`.");

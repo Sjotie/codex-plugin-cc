@@ -377,9 +377,10 @@ test("U7d: two drain-checks at the same time each count the other", { skip: !LIN
   const barriers = tmpdir(t);
   const first = driver(t, barriers, "first", { DRIVER_PAUSE: "1" });
   await waitFile(path.join(barriers, "first.paused"));
-  const second = driver(t, barriers, "second", { DRIVER_HOLD: "1" });
-  await waitFile(path.join(barriers, "second.ready"));
+  const second = driver(t, barriers, "second", { DRIVER_PAUSE: "1", DRIVER_HOLD: "1" });
+  await waitFile(path.join(barriers, "second.paused"));
   expose(first.pid, second.pid);
+  fs.writeFileSync(path.join(barriers, "second.resume"), "");
   await waitFile(path.join(barriers, "second.done"));
   fs.writeFileSync(path.join(barriers, "first.resume"), "");
   await first.exit;
@@ -606,6 +607,7 @@ function stopOldWith(t, S0, identity, { onKill = () => {}, killError = null, ...
     domain: INITIAL,
     scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
     identityReader: (p) => identity(p, signals),
+    markerReader: options.markerReader ?? (() => false),
     kill: (pid, sig) => {
       if (killError) throw Object.assign(new Error(killError), { code: killError });
       signals.push([pid, sig]);
@@ -794,4 +796,59 @@ test("N32e: status --all names sealed, waiting-on-process and waiting-on-residue
   assert.ok(out.waiting.includes(path.join(stateRoot, "process")));
   assert.ok(out.waiting.includes(path.join(stateRoot, "residue")));
   assert.equal(out.waiting.includes(path.join(stateRoot, "sealed")), false);
+});
+
+// ---------------------------------------------------------------------------
+// v2.10 (self-review): a recorded process that now proves the protocol, a
+// script held open by an editor, and a record without a start time
+// ---------------------------------------------------------------------------
+
+test("R3: an S0 member that holds the protocol marker later no longer holds the seal, and stop-old leaves it alone", { skip: !LINUX && "Linux /proc" }, async (t) => {
+  const barriers = tmpdir(t);
+  // A new-version process recorded while it was still starting: no marker yet.
+  const script = `
+    const fs = require("node:fs");
+    const wait = (f) => { while (!fs.existsSync(f)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); };
+    const [, marker, dir] = process.argv; // with -e, argv[1] is the first argument
+    fs.writeFileSync(dir + "/late.ready", "");
+    wait(dir + "/late.load");
+    globalThis.marker = fs.openSync(marker, "r");
+    fs.writeFileSync(dir + "/late.loaded", "");
+    wait(dir + "/late.release");
+  `;
+  const late = track(t, spawn(process.execPath, ["-e", script, path.join(LIB, PROTOCOL_MARKER), barriers, "/plugin/scripts/codex-companion.mjs", "task-worker"], { stdio: "ignore" }));
+  await waitFile(path.join(barriers, "late.ready"));
+  const start = parseProcStat(fs.readFileSync(`/proc/${late.pid}/stat`, "utf8")).start;
+  const member = { pid: late.pid, start, script: "codex-companion.mjs", sub: "task-worker", comm: "node", uid: process.getuid(), reason: "geen marker-fd" };
+  const { F } = fencedDir(t, [member]);
+  const signals = [];
+  const lock = openFencedLock(F, { ...PLUGIN_OPTS, domain: INITIAL, platform: "linux", kill: (pid, sig) => signals.push([pid, sig]) });
+  assert.equal(lock.seal({ domainDeclaration: null }).result, "waiting");
+  fs.writeFileSync(path.join(barriers, "late.load"), "");
+  await waitFile(path.join(barriers, "late.loaded"));
+  const r = lock.stopOld({ graceMs: 100 });
+  assert.deepEqual(signals, [], "stop-old signalled a process that proves the new protocol");
+  assert.equal(r.result, "sealed", JSON.stringify(r));
+  assert.equal(late.child.exitCode, null, "the process still runs");
+  fs.writeFileSync(path.join(barriers, "late.release"), "");
+  await late.exit;
+});
+
+test("R4: a plugin script held open by an editor (comm not node or bun) gets no signal without --include-unidentified", (t) => {
+  const editor = { ...TARGET, comm: "vim" };
+  const s = stopOldWith(t, [editor], () => alive({ comm: "vim", argv: ["vim", "/p/scripts/codex-companion.mjs"] }));
+  const r = s.lock.stopOld({ graceMs: 100 });
+  assert.deepEqual(s.signals, []);
+  assert.equal(r.outcomes[0].outcome, "unidentified");
+  assert.match(r.outcomes[0].detail, /vim/);
+  assert.equal(r.ok, false, "the seal still waits for it");
+});
+
+test("R5: a record without a start time is never signalled, also with --include-unidentified", (t) => {
+  const noStart = { pid: 4545, start: null, script: null, sub: null, comm: null, uid: null, reason: "stat onleesbaar (EACCES)" };
+  const s = stopOldWith(t, [noStart], () => ({ start: "1", state: "S", argv: ["anything"], comm: "anything" }));
+  const r = s.lock.stopOld({ graceMs: 100, includeUnidentified: true });
+  assert.deepEqual(s.signals, []);
+  assert.equal(r.outcomes[0].outcome, "unidentified");
+  assert.match(r.outcomes[0].detail, /starttijd/);
 });

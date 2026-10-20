@@ -228,6 +228,54 @@ export const MUTATIONS = [
     tests: [[FENCE, "N25"]]
   },
   {
+    id: "no-marker-recheck",
+    rule: "v2.10 R3: an S0 member that now holds the marker no longer holds the seal",
+    file: FL,
+    from: "  return aliveIn(o, p) && markerNow(o, p) !== true;",
+    to: "  return aliveIn(o, p);",
+    tests: [[UNIT, "R3"]]
+  },
+  {
+    id: "editor-comm-signalled",
+    rule: "v2.10 R4: no signal to a non-runtime comm without the flag",
+    file: FL,
+    from: "      if (t.script && t.comm && !JS_RUNTIME.test(t.comm) && !includeUnidentified) {",
+    to: "      if (false) {",
+    tests: [[UNIT, "R4"]]
+  },
+  {
+    id: "start-null-signalled",
+    rule: "v2.10 R5: no signal without a recorded start time",
+    file: FL,
+    from: "      if (t.start === null) return",
+    to: "      if (false) return",
+    tests: [[UNIT, "R5"]]
+  },
+  {
+    id: "effective-by-reference",
+    rule: "R1: effective fields compare by content",
+    file: STATE,
+    from: "!sameValue(effective.record[field], job[field])",
+    to: "effective.record[field] !== job[field]",
+    tests: [[ART, "R1"]]
+  },
+  {
+    id: "listJobs-no-fallback",
+    rule: "R2: reading never depends on the lock",
+    file: STATE,
+    from: "    if (!(error instanceof StateLockUnavailable || error instanceof StateLockTimeout)) {",
+    to: "    if (true) {",
+    tests: [[ART, "R2"]]
+  },
+  {
+    id: "waiter-any-pid",
+    rule: "A4b: the waiter only fails the same dead worker",
+    file: "plugins/codex/scripts/lib/job-control.mjs",
+    from: "            if (existing.pid !== stalePid || isProcessAlive(existing.pid)) {",
+    to: "            if (Number.isInteger(existing.pid) && existing.pid > 0 && isProcessAlive(existing.pid)) {",
+    tests: [[ART, "A4b"]]
+  },
+  {
     id: "no-assertOwned-before-rename",
     rule: "A6/§6: assertOwned before every rename",
     file: STATE,

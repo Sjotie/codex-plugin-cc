@@ -98,6 +98,9 @@ try {
     case "cancelRecord":
       state.updateJobRecord(workspace, op.jobId, (existing) => ({ ...existing, status: "cancelled", phase: "cancelled", completedAt: new Date().toISOString() }));
       break;
+    case "requeue":
+      state.updateJobRecord(workspace, op.jobId, (existing) => ({ ...existing, status: "queued", phase: "queued", pid: null, completedAt: null }));
+      break;
     case "settleCancel":
       result = control.settleCancellationAfterTermination(workspace, op.job, op.existing, { delivered: false });
       result = { processStopped: result.processStopped };

@@ -274,11 +274,13 @@ export async function waitForTerminalJob(workspaceRoot, jobId, options = {}) {
           // Re-check under the lock: a cancel or the worker's own final record
           // may have landed since this read (design §6.2, A4).
           const failedRecord = reconciliation.job;
+          const stalePid = storedJob.pid;
           storedJob = updateJobRecord(workspaceRoot, jobId, (existing) => {
             if (!existing || !isWaitingJobStatus(existing.status)) {
               return null;
             }
-            if (Number.isInteger(existing.pid) && existing.pid > 0 && isProcessAlive(existing.pid)) {
+            // Only the same dead worker: a re-queued or respawned job keeps its record.
+            if (existing.pid !== stalePid || isProcessAlive(existing.pid)) {
               return null;
             }
             return { ...existing, ...failedRecord };

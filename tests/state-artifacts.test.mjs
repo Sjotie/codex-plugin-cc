@@ -210,3 +210,64 @@ test("A6: assertOwned before the job-record rename refuses when the fence was re
   const temps = fs.readdirSync(path.join(u.stateDir, "jobs")).filter((name) => name.includes(".tmp"));
   assert.deepEqual(temps, []);
 });
+
+test("A4b: a waiter that finds a dead worker does not fail a job re-queued in the meantime (pid null)", { skip: !isNew && "new protocol only" }, async (t) => {
+  const s = scenario(t);
+  const u = seed(s, [{ id: "j", status: "running", phase: "running", pid: deadPid(), jobClass: "task", updatedAt: at(1) }]);
+  const waiter = actor(s, "waiter", { op: "waitTerminal", jobId: "j" }, [
+    { fn: "readFileSync", match: "/jobs/j\\.json$", when: "after", nth: 2, action: "pause", name: "read" }
+  ]);
+  await s.wait("waiter.paused.read");
+  const requeue = actor(s, "requeue", { op: "requeue", jobId: "j" });
+  assert.equal((await requeue.exit).code, 0, s.errors().join("\n"));
+  s.signal("waiter.resume.read");
+  await waiter.exit;
+  assert.equal(u.readJson("j").status, "queued", "the re-queued record must survive");
+  assert.equal(u.readJson("j").errorMessage ?? null, null);
+});
+
+test("R1: a failed job with a failure object never makes listJobs take the lock or rewrite the index", { skip: !isNew && "new protocol only" }, async (t) => {
+  const s = scenario(t);
+  const failure = { class: "runner_error", message: "boom", detail: { code: 1 } };
+  const u = seed(s, [{ id: "j", status: "failed", phase: "failed", pid: null, jobClass: "task", updatedAt: at(1), completedAt: at(1), failure }]);
+  // The job file is newer than the index, so the lock-free look reads it.
+  const future = new Date(Date.now() + 5_000);
+  fs.utimesSync(resolveJobFile(s.workspace, "j"), future, future);
+  const before = fs.statSync(resolveStateFile(s.workspace), { bigint: true });
+  const lister = actor(s, "lister", { op: "listJobs" });
+  assert.equal((await lister.exit).code, 0, s.errors().join("\n"));
+  const after = fs.statSync(resolveStateFile(s.workspace), { bigint: true });
+  assert.equal(after.ino, before.ino, "state.json was rewritten");
+  assert.equal(fs.existsSync(path.join(u.stateDir, "state.lock")), false, "the lock was taken");
+});
+
+test("R2: listJobs without a usable lock shows the effective job list instead of failing", { skip: !isNew && "new protocol only" }, async (t) => {
+  const node20 = path.join(process.env.HOME, ".local/share/mise/installs/node/20.20.2/bin/node");
+  if (!fs.existsSync(node20)) {
+    t.skip("no Node 20 here");
+    return;
+  }
+  const s = scenario(t);
+  seed(s, [
+    { id: "dead", status: "running", phase: "running", pid: deadPid(), jobClass: "task", updatedAt: at(2) },
+    { id: "lag", status: "running", phase: "running", pid: null, jobClass: "task", updatedAt: at(1), json: { status: "completed", phase: "completed" } }
+  ]);
+  const future = new Date(Date.now() + 5_000);
+  fs.utimesSync(resolveJobFile(s.workspace, "lag"), future, future);
+  const before = fs.readFileSync(resolveStateFile(s.workspace), "utf8");
+  const script = `
+    const { listJobs } = await import(process.argv[1]);
+    process.stdout.write(JSON.stringify(listJobs(process.argv[2]).map((j) => [j.id, j.status])));
+  `;
+  const run = spawnSync(node20, ["--input-type=module", "-e", script, path.join(LIB_DIR, "state.mjs"), s.workspace], {
+    encoding: "utf8",
+    env: s.childEnv()
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), [
+    ["dead", "running"],
+    ["lag", "completed"]
+  ]);
+  assert.match(run.stderr, /job list not reconciled .*22\.13/);
+  assert.equal(fs.readFileSync(resolveStateFile(s.workspace), "utf8"), before, "nothing was written");
+});

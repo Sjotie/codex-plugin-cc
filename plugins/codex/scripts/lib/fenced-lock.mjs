@@ -127,7 +127,7 @@ async function loadSqlite() {
 }
 
 export function sqliteRuntime() {
-  return sqlite.error ? { available: false, error: sqlite.error } : { available: true, kind: sqlite.kind };
+  return sqlite.error ? { available: false, error: sqlite.error, reason: sqlite.reason } : { available: true, kind: sqlite.kind };
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +627,29 @@ function aliveIn(o, p) {
   return !String(id.state).startsWith("Z");
 }
 
+// Does a recorded process hold the protocol marker now? true | false | null
+// (unknown). A process recorded as unproven while it was still starting (its
+// module not yet loaded) proves the new protocol once it holds the marker,
+// by the same rule the scan applies (v2.10).
+function markerNow(o, p) {
+  if (o.markerReader) return o.markerReader(p);
+  if (o.platform === "linux") {
+    try {
+      return hasMarker((o.linuxReader ?? linuxReader(o.procRoot)).fds(p.pid));
+    } catch {
+      return null;
+    }
+  }
+  if (o.platform === "darwin") return darwinMarker(p.pid);
+  return null;
+}
+
+// A member of S0 the seal still waits for: alive with its start time, and not
+// holding the marker now.
+function stillWaitingOn(o, p) {
+  return aliveIn(o, p) && markerNow(o, p) !== true;
+}
+
 // "same" | "gone" | "changed" | "unverified" for a stop-old target, re-read
 // right before a signal. "unverified": same pid and start time, but the argv
 // is empty or unreadable (a process that is exiting has released its memory);
@@ -885,7 +908,7 @@ export function openFencedLock(fencePath, options = {}) {
       if (r.verdict !== "initial" && !r.declaration) {
         return { reason: `domein ${r.verdict} (${r.verdictReason}): het zegel vraagt state-lock seal --declare-cross-namespace` };
       }
-      const rest = r.S0.filter((p) => aliveIn(o, p));
+      const rest = r.S0.filter((p) => stillWaitingOn(o, p));
       if (rest.length === 0) {
         writeRecord({ ...r, sealedAt: nowIso() });
         return { sealed: true };
@@ -931,7 +954,7 @@ export function openFencedLock(fencePath, options = {}) {
     try {
       writeAtomic(
         path.join(F, OWNER_NAME),
-        `${JSON.stringify({ pid: process.pid, host: os.hostname(), pidNs: pidNamespace(), bootId: bootId(), acquiredAt: nowIso(), ...o.ownerInfo() })}\n`
+        `${JSON.stringify({ ...processFacts(), acquiredAt: nowIso(), ...o.ownerInfo() })}\n`
       );
     } catch (error) {
       process.stderr.write(`state-lock: owner.json schrijven faalt (${error.code}); de lock blijft geldig\n`);
@@ -1109,7 +1132,7 @@ export function openFencedLock(fencePath, options = {}) {
         else if (r.residues.length > 0) out.waitingOn = { kind: "residue", residues: r.residues };
         else if (r.verdict !== "initial" && !r.declaration) out.waitingOn = { kind: "domain", verdict: r.verdict, reason: r.verdictReason };
         else {
-          const live = r.S0.filter((p) => aliveIn(o, p)).map((p) => ({ ...p, argv: liveArgv(p) }));
+          const live = r.S0.filter((p) => stillWaitingOn(o, p)).map((p) => ({ ...p, argv: liveArgv(p) }));
           out.waitingOn = live.length > 0 ? { kind: "processes", processes: live } : { kind: "nothing", detail: "de volgende acquire zet het zegel" };
         }
       }
@@ -1269,7 +1292,7 @@ export function openFencedLock(fencePath, options = {}) {
         if (r.sealedAt) return { ok: true, result: "sealed", targets: [] };
         if (r.residues.length > 0) return { ok: false, result: "residue", reason: residueReason(r.residues), targets: [] };
         if (r.S0 === null) return { ok: false, result: "no-scan", targets: [] };
-        targets = r.S0.filter((p) => aliveIn(o, p));
+        targets = r.S0.filter((p) => stillWaitingOn(o, p));
       } finally {
         unlock(h);
       }
@@ -1286,7 +1309,7 @@ export function openFencedLock(fencePath, options = {}) {
       const z = sealState();
       const r = readRecord();
       const notTargeted = (r?.S0 ?? [])
-        .filter((p) => !targets.some((t) => t.pid === p.pid && t.start === p.start) && aliveIn(o, p))
+        .filter((p) => !targets.some((t) => t.pid === p.pid && t.start === p.start) && stillWaitingOn(o, p))
         .map((p) => ({ pid: p.pid, start: p.start, script: p.script, outcome: "not-targeted" }));
       const gone = new Set(["terminated", "killed", "already-gone", "identity-changed"]);
       const allGone = outcomes.every((x) => gone.has(x.outcome)) && notTargeted.length === 0;
@@ -1297,7 +1320,14 @@ export function openFencedLock(fencePath, options = {}) {
 
     function stopOne(t) {
       const who = { pid: t.pid, start: t.start, script: t.script, sub: t.sub, comm: t.comm };
+      // No start time recorded: nothing ties the pid to the recorded process.
+      if (t.start === null) return { ...who, outcome: "unidentified", detail: "geen starttijd vastgelegd: nooit een signaal" };
       if (!t.script && !includeUnidentified) return { ...who, outcome: "unidentified" };
+      // A plugin script in argv but no JS runtime (an editor or pager with the
+      // script open): never signalled without the flag.
+      if (t.script && t.comm && !JS_RUNTIME.test(t.comm) && !includeUnidentified) {
+        return { ...who, outcome: "unidentified", detail: `comm ${t.comm} is geen JS-runtime` };
+      }
       const check = () => {
         try {
           return identityNow(o, t);
@@ -1399,6 +1429,12 @@ export function openFencedLock(fencePath, options = {}) {
     drainCheck: () => drainCheck(o),
     residues
   };
+}
+
+let facts = null;
+function processFacts() {
+  facts ??= { pid: process.pid, host: os.hostname(), pidNs: pidNamespace(), bootId: bootId() };
+  return facts;
 }
 
 function pidNamespace() {

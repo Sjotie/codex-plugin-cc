@@ -353,8 +353,17 @@ What `status` can report, and what to do:
   plugin process runs in another namespace, then run `state-lock seal
   --declare-cross-namespace "<who, which namespaces, how drained>"`.
 
-To go back to an older plugin version, run `state-lock unfence --all` with the
-new version first; the older version cannot pass the fence.
+To go back to an older plugin version (the older version cannot pass the fence):
+
+1. Install the older plugin version.
+2. Wait until `state-lock drain-check`, run with the code of the new version,
+   shows `newCount` 0: no process of the new version runs any more.
+3. Run `state-lock unfence --all` with the code of the new version, preferably
+   from a checkout of its release commit (Claude Code may remove old cache
+   directories). `state.lock.db` stays; nothing else is deleted.
+
+A process of the new version that still runs puts the fence back; that only
+blocks the older version again, it never breaks anything.
 
 ## FAQ
 

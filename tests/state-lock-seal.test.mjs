@@ -601,7 +601,15 @@ test("N32b: a fence first made in a nested PID namespace is sealed by the first 
 test("N32c: stop-old ends a stopped old process with SIGCONT and SIGTERM/SIGKILL; A is free during the grace", async (t) => {
   const s = scenario(t);
   const { db } = paths(s);
-  const o = idleOld(s, t, { body: 'trap "" TERM; sleep 5; :' });
+  // A node process (stop-old only signals a JS runtime) that ignores SIGTERM.
+  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);", "/plugin/scripts/codex-companion.mjs", "task-worker"], { stdio: "ignore" });
+  s.expose(child.pid);
+  const o = { pid: child.pid, exit: new Promise((r) => child.once("exit", r)) };
+  t.after(async () => {
+    if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+    await o.exit;
+  });
+  await new Promise((r) => setTimeout(r, 150));
   assert.equal((await acquireOnce(s, "w1")).acquired, false);
   process.kill(o.pid, "SIGSTOP");
   const stopper = s.actor("stop", { op: "stopOld", args: { graceMs: 1_500 } });
