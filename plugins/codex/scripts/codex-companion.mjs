@@ -48,6 +48,7 @@ import {
   waitForTerminalJob
 } from "./lib/job-control.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
+import { sqliteRuntime } from "./lib/fenced-lock.mjs";
 import { runStateLockCommand } from "./lib/state-lock-cli.mjs";
 import {
   appendLogLine,
@@ -229,8 +230,16 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   const codexStatus = getCodexAvailability(cwd);
   const authStatus = await getCodexAuthStatus(cwd);
   const config = getConfig(workspaceRoot);
+  // The state lock (#1916) needs SQLite from the runtime running this script.
+  const sqlite = sqliteRuntime();
+  const stateLockStatus = sqlite.available
+    ? { available: true, detail: `${sqlite.kind}:sqlite (${process.version})` }
+    : { available: false, detail: sqlite.error };
 
   const nextSteps = [];
+  if (!stateLockStatus.available) {
+    nextSteps.push(`Upgrade Node.js to 22.13 or later; the plugin's state lock needs node:sqlite (now ${process.version}).`);
+  }
   if (!codexStatus.available) {
     nextSteps.push("Install Codex with `npm install -g @openai/codex`.");
   }
@@ -243,8 +252,9 @@ async function buildSetupReport(cwd, actionsTaken = []) {
   }
 
   return {
-    ready: nodeStatus.available && codexStatus.available && authStatus.loggedIn,
+    ready: nodeStatus.available && stateLockStatus.available && codexStatus.available && authStatus.loggedIn,
     node: nodeStatus,
+    stateLock: stateLockStatus,
     npm: npmStatus,
     codex: codexStatus,
     auth: authStatus,

@@ -291,6 +291,7 @@ export function renderSetupReport(report) {
     "",
     "Checks:",
     `- node: ${report.node.detail}`,
+    `- state lock: ${report.stateLock.detail}`,
     `- npm: ${report.npm.detail}`,
     `- codex: ${report.codex.detail}`,
     `- auth: ${report.auth.detail}`,

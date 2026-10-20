@@ -17,7 +17,7 @@ they already have.
 
 - **ChatGPT subscription (incl. Free) or OpenAI API key.**
   - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
-- **Node.js 18.18 or later**
+- **Node.js 22.13 or later** (the state lock uses `node:sqlite`; `/codex:setup` checks it)
 
 ## Install
 
@@ -318,6 +318,43 @@ Check out the Codex docs for more [configuration options](https://developers.ope
 Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be directly resumed inside Codex by running `codex resume` either with the specific session ID you received from running `/codex:result` or `/codex:status` or by selecting it from the list.
 
 This way you can review the Codex work or continue the work there.
+
+## Troubleshooting
+
+### Timed out waiting for state lock
+
+Every plugin process that changes the job index takes the state lock of the
+workspace: `state.lock/` (a directory, the fence) and `state.lock.db` (SQLite,
+held with `BEGIN EXCLUSIVE`; the kernel releases it when the holder dies, so
+there are no stale locks to clean up). A timeout names the reason and the next
+command. Every `state-lock` command prints JSON and has its own `--help`:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" state-lock status --cwd <workspace>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" state-lock status --all
+```
+
+What `status` can report, and what to do:
+
+- **An old `state.lock` file** (left by plugin 1.0.7-sjotie.22 or older). It is
+  never removed automatically. Stop or update the old plugin processes, check
+  with `state-lock drain-check` (exit 0 = drained), then move it aside with
+  `state-lock adopt-legacy --cwd <workspace> --expect-dev … --expect-ino …
+  --expect-sha …`, taking the three values from `status`.
+- **Unsealed fence, waiting on old processes.** Plugin processes that started
+  before the fence and do not prove the new protocol must end first. They end
+  on their own; `state-lock stop-old --cwd <workspace>` stops exactly those
+  (pid and start time checked before every signal) and then seals.
+- **Unsealed fence, waiting on a residue** `state.lock.<digits>` with two
+  names (left by a crashed 1.0.7-sjotie.22 process). Removing it by hand is
+  always safe.
+- **Unsealed fence, domain `nested` or `unknown`** (a sandbox with its own PID
+  namespace, or macOS before its landing proof). Check by hand that no old
+  plugin process runs in another namespace, then run `state-lock seal
+  --declare-cross-namespace "<who, which namespaces, how drained>"`.
+
+To go back to an older plugin version, run `state-lock unfence --all` with the
+new version first; the older version cannot pass the fence.
 
 ## FAQ
 

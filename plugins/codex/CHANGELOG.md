@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased (fork, Homebase #1916)
+
+- The state lock is a kernel lock (`state.lock.db`, SQLite `BEGIN EXCLUSIVE`)
+  behind a fence directory `state.lock/`. A dead holder releases it at once,
+  so no process judges another's lock stale or removes it, and a release only
+  ever drops the caller's own lock. Needs Node.js 22.13 or later (`node:sqlite`);
+  on an older Node the plugin refuses to change state instead of racing.
+- Old plugin processes cannot pass the fence; the fence is sealed only once
+  every old process from before it has ended. `codex-companion state-lock`
+  (status, drain-check, adopt-legacy, seal, stop-old, unfence) shows and
+  resolves every waiting state; see README, Troubleshooting.
+- Job records: the index is committed before old artifacts are pruned, every
+  rename checks that the lock is still held, and prune and reconcile read the
+  status from the job file, so a cancel or restore is never overwritten by a
+  stale snapshot.
+- `/codex:setup` reports the state lock and asks for Node.js 22.13 when it is
+  missing.
+
 ## 1.0.7-sjotie.22 (fork, Homebase #1822)
 
 - `state.lock` is published with its PID already in it (written to a private
