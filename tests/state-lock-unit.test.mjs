@@ -87,6 +87,21 @@ function driver(t, barriers, role, env = {}, argv = ["/plugin/scripts/codex-comp
 const result = (barriers, role) => JSON.parse(fs.readFileSync(path.join(barriers, `${role}.done`), "utf8"));
 
 // ---------------------------------------------------------------------------
+// The module is a byte-equal copy of factory-core shared/fenced-lock
+// ---------------------------------------------------------------------------
+
+test("fenced-lock.mjs and the marker match the hashes of their source (fenced-lock.source.json)", async () => {
+  const { createHash } = await import("node:crypto");
+  const source = JSON.parse(fs.readFileSync(path.join(LIB, "fenced-lock.source.json"), "utf8"));
+  assert.match(source.sourceCommit, /^[0-9a-f]{40}$/);
+  for (const [name, sum] of Object.entries(source.sha256)) {
+    const actual = createHash("sha256").update(fs.readFileSync(path.join(LIB, name))).digest("hex");
+    assert.equal(actual, sum, `${name} differs from ${source.sourceRepo}@${source.sourceCommit.slice(0, 9)}: change the source first`);
+  }
+  assert.deepEqual(Object.keys(source.sha256).sort(), ["fenced-lock.mjs", PROTOCOL_MARKER].sort());
+});
+
+// ---------------------------------------------------------------------------
 // U1: isBusy per runtime, with a real BUSY from a second process
 // ---------------------------------------------------------------------------
 
