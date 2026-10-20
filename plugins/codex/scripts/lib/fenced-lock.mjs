@@ -588,19 +588,32 @@ function sameView(o, a, b) {
 
 const PROC_MOVED = "the procfs at /proc changed while it was read; nothing was decided on it, try again";
 
-export function drainCheck(options = {}) {
+// Every decision on /proc reads goes through here: fn reads /proc, and its
+// result counts only when the view after the reads is still view (Linux;
+// elsewhere, or without a view, always). -> { moved: true } | { moved: false, value }
+function inView(o, view, fn) {
+  const value = fn();
+  if (view && o.platform === "linux" && !sameView(o, view, viewOf(o))) return { moved: true };
+  return { moved: false, value };
+}
+
+// expectView (adopt-legacy): the view the caller checked first; the scan then
+// counts only when that is still the view after it.
+export function drainCheck(options = {}, expectView = null) {
   const o = withDefaults(options);
-  // The scan counts only when the view after it is the one before (v2.13):
-  // a remount with hidepid during the scan hides processes, it does not end them.
-  const before = viewOf(o);
-  const { self, processes } = scanProcesses(o);
-  const moved = o.platform === "linux" && !sameView(o, before, viewOf(o));
+  // A remount with hidepid during the scan hides processes, it does not end
+  // them (v2.14): on "moved" the scan gives no counts.
+  const before = expectView ?? viewOf(o);
+  const scan = inView(o, before, () => scanProcesses(o));
   const domain = before.domain;
+  if (scan.moved) {
+    return { result: "moved", detail: PROC_MOVED, verdict: domain.verdict, reason: domain.reason, scope: domain.scope, self: null, newCount: null, unprovenCount: null, processes: null };
+  }
+  const { self, processes } = scan.value;
   const newCount = processes.filter((p) => p.verdict === "new").length;
   const unprovenCount = processes.filter((p) => p.verdict === "unproven").length;
   return {
-    result: moved ? "moved" : unprovenCount === 0 ? "drained" : "not-drained",
-    ...(moved ? { detail: PROC_MOVED } : {}),
+    result: unprovenCount === 0 ? "drained" : "not-drained",
     verdict: domain.verdict,
     reason: domain.reason,
     scope: domain.scope,
@@ -907,15 +920,6 @@ export function openFencedLock(fencePath, options = {}) {
     return here;
   }
 
-  // Every decision on /proc reads goes through here: fn reads /proc, and its
-  // result counts only when the view after the reads is still view (Linux;
-  // elsewhere, or without a view, always). -> { moved: true } | { moved: false, value }
-  function inView(view, fn) {
-    const value = fn();
-    if (view && o.platform === "linux" && !sameView(o, view, hereNow())) return { moved: true };
-    return { moved: false, value };
-  }
-
   // Same numbering: the same boot, and either both in the init PID namespace
   // (every full procfs there shows the same pids) or the same procfs mount.
   function sameProc(r, here) {
@@ -972,7 +976,7 @@ export function openFencedLock(fencePath, options = {}) {
     }
     // The scan read whatever procfs was on /proc at the time: it belongs to
     // scanProc only when that is still the procfs there.
-    const scan = inView(here, () => scanProcesses(o));
+    const scan = inView(o, here, () => scanProcesses(o));
     if (scan.moved) return false;
     const S0 = scan.value.processes
       .filter((p) => p.verdict === "unproven")
@@ -997,7 +1001,7 @@ export function openFencedLock(fencePath, options = {}) {
     if (r.verdict !== "initial" && !r.declaration) return { state: "domain", here };
     // A pid missing from another procfs is not a dead process: the liveness
     // reads count only when the procfs they went to is still the one judged.
-    const read = inView(here, () => r.S0.filter((p) => stillWaitingOn(o, p)));
+    const read = inView(o, here, () => r.S0.filter((p) => stillWaitingOn(o, p)));
     if (read.moved) return { state: "moved", here };
     const rest = read.value;
     return rest.length > 0 ? { state: "processes", rest, here } : { state: "sealable", here };
@@ -1275,7 +1279,7 @@ export function openFencedLock(fencePath, options = {}) {
         else if (j.state === "rescan") out.waitingOn = { kind: "rescan", detail: "the record was made in another procfs or domain; the next acquire (or stop-old) here scans again" };
         else if (j.state === "domain") out.waitingOn = { kind: "domain", verdict: r.verdict, reason: r.verdictReason };
         else if (j.state === "processes") {
-          const shown = inView(j.here, () => j.rest.map((p) => ({ ...p, argv: liveArgv(p) })));
+          const shown = inView(o, j.here, () => j.rest.map((p) => ({ ...p, argv: liveArgv(p) })));
           out.waitingOn = shown.moved ? { kind: "moved", detail: PROC_MOVED } : { kind: "processes", processes: shown.value };
         }
         else out.waitingOn = { kind: "nothing", detail: "the next acquire writes the seal" };
@@ -1299,7 +1303,8 @@ export function openFencedLock(fencePath, options = {}) {
     if (!h) throw new FencedLockError("ADOPT_BUSY", busyReason());
     let fd0 = null;
     try {
-      const { domain } = hereNow();
+      const start = hereNow();
+      const { domain } = start;
       if (domain.verdict !== "initial" && !domainDeclaration) {
         throw new FencedLockError(domain.verdict === "nested" ? "ADOPT_DOMAIN_NESTED" : "ADOPT_DOMAIN_UNKNOWN", `${domain.reason}; ${domain.scope}`, { domain });
       }
@@ -1332,11 +1337,11 @@ export function openFencedLock(fencePath, options = {}) {
               }
             })
           : [];
-      // The drain check reads the view itself, before and after its scan; the
-      // domain checked above must still be the one it saw.
-      const drain = drainCheck(o);
-      if (drain.result === "moved" || drain.verdict !== domain.verdict) {
-        throw new FencedLockError("ADOPT_MOVED", `${PROC_MOVED} (domain ${domain.verdict} at the start, ${drain.verdict} during the drain check)`, { drain });
+      // The drain scan counts only in the view checked above (domain and
+      // declaration): the same view from the start through the scan.
+      const drain = drainCheck(o, start);
+      if (drain.result === "moved") {
+        throw new FencedLockError("ADOPT_PROC_CHANGED", `${PROC_MOVED} (between the domain check and the end of the drain check)`, { drain });
       }
       if (drain.result !== "drained") {
         throw new FencedLockError("ADOPT_NOT_DRAINED", `drain-check: ${drain.unprovenCount} unproven plugin process(es)`, { drain });
@@ -1370,7 +1375,9 @@ export function openFencedLock(fencePath, options = {}) {
       let sealResult = null;
       if (fence === "published") {
         try {
-          writeSealRecord({ declaration: domainDeclaration });
+          // The declaration was given for the start view; false (another
+          // procfs by now) writes nothing, and the next acquire scans.
+          writeSealRecord({ declaration: domainDeclaration, view: start });
         } catch {
           // the next acquire writes the record
         }
@@ -1436,8 +1443,7 @@ export function openFencedLock(fencePath, options = {}) {
                   declaration: r.declaration ?? null,
                   scanProc: r.scanProc ?? null,
                   S0: r.S0,
-                  residues: r.residues,
-                  ...(r.replacedForeign ? { replacedForeign: r.replacedForeign } : {})
+                  residues: r.residues
                 }
               : null,
             view: here
@@ -1496,7 +1502,7 @@ export function openFencedLock(fencePath, options = {}) {
             if (r.verdict !== "initial" || r.S0 === null) return { ok: false, result: "domain", reason: `the new scan gave domain ${r.verdict}`, targets: [] };
           }
         }
-        const chosen = inView(view, () => r.S0.filter((p) => stillWaitingOn(o, p)));
+        const chosen = inView(o, view, () => r.S0.filter((p) => stillWaitingOn(o, p)));
         if (chosen.moved) return { ok: false, result: "moved", reason: PROC_MOVED, targets: [] };
         targets = chosen.value;
       } finally {
@@ -1514,7 +1520,7 @@ export function openFencedLock(fencePath, options = {}) {
       h.fence = fileId(st);
       const z = sealState();
       const r = readRecord();
-      const left = inView(view, () =>
+      const left = inView(o, view, () =>
         (r?.S0 ?? [])
           .filter((p) => !targets.some((t) => t.pid === p.pid && t.start === p.start) && stillWaitingOn(o, p))
           .map((p) => ({ pid: p.pid, start: p.start, script: p.script, outcome: "not-targeted" }))
@@ -1543,7 +1549,7 @@ export function openFencedLock(fencePath, options = {}) {
       // Each identity read counts only in the view the targets were chosen
       // in: a pid means that process only in that procfs ("moved" otherwise).
       const identity = () => {
-        const read = inView(view, () => {
+        const read = inView(o, view, () => {
           try {
             return identityNow(o, t);
           } catch {
@@ -1587,7 +1593,7 @@ export function openFencedLock(fencePath, options = {}) {
         if (c.status === "gone") return result(goneOutcome);
         if (c.status === "changed") return result("identity-changed");
         if (c.status !== "same") return result("still-alive", "identity cannot be confirmed");
-        const marker = inView(view, () => markerNow(o, t));
+        const marker = inView(o, view, () => markerNow(o, t));
         if (marker.moved) return moved();
         if (marker.value === true) {
           return result("now-proven", sent.length === 0 ? "holds the protocol marker now: never signalled" : `holds the protocol marker now: no further signal after ${sent.join(", ")}`);

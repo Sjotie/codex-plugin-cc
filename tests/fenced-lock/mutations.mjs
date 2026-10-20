@@ -87,8 +87,8 @@ export const MUTATIONS = [
     id: "scan-every-round",
     rule: "N27d: wait rounds read only S0",
     file: FL,
-    from: "    const read = inView(here, () => r.S0.filter(",
-    to: "    writeSealRecord();\n    r = readRecord();\n    const read = inView(here, () => r.S0.filter(",
+    from: "    const read = inView(o, here, () => r.S0.filter(",
+    to: "    writeSealRecord();\n    r = readRecord();\n    const read = inView(o, here, () => r.S0.filter(",
     tests: [[SEAL, "N27d"]]
   },
   {
@@ -399,7 +399,7 @@ export const MUTATIONS = [
     id: "judge-ignores-move",
     rule: "v2.13 R10c: liveness reads count only when the procfs is still the judged one",
     file: FL,
-    from: "    const read = inView(here, () => r.S0.filter((p) => stillWaitingOn(o, p)));",
+    from: "    const read = inView(o, here, () => r.S0.filter((p) => stillWaitingOn(o, p)));",
     to: "    const read = { moved: false, value: r.S0.filter((p) => stillWaitingOn(o, p)) };",
     tests: [[UNIT, "R10c"]]
   },
@@ -407,7 +407,7 @@ export const MUTATIONS = [
     id: "scan-ignores-move",
     rule: "v2.13 R10d: a scan during which the procfs changed is not written",
     file: FL,
-    from: "    const scan = inView(here, () => scanProcesses(o));",
+    from: "    const scan = inView(o, here, () => scanProcesses(o));",
     to: "    const scan = { moved: false, value: scanProcesses(o) };",
     tests: [[UNIT, "R10d"]]
   },
@@ -423,8 +423,8 @@ export const MUTATIONS = [
     id: "signal-ignores-move",
     rule: "v2.13 R10e: every identity read in stop-old counts only in the view the targets were chosen in",
     file: FL,
-    from: "        const read = inView(view, () => {",
-    to: "        const read = ((_view, fn) => ({ moved: false, value: fn() }))(view, () => {",
+    from: "        const read = inView(o, view, () => {",
+    to: "        const read = ((_o, _view, fn) => ({ moved: false, value: fn() }))(o, view, () => {",
     tests: [[UNIT, "R10e"]]
   },
   {
@@ -439,9 +439,9 @@ export const MUTATIONS = [
     id: "view-check-off",
     rule: "v2.13: inView is the one place that compares the view after the reads",
     file: FL,
-    from: "    if (view && o.platform === \"linux\" && !sameView(o, view, hereNow())) return { moved: true };",
+    from: "  if (view && o.platform === \"linux\" && !sameView(o, view, viewOf(o))) return { moved: true };",
     to: "",
-    tests: [[UNIT, "R10c|R10e|R10g"], ["tests/state-lock-sol-r3.test.mjs", "probe"]]
+    tests: [[UNIT, "R10c|R10e|R10g|R10h"], ["tests/state-lock-sol-r3.test.mjs", "probe"]]
   },
 
   {
@@ -456,17 +456,17 @@ export const MUTATIONS = [
     id: "drain-ignores-move",
     rule: "v2.14 R10h: a drain check during which /proc changes is not drained",
     file: FL,
-    from: "  const moved = o.platform === \"linux\" && !sameView(o, before, viewOf(o));",
-    to: "  const moved = false;",
+    from: "  const scan = inView(o, before, () => scanProcesses(o));",
+    to: "  const scan = { moved: false, value: scanProcesses(o) };",
     tests: [[UNIT, "R10h|R10i"]]
   },
   {
     id: "adopt-ignores-move",
     rule: "v2.14 R10i: adopt-legacy checks the drain check's view and domain",
     file: FL,
-    from: "      if (drain.result === \"moved\" || drain.verdict !== domain.verdict) {",
-    to: "      if (false) {",
-    tests: [[UNIT, "R10i"]]
+    from: "      if (drain.result === \"moved\") {\n        throw new FencedLockError(\"ADOPT_PROC_CHANGED\"",
+    to: "      if (false) {\n        throw new FencedLockError(\"ADOPT_PROC_CHANGED\"",
+    tests: [[UNIT, "R10i|R10j"]]
   },
   {
     id: "vouched-by-dropped",
@@ -475,6 +475,30 @@ export const MUTATIONS = [
     from: "                  vouchedBy: domainDeclaration,\n",
     to: "",
     tests: [[UNIT, "R9j2"]]
+  },
+  {
+    id: "adopt-drain-own-view",
+    rule: "v2.14 R10j: the drain scan of adopt counts only in the view adopt checked first",
+    file: FL,
+    from: "      const drain = drainCheck(o, start);",
+    to: "      const drain = drainCheck(o);",
+    tests: [[UNIT, "R10j"]]
+  },
+  {
+    id: "adopt-seal-any-view",
+    rule: "v2.14 R10k: adopt's declaration goes only on a record of the view it checked",
+    file: FL,
+    from: "          writeSealRecord({ declaration: domainDeclaration, view: start });",
+    to: "          writeSealRecord({ declaration: domainDeclaration });",
+    tests: [[UNIT, "R10k"]]
+  },
+  {
+    id: "drain-moved-counts",
+    rule: "v2.14 R10h: a drain scan that counts for nothing gives no counts",
+    file: FL,
+    from: "  if (scan.moved) {\n    return { result: \"moved\", detail: PROC_MOVED, verdict: domain.verdict, reason: domain.reason, scope: domain.scope, self: null, newCount: null, unprovenCount: null, processes: null };\n  }\n",
+    to: "  if (scan.moved) {\n    return { result: \"moved\", detail: PROC_MOVED, verdict: domain.verdict, reason: domain.reason, scope: domain.scope, self: null, newCount: 0, unprovenCount: 0, processes: [] };\n  }\n",
+    tests: [[UNIT, "R10h"]]
   },
   {
     id: "no-assertOwned-before-rename",

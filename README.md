@@ -368,7 +368,9 @@ To go back to an older plugin version (the older version cannot pass the fence):
 
 1. Install the older plugin version.
 2. Wait until `state-lock drain-check`, run with the code of the new version,
-   shows `newCount` 0: no process of the new version runs any more.
+   shows `newCount` 0: no process of the new version runs any more. With
+   `result` `moved` the scan counts for nothing (`newCount` is null); run it
+   again.
 3. Run `state-lock unfence --all` with the code of the new version, preferably
    from a checkout of its release commit (Claude Code may remove old cache
    directories). `state.lock.db` stays; nothing else is deleted.

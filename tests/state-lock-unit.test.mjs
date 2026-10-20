@@ -1395,6 +1395,8 @@ test("R10h: a drain check during which /proc changes is not drained", (t) => {
   const moved = drainLock(F, { remountDuringScan: true }).drainCheck();
   assert.equal(moved.result, "moved", JSON.stringify(moved));
   assert.match(moved.detail, /procfs at \/proc changed/);
+  assert.equal(moved.newCount, null, "a scan that counts for nothing gives no counts (the rollback reads newCount)");
+  assert.equal(moved.unprovenCount, null);
 });
 
 test("R10i: adopt-legacy moves nothing when /proc changes during its drain check", (t) => {
@@ -1410,8 +1412,45 @@ test("R10i: adopt-legacy moves nothing when /proc changes during its drain check
   assert.equal(control.run().ok, true, "positive control: the adopt goes through");
   assert.ok(fs.statSync(control.F).isDirectory());
   const moved = make(true);
-  assert.throws(moved.run, (error) => error.code === "ADOPT_MOVED");
+  assert.throws(moved.run, (error) => error.code === "ADOPT_PROC_CHANGED");
   assert.ok(fs.statSync(moved.F).isFile(), "the old lock file was not moved");
+});
+
+// adopt with a domain that is INITIAL for its first fromCall-1 reads and hidden after.
+function adoptWithDomainChange(t, fromCall) {
+  const F = path.join(tmpdir(t), "state.lock");
+  fs.writeFileSync(F, "");
+  const st = fs.statSync(F, { bigint: true });
+  let calls = 0;
+  const lock = openFencedLock(F, {
+    ...PLUGIN_OPTS,
+    domain: () => (++calls >= fromCall ? HIDDEN() : INITIAL()),
+    procIdentity: () => ({ dev: "Y", bootId: "boot-1", init: calls < fromCall }),
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    identityReader: () => ({ gone: true }),
+    markerReader: () => false,
+    platform: "linux"
+  });
+  const run = (extra = {}) => lock.adoptLegacy({ expectDev: String(st.dev), expectIno: String(st.ino), expectSha: crypto.createHash("sha256").update("").digest("hex"), ...extra });
+  return { F, run };
+}
+
+test("R10j: adopt-legacy refuses when /proc changed between its domain check and the drain check", (t) => {
+  // read 1: adopt's domain check (initial); from read 2 on, the drain check sees a hidden procfs throughout
+  const { F, run } = adoptWithDomainChange(t, 2);
+  assert.throws(run, (error) => error.code === "ADOPT_PROC_CHANGED");
+  assert.ok(fs.statSync(F).isFile(), "the old lock file was not moved");
+});
+
+test("R10k: after the rename adopt puts its declaration only on a record of the view it checked", (t) => {
+  // reads 1-2: adopt's domain check and the end of its drain check (initial); from read 3 on, another view
+  const { F, run } = adoptWithDomainChange(t, 3);
+  const result = run({ domainDeclaration: "op: drained in the view adopt checked" });
+  assert.equal(result.fence, "published", JSON.stringify(result));
+  const record = JSON.parse(fs.readFileSync(path.join(F, "fence.json"), "utf8"));
+  assert.equal(record.declaration, null, "the declaration was given for another view");
+  assert.equal(record.verdict, "unknown", "the record is the new view's own scan, judged on its own");
+  assert.equal(record.sealedAt, null);
 });
 
 test("R9j2: replacedForeign, with the declaration that vouched for it, stays when the init namespace scans the record again", (t) => {
