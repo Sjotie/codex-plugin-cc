@@ -34,7 +34,7 @@ const PROC_SUPER_MAGIC = 0x9fa0;
 const PF_KTHREAD = 0x00200000;
 const RECORD_NAME = "fence.json";
 const OWNER_NAME = "owner.json";
-const README_TEXT = "Niet verwijderen: dit is het hek van een fenced lock (#1916). De status geeft het commando van de eigenaar van deze lock.\n";
+const README_TEXT = "Do not remove: this is the fence of a fenced lock (#1916). The owner of this lock has a status command that explains it.\n";
 const GONE_CODES = new Set(["ENOENT", "ESRCH"]);
 const RENAME_LOST_CODES = new Set(["ENOTDIR", "ENOTEMPTY", "EEXIST", "EISDIR"]);
 
@@ -98,7 +98,7 @@ const sqlite = await loadSqlite();
 
 async function loadSqlite() {
   if (process.platform === "win32") {
-    return { error: "Windows: state-lock nog niet ondersteund (#1916, D5)", reason: "WINDOWS" };
+    return { error: "Windows: the state lock is not supported yet (#1916, D5)", reason: "WINDOWS" };
   }
   try {
     if (typeof globalThis.Bun !== "undefined") {
@@ -121,7 +121,7 @@ async function loadSqlite() {
     }
   } catch (error) {
     return {
-      error: `state-lock heeft Node >= 22.13 nodig voor node:sqlite (nu ${process.version})`,
+      error: `the state lock needs Node >= 22.13 for node:sqlite (running ${process.version})`,
       reason: error?.code ?? "NO_SQLITE"
     };
   }
@@ -266,10 +266,10 @@ export function isProtocolName(fencePath, name) {
 
 const SCOPE = {
   initial: {
-    linux: "op deze kernel draait op dit moment geen pluginproces zonder bewijs van het nieuwe protocol",
-    darwin: "op deze machine draait op dit moment geen pluginproces zonder bewijs van het nieuwe protocol"
+    linux: "no plugin process without proof of the new protocol runs on this kernel right now",
+    darwin: "no plugin process without proof of the new protocol runs on this machine right now"
   },
-  limited: "in de processen die dit commando kan zien"
+  limited: "among the processes this command can see"
 };
 
 export function domainVerdict(env = {}) {
@@ -280,42 +280,42 @@ export function domainVerdict(env = {}) {
     try {
       link = fs.readlinkSync(path.join(procRoot, "self", "ns", "pid"));
     } catch (error) {
-      return { verdict: "unknown", reason: `/proc/self/ns/pid onleesbaar (${error.code})`, scope: SCOPE.limited };
+      return { verdict: "unknown", reason: `/proc/self/ns/pid unreadable (${error.code})`, scope: SCOPE.limited };
     }
     if (link !== INIT_PID_NS) {
       return /^pid:\[\d+\]$/.test(link)
         ? { verdict: "nested", reason: `PID-namespace ${link}`, scope: SCOPE.limited }
-        : { verdict: "unknown", reason: `onverwachte ns-link ${link}`, scope: SCOPE.limited };
+        : { verdict: "unknown", reason: `unexpected ns link ${link}`, scope: SCOPE.limited };
     }
     try {
       const type = (env.statfs ?? fs.statfsSync)(procRoot).type >>> 0;
       if (type !== PROC_SUPER_MAGIC) {
-        return { verdict: "unknown", reason: `${procRoot} is geen procfs (type 0x${type.toString(16)})`, scope: SCOPE.limited };
+        return { verdict: "unknown", reason: `${procRoot} is not procfs (type 0x${type.toString(16)})`, scope: SCOPE.limited };
       }
     } catch (error) {
-      return { verdict: "unknown", reason: `statfs ${procRoot} faalt (${error.code})`, scope: SCOPE.limited };
+      return { verdict: "unknown", reason: `statfs ${procRoot} failed (${error.code})`, scope: SCOPE.limited };
     }
     let options;
     try {
       options = procMountOptions(fs.readFileSync(path.join(procRoot, "self", "mountinfo"), "utf8"), procRoot);
     } catch (error) {
-      return { verdict: "unknown", reason: `mountinfo onleesbaar (${error.code})`, scope: SCOPE.limited };
+      return { verdict: "unknown", reason: `mountinfo unreadable (${error.code})`, scope: SCOPE.limited };
     }
-    if (options === null) return { verdict: "unknown", reason: "geen procfs-mount op /proc gevonden", scope: SCOPE.limited };
+    if (options === null) return { verdict: "unknown", reason: "no procfs mount found on /proc", scope: SCOPE.limited };
     const hidepid = options.find((o) => o.startsWith("hidepid="));
     if (hidepid && !["hidepid=0", "hidepid=off"].includes(hidepid)) {
-      return { verdict: "unknown", reason: `/proc gemount met ${hidepid}`, scope: SCOPE.limited };
+      return { verdict: "unknown", reason: `/proc mounted with ${hidepid}`, scope: SCOPE.limited };
     }
-    if (options.includes("subset=pid")) return { verdict: "unknown", reason: "/proc gemount met subset=pid", scope: SCOPE.limited };
-    return { verdict: "initial", reason: "init-PID-namespace, volledige procfs", scope: SCOPE.initial.linux };
+    if (options.includes("subset=pid")) return { verdict: "unknown", reason: "/proc mounted with subset=pid", scope: SCOPE.limited };
+    return { verdict: "initial", reason: "init PID namespace, full procfs", scope: SCOPE.initial.linux };
   }
   if (platform === "darwin") {
     if (!(env.macosScanProven ?? MACOS_SCAN_PROVEN)) {
-      return { verdict: "unknown", reason: "macOS: landingsproef M2 nog niet groen voor deze build", scope: SCOPE.limited };
+      return { verdict: "unknown", reason: "macOS: landing proof M2 not yet green for this build", scope: SCOPE.limited };
     }
     const canary = env.canary ?? macosCanary();
-    if (!canary.ok) return { verdict: "unknown", reason: `macOS: canary faalt (${canary.reason})`, scope: SCOPE.limited };
-    return { verdict: "initial", reason: "macOS met M2 en canary", scope: SCOPE.initial.darwin };
+    if (!canary.ok) return { verdict: "unknown", reason: `macOS: canary failed (${canary.reason})`, scope: SCOPE.limited };
+    return { verdict: "initial", reason: "macOS with M2 and canary", scope: SCOPE.initial.darwin };
   }
   return { verdict: "unknown", reason: `platform ${platform}`, scope: SCOPE.limited };
 }
@@ -338,11 +338,11 @@ function macosCanary() {
   try {
     const out = execFileSync("ps", ["-p", `1,${process.ppid}`, "-o", "pid="], { encoding: "utf8" });
     const pids = new Set(out.split("\n").map((s) => Number(s.trim())).filter(Boolean));
-    if (!pids.has(1)) return { ok: false, reason: "pid 1 niet zichtbaar" };
-    if (!pids.has(process.ppid)) return { ok: false, reason: "eigen ouderproces niet zichtbaar" };
+    if (!pids.has(1)) return { ok: false, reason: "pid 1 not visible" };
+    if (!pids.has(process.ppid)) return { ok: false, reason: "own parent process not visible" };
     return { ok: true };
   } catch (error) {
-    return { ok: false, reason: `ps faalt (${error.code ?? error.status})` };
+    return { ok: false, reason: `ps failed (${error.code ?? error.status})` };
   }
 }
 
@@ -427,7 +427,7 @@ function scanLinux(o) {
       first = reader.stat(pid);
     } catch (error) {
       if (GONE_CODES.has(error.code)) continue;
-      processes.push({ pid, start: null, uid: null, comm: null, script: null, sub: null, verdict: "unproven", reason: `stat onleesbaar (${error.code})` });
+      processes.push({ pid, start: null, uid: null, comm: null, script: null, sub: null, verdict: "unproven", reason: `stat unreadable (${error.code})` });
       continue;
     }
     if (first.state === "Z") continue;
@@ -440,10 +440,10 @@ function scanLinux(o) {
     let argvReason = null;
     try {
       argv = reader.cmdline(pid);
-      if (argv.length === 0) argvReason = "argv leeg";
+      if (argv.length === 0) argvReason = "argv empty";
     } catch (error) {
       if (GONE_CODES.has(error.code)) continue;
-      argvReason = `argv onleesbaar (${error.code})`;
+      argvReason = `argv unreadable (${error.code})`;
     }
     let entry;
     if (argv && argv.length > 0) {
@@ -474,13 +474,13 @@ function scanLinux(o) {
 function classify(entry, marker, o) {
   if (marker === true) {
     entry.verdict = "new";
-    entry.reason = "houdt de protocolmarker";
+    entry.reason = "holds the protocol marker";
   } else if (o.noLockPathScripts.has(entry.script)) {
     entry.verdict = "no-lock-path";
-    entry.reason = "oude broker: geen pad naar de lock (bouwvoorwaarde 4)";
+    entry.reason = "old broker: no path to the lock (build condition 4)";
   } else {
     entry.verdict = "unproven";
-    entry.reason = marker === null ? "fd's onleesbaar" : "geen marker-fd";
+    entry.reason = marker === null ? "fds unreadable" : "no marker fd";
   }
 }
 
@@ -528,7 +528,7 @@ function scanDarwin(o) {
       classify(entry, darwinMarker(row.pid), o);
     } else {
       if (comm && !JS_RUNTIME.test(comm)) continue;
-      entry = { pid: row.pid, start: row.start, uid: row.uid, comm, script: null, sub: null, verdict: "unproven", reason: "argv onleesbaar" };
+      entry = { pid: row.pid, start: row.start, uid: row.uid, comm, script: null, sub: null, verdict: "unproven", reason: "argv unreadable" };
     }
     processes.push(entry);
   }
@@ -698,16 +698,16 @@ export function defaultJudgeLegacy(file) {
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   } catch (error) {
-    return `oud lock onleesbaar (${error.code})`;
+    return `old lock unreadable (${error.code})`;
   }
   try {
     const text = readFd(fd).toString("utf8").trim();
     const pid = Number.parseInt(text, 10);
-    if (!text || !Number.isInteger(pid) || pid <= 0 || String(pid) !== text) return "oud lock leeg of onleesbaar";
+    if (!text || !Number.isInteger(pid) || pid <= 0 || String(pid) !== text) return "old lock empty or unreadable";
     const probe = signalProbe(pid);
-    if (probe === "alive") return `oude eigenaar leeft (pid ${pid})`;
-    if (probe === "esrch") return `oud lock, pid ${pid} hier niet zichtbaar; geen doodsbewijs: state-lock adopt-legacy na drain-check`;
-    return `oud lock, pid ${pid} onbekend`;
+    if (probe === "alive") return `old owner alive (pid ${pid})`;
+    if (probe === "esrch") return `old lock, pid ${pid} not visible here; no proof of death: state-lock adopt-legacy after drain-check`;
+    return `old lock, pid ${pid} unknown`;
   } finally {
     fs.closeSync(fd);
   }
@@ -728,19 +728,19 @@ export function openFencedLock(fencePath, options = {}) {
     try {
       type = fs.statfsSync(dir).type;
     } catch (error) {
-      if (error.code !== "ENOENT") process.stderr.write(`state-lock: statfs ${dir} faalt (${error.code}); doorgaan\n`);
+      if (error.code !== "ENOENT") process.stderr.write(`state-lock: statfs ${dir} failed (${error.code}); continuing\n`);
     }
     if (type !== null) {
       const v = fsVerdict(o.platform, type);
       if (v.verdict === "refuse") {
-        throw new StateLockUnavailable(`state-lock weigert ${v.name} voor ${dir}: geen betrouwbare locks op netwerk- of FUSE-mappen`, v.name);
+        throw new StateLockUnavailable(`state-lock refuses ${v.name} for ${dir}: no reliable locks on network or FUSE filesystems`, v.name);
       }
     }
   }
 
   function unavailable(error, what) {
     const detail = error?.errstr ?? error?.message ?? String(error);
-    return new StateLockUnavailable(`state-lock: ${what} ${A} faalt (${error?.code ?? "?"}: ${detail})`, error?.code);
+    return new StateLockUnavailable(`state-lock: ${what} ${A} failed (${error?.code ?? "?"}: ${detail})`, error?.code);
   }
 
   // One attempt at the authority. null = BUSY, "retry" = A was replaced from outside.
@@ -750,14 +750,14 @@ export function openFencedLock(fencePath, options = {}) {
     try {
       db = sqlite.open(A);
     } catch (error) {
-      throw unavailable(error, "openen van");
+      throw unavailable(error, "opening");
     }
     try {
       db.exec("BEGIN EXCLUSIVE");
     } catch (error) {
       closeQuietly(db);
       if (isBusy(error)) return null;
-      throw unavailable(error, "BEGIN EXCLUSIVE op");
+      throw unavailable(error, "BEGIN EXCLUSIVE on");
     }
     const post = statId(A);
     if (pre !== null && pre !== post) {
@@ -780,7 +780,7 @@ export function openFencedLock(fencePath, options = {}) {
     try {
       h.db.exec("COMMIT");
     } catch (error) {
-      process.stderr.write(`state-lock: COMMIT bij vrijgeven faalt (${error?.code}); de kernel geeft vrij bij exit\n`);
+      process.stderr.write(`state-lock: COMMIT on release failed (${error?.code}); the kernel releases it at exit\n`);
     }
     closeQuietly(h.db);
     HELD.delete(h);
@@ -789,9 +789,9 @@ export function openFencedLock(fencePath, options = {}) {
   function busyReason() {
     try {
       const owner = JSON.parse(fs.readFileSync(path.join(F, OWNER_NAME), "utf8"));
-      return `vastgehouden door pid ${owner.pid} sinds ${owner.acquiredAt}`;
+      return `held by pid ${owner.pid} since ${owner.acquiredAt}`;
     } catch {
-      return "vastgehouden door een ander proces";
+      return "held by another process";
     }
   }
 
@@ -874,7 +874,7 @@ export function openFencedLock(fencePath, options = {}) {
 
   function residueReason(found) {
     const list = found.map((r) => `${path.join(dir, r.name)} (${r.kind ?? r.error}, nlink ${r.nlink ?? "?"})`).join(", ");
-    return `O2-restbestand met twee namen: ${list}; verwijder het met de hand (altijd veilig), zie state-lock status`;
+    return `O2 residue with two names: ${list}; remove it by hand (always safe), see state-lock status`;
   }
 
   function describe(list) {
@@ -889,7 +889,7 @@ export function openFencedLock(fencePath, options = {}) {
       if (!r) {
         writeSealRecord();
         r = readRecord();
-        if (!r) return { reason: "zegelrecord onleesbaar na schrijven" };
+        if (!r) return { reason: "seal record unreadable after writing" };
       }
       if (r.sealedAt) return { sealed: true };
       if (r.residues.length > 0) {
@@ -897,26 +897,26 @@ export function openFencedLock(fencePath, options = {}) {
         if (found.length > 0) return { reason: residueReason(found) };
         writeSealRecord(); // a new check and a new scan, after T_r
         r = readRecord();
-        if (!r) return { reason: "zegelrecord onleesbaar na schrijven" };
+        if (!r) return { reason: "seal record unreadable after writing" };
         if (r.residues.length > 0) return { reason: residueReason(r.residues) };
       }
       if (r.verdict !== "initial" && !r.declaration && currentDomain().verdict === "initial") {
         writeSealRecord(); // v2.7: the first process in "initial" scans again
         r = readRecord();
-        if (!r) return { reason: "zegelrecord onleesbaar na schrijven" };
+        if (!r) return { reason: "seal record unreadable after writing" };
         if (r.residues.length > 0) return { reason: residueReason(r.residues) };
       }
       if (r.verdict !== "initial" && !r.declaration) {
-        return { reason: `domein ${r.verdict} (${r.verdictReason}): het zegel vraagt state-lock seal --declare-cross-namespace` };
+        return { reason: `domain ${r.verdict} (${r.verdictReason}): the seal needs state-lock seal --declare-cross-namespace` };
       }
       const rest = r.S0.filter((p) => stillWaitingOn(o, p));
       if (rest.length === 0) {
         writeRecord({ ...r, sealedAt: nowIso() });
         return { sealed: true };
       }
-      return { reason: `hek nog niet verzegeld; oude pluginprocessen van vóór het hek: ${describe(rest)}; stoppen: state-lock stop-old` };
+      return { reason: `fence not sealed yet; old plugin processes from before the fence: ${describe(rest)}; to stop them: state-lock stop-old` };
     } catch (error) {
-      return { reason: `zegel niet te bepalen (${error.code ?? error.message})` };
+      return { reason: `seal cannot be determined (${error.code ?? error.message})` };
     }
   }
 
@@ -958,7 +958,7 @@ export function openFencedLock(fencePath, options = {}) {
         `${JSON.stringify({ ...processFacts(), acquiredAt: nowIso(), ...o.ownerInfo() })}\n`
       );
     } catch (error) {
-      process.stderr.write(`state-lock: owner.json schrijven faalt (${error.code}); de lock blijft geldig\n`);
+      process.stderr.write(`state-lock: writing owner.json failed (${error.code}); the lock stays valid\n`);
     }
     void h;
   }
@@ -967,7 +967,7 @@ export function openFencedLock(fencePath, options = {}) {
   function attempt() {
     const h = lockAuthority();
     if (h === null) return { reason: busyReason() };
-    if (h === "retry") return { reason: "state.lock.db werd van buitenaf vervangen" };
+    if (h === "retry") return { reason: "the lock database was replaced from outside" };
     try {
       for (let round = 0; round < 3; round++) {
         let st;
@@ -975,7 +975,7 @@ export function openFencedLock(fencePath, options = {}) {
           st = lstatOrNull(F);
         } catch (error) {
           unlock(h);
-          return { reason: `lstat ${F} faalt (${error.code})` };
+          return { reason: `lstat ${F} failed (${error.code})` };
         }
         if (st === null) {
           publishFence();
@@ -991,12 +991,12 @@ export function openFencedLock(fencePath, options = {}) {
           unlock(h);
           return { reason: z.reason };
         }
-        const reason = st.isFile() ? o.judgeLegacy(F) : `onbekend object op ${base} (${kindOf(st)})`;
+        const reason = st.isFile() ? o.judgeLegacy(F) : `unknown object on ${base} (${kindOf(st)})`;
         unlock(h);
         return { reason };
       }
       unlock(h);
-      return { reason: `${base} veranderde steeds` };
+      return { reason: `${base} kept changing` };
     } catch (error) {
       unlock(h);
       throw error;
@@ -1030,11 +1030,11 @@ export function openFencedLock(fencePath, options = {}) {
   }
 
   function assertOwned(h) {
-    if (!h || h.released) throw new StateLockLost("de lock is al vrijgegeven");
+    if (!h || h.released) throw new StateLockLost("the lock was already released");
     const a = statId(A);
-    if (a !== h.a) throw new StateLockLost(`${A} is vervangen of weg`);
+    if (a !== h.a) throw new StateLockLost(`${A} was replaced or removed`);
     const st = lstatOrNull(F);
-    if (!st || !st.isDirectory() || fileId(st) !== h.fence) throw new StateLockLost(`het hek ${F} is vervangen of weg`);
+    if (!st || !st.isDirectory() || fileId(st) !== h.fence) throw new StateLockLost(`the fence ${F} was replaced or removed`);
   }
 
   // ---- maintenance commands ---------------------------------------------
@@ -1082,7 +1082,7 @@ export function openFencedLock(fencePath, options = {}) {
         try {
           JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
         } catch {
-          anomalies.push({ name, problem: "logboek onleesbaar" });
+          anomalies.push({ name, problem: "log unreadable" });
         }
       } else if (rest.startsWith("quarantine-")) {
         counts.quarantine++;
@@ -1091,7 +1091,7 @@ export function openFencedLock(fencePath, options = {}) {
         // counted under residues
       } else {
         counts.other++;
-        anomalies.push({ name, problem: "onbekende naam onder het voorvoegsel" });
+        anomalies.push({ name, problem: "unknown name under the prefix" });
       }
     }
     return { counts, anomalies };
@@ -1129,12 +1129,12 @@ export function openFencedLock(fencePath, options = {}) {
       }
       if (!out.sealed) {
         const r = out.record;
-        if (!r) out.waitingOn = { kind: "record", detail: "geen leesbaar zegelrecord; de volgende acquire scant" };
+        if (!r) out.waitingOn = { kind: "record", detail: "no readable seal record; the next acquire scans" };
         else if (r.residues.length > 0) out.waitingOn = { kind: "residue", residues: r.residues };
         else if (r.verdict !== "initial" && !r.declaration) out.waitingOn = { kind: "domain", verdict: r.verdict, reason: r.verdictReason };
         else {
           const live = r.S0.filter((p) => stillWaitingOn(o, p)).map((p) => ({ ...p, argv: liveArgv(p) }));
-          out.waitingOn = live.length > 0 ? { kind: "processes", processes: live } : { kind: "nothing", detail: "de volgende acquire zet het zegel" };
+          out.waitingOn = live.length > 0 ? { kind: "processes", processes: live } : { kind: "nothing", detail: "the next acquire writes the seal" };
         }
       }
     } else if (st?.isFile()) {
@@ -1161,22 +1161,22 @@ export function openFencedLock(fencePath, options = {}) {
         throw new FencedLockError(domain.verdict === "nested" ? "ADOPT_DOMAIN_NESTED" : "ADOPT_DOMAIN_UNKNOWN", `${domain.reason}; ${domain.scope}`, { domain });
       }
       const st = lstatOrNull(F);
-      if (st === null) throw new FencedLockError("ADOPT_NOT_LEGACY", "er staat niets op het pad");
-      if (st.isDirectory()) throw new FencedLockError("ADOPT_NOT_LEGACY", "er staat al een hek");
-      if (!st.isFile()) throw new FencedLockError("ADOPT_NOT_LEGACY", `geen regulier bestand (${kindOf(st)})`);
+      if (st === null) throw new FencedLockError("ADOPT_NOT_LEGACY", "nothing on the path");
+      if (st.isDirectory()) throw new FencedLockError("ADOPT_NOT_LEGACY", "a fence is already there");
+      if (!st.isFile()) throw new FencedLockError("ADOPT_NOT_LEGACY", `not a regular file (${kindOf(st)})`);
       fd0 = fs.openSync(F, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
       const fst = fs.fstatSync(fd0, { bigint: true });
       const content = readFd(fd0);
       const x = { dev: String(fst.dev), ino: String(fst.ino), sha256: sha256(content), nlink: Number(fst.nlink) };
-      if (fileId(fst) !== fileId(st)) throw new FencedLockError("ADOPT_MISMATCH", "fd en pad wijzen niet naar hetzelfde bestand");
+      if (fileId(fst) !== fileId(st)) throw new FencedLockError("ADOPT_MISMATCH", "fd and path do not point to the same file");
       if (x.dev !== String(expectDev) || x.ino !== String(expectIno) || x.sha256 !== String(expectSha)) {
-        throw new FencedLockError("ADOPT_MISMATCH", `verwacht ${expectDev}/${expectIno}/${expectSha}, gevonden ${x.dev}/${x.ino}/${x.sha256}`, { found: x });
+        throw new FencedLockError("ADOPT_MISMATCH", `expected ${expectDev}/${expectIno}/${expectSha}, found ${x.dev}/${x.ino}/${x.sha256}`, { found: x });
       }
       const text = content.toString("utf8").trim();
       if (text !== "") {
         const pid = Number.parseInt(text, 10);
-        if (!Number.isInteger(pid) || String(pid) !== text) throw new FencedLockError("ADOPT_REFUSED", "inhoud is geen pid");
-        if (signalProbe(pid) !== "esrch") throw new FencedLockError("ADOPT_REFUSED", `pid ${pid} geeft geen ESRCH`);
+        if (!Number.isInteger(pid) || String(pid) !== text) throw new FencedLockError("ADOPT_REFUSED", "content is not a pid");
+        if (signalProbe(pid) !== "esrch") throw new FencedLockError("ADOPT_REFUSED", `pid ${pid} does not give ESRCH`);
       }
       const otherNames =
         x.nlink >= 2
@@ -1191,10 +1191,10 @@ export function openFencedLock(fencePath, options = {}) {
           : [];
       const drain = drainCheck({ ...o, domain: () => domain });
       if (drain.result !== "drained") {
-        throw new FencedLockError("ADOPT_NOT_DRAINED", `drain-check: ${drain.unprovenCount} onbewezen pluginproces(sen)`, { drain });
+        throw new FencedLockError("ADOPT_NOT_DRAINED", `drain-check: ${drain.unprovenCount} unproven plugin process(es)`, { drain });
       }
       const now = lstatOrNull(F);
-      if (!now || fileId(now) !== fileId(fst)) throw new FencedLockError("ADOPT_CHANGED", "state.lock veranderde na de verificatie; niets verplaatst");
+      if (!now || fileId(now) !== fileId(fst)) throw new FencedLockError("ADOPT_CHANGED", "state.lock changed after the check; nothing moved");
       const P = prepare();
       const Q = path.join(dir, `${base}.quarantine-${stamp()}-${hex(8)}`);
       const logPath = `${Q}.adopt.json`;
@@ -1293,6 +1293,21 @@ export function openFencedLock(fencePath, options = {}) {
         if (r.sealedAt) return { ok: true, result: "sealed", targets: [] };
         if (r.residues.length > 0) return { ok: false, result: "residue", reason: residueReason(r.residues), targets: [] };
         if (r.S0 === null) return { ok: false, result: "no-scan", targets: [] };
+        // Linux: the pids in S0 come from a procfs, kill() uses the pids of the
+        // caller's PID namespace. They are the same numbers only when both are
+        // the init namespace with its full procfs (v2.11). macOS has no PID
+        // namespaces.
+        if (o.platform === "linux") {
+          const here = currentDomain();
+          if (here.verdict !== "initial" || r.verdict !== "initial") {
+            return {
+              ok: false,
+              result: "domain",
+              reason: `stop-old signals only from the init PID namespace with a full procfs, for a record scanned there (here: ${here.verdict}, ${here.reason}; record: ${r.verdict}); run it on the host, or seal with state-lock seal --declare-cross-namespace`,
+              targets: []
+            };
+          }
+        }
         targets = r.S0.filter((p) => stillWaitingOn(o, p));
       } finally {
         unlock(h);
@@ -1312,7 +1327,7 @@ export function openFencedLock(fencePath, options = {}) {
       const notTargeted = (r?.S0 ?? [])
         .filter((p) => !targets.some((t) => t.pid === p.pid && t.start === p.start) && stillWaitingOn(o, p))
         .map((p) => ({ pid: p.pid, start: p.start, script: p.script, outcome: "not-targeted" }));
-      const gone = new Set(["terminated", "killed", "already-gone", "identity-changed"]);
+      const gone = new Set(["terminated", "killed", "already-gone", "identity-changed", "now-proven"]);
       const allGone = outcomes.every((x) => gone.has(x.outcome)) && notTargeted.length === 0;
       return { ok: allGone && Boolean(z.sealed), result: z.sealed ? "sealed" : "waiting", reason: z.reason ?? null, outcomes: [...outcomes, ...notTargeted] };
     } finally {
@@ -1322,16 +1337,19 @@ export function openFencedLock(fencePath, options = {}) {
     function stopOne(t) {
       const who = { pid: t.pid, start: t.start, script: t.script, sub: t.sub, comm: t.comm };
       // No start time recorded: nothing ties the pid to the recorded process.
-      if (t.start === null) return { ...who, outcome: "unidentified", detail: "geen starttijd vastgelegd: nooit een signaal" };
+      if (t.start === null) return { ...who, outcome: "unidentified", detail: "no start time recorded: never signalled" };
       if (!t.script && !includeUnidentified) return { ...who, outcome: "unidentified" };
       // A plugin script in argv but no JS runtime (an editor or pager with the
       // script open): never signalled without the flag.
       if (t.script && t.comm && !JS_RUNTIME.test(t.comm) && !includeUnidentified) {
-        return { ...who, outcome: "unidentified", detail: `comm ${t.comm} is geen JS-runtime` };
+        return { ...who, outcome: "unidentified", detail: `comm ${t.comm} is not a JS runtime` };
       }
+      // Before every signal: identity, then the marker. A target that holds the
+      // marker by now proves the new protocol and is never signalled (v2.11).
       const check = () => {
         try {
-          return identityNow(o, t);
+          const c = identityNow(o, t);
+          return c.status === "same" && markerNow(o, t) === true ? { status: "proven" } : c;
         } catch {
           return { status: "unreadable" };
         }
@@ -1350,8 +1368,7 @@ export function openFencedLock(fencePath, options = {}) {
         const end = performance.now() + ms;
         for (;;) {
           const now = check();
-          if (now.status === "gone") return "gone";
-          if (now.status === "changed") return "changed";
+          if (now.status === "gone" || now.status === "changed" || now.status === "proven") return now.status;
           if (performance.now() >= end) return now.status;
           sleepSync(50);
         }
@@ -1361,30 +1378,36 @@ export function openFencedLock(fencePath, options = {}) {
         const c = check();
         return c.status === "unverified" ? { status: waitGone(500) } : c;
       };
+      const proven = { ...who, outcome: "now-proven", detail: "holds the protocol marker now: never signalled" };
       let c = settled();
+      if (c.status === "proven") return proven;
       if (c.status === "gone") return { ...who, outcome: "already-gone" };
       if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identiteit niet te bevestigen" };
+      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identity cannot be confirmed" };
       if (c.stopped) {
         const e = send("SIGCONT");
         if (e === "eperm") return { ...who, outcome: "eperm" };
       }
       c = settled();
+      if (c.status === "proven") return proven;
       if (c.status === "gone") return { ...who, outcome: "already-gone" };
       if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identiteit niet te bevestigen" };
+      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identity cannot be confirmed" };
       const term = send("SIGTERM");
       if (term === "eperm") return { ...who, outcome: "eperm" };
       const afterTerm = waitGone(graceMs);
+      if (afterTerm === "proven") return proven;
       if (afterTerm === "gone") return { ...who, outcome: "terminated" };
       if (afterTerm === "changed") return { ...who, outcome: "identity-changed" };
       c = settled();
+      if (c.status === "proven") return proven;
       if (c.status === "gone") return { ...who, outcome: "terminated" };
       if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identiteit niet te bevestigen" };
+      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identity cannot be confirmed" };
       const k = send("SIGKILL");
       if (k === "eperm") return { ...who, outcome: "eperm" };
       const afterKill = waitGone(2_000);
+      if (afterKill === "proven") return proven;
       if (afterKill === "gone") return { ...who, outcome: "killed" };
       if (afterKill === "changed") return { ...who, outcome: "identity-changed" };
       return { ...who, outcome: "still-alive" };

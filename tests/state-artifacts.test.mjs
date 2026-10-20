@@ -271,3 +271,17 @@ test("R2: listJobs without a usable lock shows the effective job list instead of
   assert.match(run.stderr, /job list not reconciled .*22\.13/);
   assert.equal(fs.readFileSync(resolveStateFile(s.workspace), "utf8"), before, "nothing was written");
 });
+
+test("R6: a job file that lags its index is still reconciled after an unrelated commit made state.json newer", { skip: !isNew && "new protocol only" }, async (t) => {
+  const s = scenario(t);
+  const u = seed(s, [{ id: "lag", status: "running", phase: "running", pid: null, jobClass: "task", updatedAt: at(2), json: { status: "completed", phase: "completed" } }]);
+  // The crash left the JSON ahead of the index; then another job was committed.
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(resolveJobFile(s.workspace, "lag"), past, past);
+  const other = actor(s, "other", { op: "upsert", jobs: [{ id: "other", status: "completed", phase: "completed", jobClass: "task", updatedAt: at(0) }] });
+  assert.equal((await other.exit).code, 0, s.errors().join("\n"));
+  assert.ok(fs.statSync(resolveStateFile(s.workspace)).mtimeMs > fs.statSync(resolveJobFile(s.workspace, "lag")).mtimeMs);
+  const lister = actor(s, "lister", { op: "listJobs" });
+  assert.equal((await lister.exit).code, 0, s.errors().join("\n"));
+  assert.equal(u.index().find((j) => j.id === "lag").status, "completed", "the lagging index entry was never reconciled");
+});

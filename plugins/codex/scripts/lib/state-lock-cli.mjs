@@ -50,8 +50,12 @@ seals once no recorded old process still lives. Exit code 0 when sealed.`,
 
 Stops only the old plugin processes an unsealed fence waits for, each after a
 fresh check of pid, start time and script: SIGCONT if stopped, SIGTERM, and
-SIGKILL after the grace. Processes recorded only because their argv was
-unreadable are stopped only with --include-unidentified. Then seals. One
+SIGKILL after the grace. A process that holds the protocol marker by then is
+never signalled (now-proven). Processes recorded only because their argv was
+unreadable, or whose name is not node or bun (an editor with a plugin script
+open), are stopped only with --include-unidentified; a record without a start
+time never. On Linux it only signals from the init PID namespace with a full
+procfs, where the recorded pids are the pids kill() uses. Then seals. One
 outcome per process; exit code 0 only when every process is gone and the
 fence is sealed. Never touches files.`,
   unfence: `Usage: codex-companion state-lock unfence (--cwd <dir> | --all)
@@ -139,7 +143,7 @@ export async function runStateLockCommand(argv) {
       }
       const [{ lock }] = targets({ cwd: options.cwd });
       const declaration = options["declare-cross-namespace"] ?? null;
-      if (declaration) process.stderr.write(`state-lock adopt-legacy: verklaring buiten de init-namespace: ${declaration}\n`);
+      if (declaration) process.stderr.write(`state-lock adopt-legacy: declaration outside the init PID namespace: ${declaration}\n`);
       try {
         const result = lock.adoptLegacy({
           expectDev: options["expect-dev"],
@@ -149,7 +153,7 @@ export async function runStateLockCommand(argv) {
         });
         out(result);
         if (!result.ok) {
-          process.stderr.write(`state-lock adopt-legacy: ${result.code}; zie ${result.logPath}\n`);
+          process.stderr.write(`state-lock adopt-legacy: ${result.code}; see ${result.logPath}\n`);
         }
         return result.ok ? 0 : 1;
       } catch (error) {
@@ -160,7 +164,7 @@ export async function runStateLockCommand(argv) {
     case "seal": {
       const declaration = options["declare-cross-namespace"];
       if (!declaration) throw new Error("seal needs --declare-cross-namespace \"<who, which namespaces, how drained>\"");
-      process.stderr.write(`state-lock seal: verklaring: ${declaration}\n`);
+      process.stderr.write(`state-lock seal: declaration: ${declaration}\n`);
       const [{ lock }] = targets({ cwd: options.cwd });
       const result = lock.seal({ domainDeclaration: declaration });
       out(result);

@@ -148,6 +148,38 @@ try {
   // No node:sqlite (old Node): only the old protocols can run here.
 }
 
+function startTime(pid) {
+  try {
+    const stat = original.readFileSync.call(fs, `/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  } catch {
+    return "?";
+  }
+}
+
+function readMark() {
+  try {
+    const [r, pid, start] = original.readFileSync.call(fs, eventPath("critical"), "utf8").split(" ");
+    return { role: r, pid: Number(pid), start };
+  } catch {
+    return null;
+  }
+}
+
+function holderAlive({ pid, start }) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+  }
+  if (start === "?") return true;
+  const now = startTime(pid);
+  if (now === "?") return false;
+  const stat = original.readFileSync.call(fs, `/proc/${pid}/stat`, "utf8");
+  if (stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z")) return false;
+  return now === start;
+}
+
 try {
   const logFile = mode === "crash" ? null : resolveJobLogFile(workspace, role);
   if (mode !== "crash") {
@@ -156,12 +188,27 @@ try {
   }
   updateState(workspace, (state) => {
     if (mode === "crash") process.exit(0); // like process death: no finally runs
+    // The critical mark names its holder (role, pid, start time). A mark whose
+    // holder is dead is a section that ended by a crash, not an overlap: log
+    // it as "dead" and take the mark over (the oracle must survive SIGKILL).
     let mine = true;
-    try {
-      original.writeFileSync.call(fs, eventPath("critical"), role, { flag: "wx" });
-    } catch {
-      mine = false;
-      signal("overlap");
+    const mark = `${role} ${process.pid} ${startTime(process.pid)}`;
+    for (;;) {
+      try {
+        original.writeFileSync.call(fs, eventPath("critical"), mark, { flag: "wx" });
+        break;
+      } catch {
+        const holder = readMark();
+        if (holder && !holderAlive(holder)) {
+          original.appendFileSync.call(fs, eventPath("oracle.log"), `dead ${holder.role} ${process.hrtime.bigint()}\n`);
+          original.unlinkSync.call(fs, eventPath("critical"));
+          continue;
+        }
+        if (!holder) continue; // the holder just left
+        mine = false;
+        signal("overlap");
+        break;
+      }
     }
     original.appendFileSync.call(fs, eventPath("oracle.log"), `enter ${role} ${process.hrtime.bigint()}\n`);
     signal("entered");

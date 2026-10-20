@@ -6,6 +6,7 @@
 // The old protocols must fail T2–T5 (O2 also T6); the new code must pass all.
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -152,4 +153,37 @@ test("N1: an owner killed inside the section frees the lock at once; state is th
   assert.ok(Date.now() - startedAt < 5_000, "the next writer must not wait for a timeout");
   const jobs = outcome(s, ["first", "b"]).jobs;
   assert.deepEqual(jobs, ["b", "first"]);
+});
+
+// The oracle itself (review of 4ad0c73, N28): a mark of a living holder is an
+// overlap, a mark left by a holder that died in its section is not.
+test("oracle: a living holder's critical mark is an overlap; a dead holder's mark is logged as dead and taken over", { skip: process.platform !== "linux" && "Linux /proc" }, async (t) => {
+  const startOf = (pid) => {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  };
+  for (const living of [true, false]) {
+    const s = scenario(t);
+    const holder = spawn("sleep", ["30"], { stdio: "ignore" });
+    const held = new Promise((r) => holder.once("exit", r));
+    t.after(async () => {
+      if (holder.exitCode == null && holder.signalCode == null) holder.kill("SIGKILL");
+      await held;
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    fs.writeFileSync(path.join(s.barriers, "critical"), `x ${holder.pid} ${startOf(holder.pid)}`);
+    if (!living) {
+      holder.kill("SIGKILL");
+      await held;
+    }
+    const w = s.start("w", { mode: "quick" });
+    assert.equal((await w.exit).code, 0, s.errors().join("\n"));
+    const log = fs.readFileSync(path.join(s.barriers, "oracle.log"), "utf8");
+    if (living) {
+      assert.equal(s.has("w.overlap"), true, "a living holder's mark must count as overlap");
+    } else {
+      assert.equal(s.has("w.overlap"), false, `a dead holder's mark is no overlap: ${log}`);
+      assert.match(log, /^dead x /m);
+    }
+  }
 });

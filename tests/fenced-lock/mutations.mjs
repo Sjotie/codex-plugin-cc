@@ -79,7 +79,7 @@ export const MUTATIONS = [
     id: "missing-record-is-empty-S0",
     rule: "N27e: a missing record means a new scan, never an empty S0",
     file: FL,
-    from: "      if (!r) {\n        writeSealRecord();\n        r = readRecord();\n        if (!r) return { reason: \"zegelrecord onleesbaar na schrijven\" };\n      }\n      if (r.sealedAt)",
+    from: "      if (!r) {\n        writeSealRecord();\n        r = readRecord();\n        if (!r) return { reason: \"seal record unreadable after writing\" };\n      }\n      if (r.sealedAt)",
     to: "      if (!r) return { sealed: true };\n      if (r.sealedAt)",
     tests: [[SEAL, "N27e|N27g"]]
   },
@@ -119,7 +119,7 @@ export const MUTATIONS = [
     id: "argv-unreadable-skipped",
     rule: "N30d2: unreadable argv with comm node is unproven",
     file: FL,
-    from: "      argvReason = `argv onleesbaar (${error.code})`;",
+    from: "      argvReason = `argv unreadable (${error.code})`;",
     to: "      continue;",
     tests: [[UNIT, "N30d"]]
   },
@@ -274,6 +274,30 @@ export const MUTATIONS = [
     from: "            if (existing.pid !== stalePid || isProcessAlive(existing.pid)) {",
     to: "            if (Number.isInteger(existing.pid) && existing.pid > 0 && isProcessAlive(existing.pid)) {",
     tests: [[ART, "A4b"]]
+  },
+  {
+    id: "listJobs-mtime-gate",
+    rule: "v2.11 R6: a file time does not tell whether the index holds a job file",
+    file: STATE,
+    from: "  if (workerGone(job)) {\n    return true;\n  }\n  const effective = readEffective(cwd, job);",
+    to: "  if (workerGone(job)) {\n    return true;\n  }\n  if (fs.statSync(resolveJobFile(cwd, job.id)).mtimeMs < fs.statSync(resolveStateFile(cwd)).mtimeMs) return false;\n  const effective = readEffective(cwd, job);",
+    tests: [[ART, "R6"]]
+  },
+  {
+    id: "no-marker-before-signal",
+    rule: "v2.11 R7: the marker is checked again right before every signal",
+    file: FL,
+    from: "          return c.status === \"same\" && markerNow(o, t) === true ? { status: \"proven\" } : c;",
+    to: "          return c;",
+    tests: [[UNIT, "R7"]]
+  },
+  {
+    id: "stop-old-any-namespace",
+    rule: "v2.11 R8: stop-old signals only from the init PID namespace",
+    file: FL,
+    from: "        if (o.platform === \"linux\") {\n          const here = currentDomain();",
+    to: "        if (false) {\n          const here = currentDomain();",
+    tests: [[UNIT, "R8"], [SEAL, "R8"]]
   },
   {
     id: "no-assertOwned-before-rename",

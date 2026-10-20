@@ -457,10 +457,10 @@ for (const variant of ["lost", "killed"]) {
     assert.equal(s.has("w.entered"), false, "W waits: Z is in its section without a file");
     s.signal("h.resume.attempt");
     await s.wait(["h.entered", "h.fenced", "h.contended"]);
-    if (s.has("h.entered")) {
-      s.signal("h.release");
-    }
-    h.child.kill("SIGKILL");
+    // H inside its section ends it normally, so the oracle sees its exit; a
+    // SIGKILL there would leave H's mark in the oracle and report a false overlap.
+    if (s.has("h.entered")) s.signal("h.release");
+    else h.child.kill("SIGKILL");
     await h.exit;
     s.signal("z.release");
     await z.exit;
@@ -496,7 +496,7 @@ test("N31a: an old O2 writer with a reused pid cannot enter after the seal: the 
   assert.ok(record(s).residues.length > 0 && record(s).S0 === null, "no S0 while the residue exists");
   const r1 = await acquireOnce(s, "w1");
   assert.equal(r1.acquired, false);
-  assert.match(r1.message, /O2-restbestand/);
+  assert.match(r1.message, /O2 residue/);
   const kk = old(s, "kk", "o2", { gates: { attempt: "pause" } });
   await s.wait("kk.paused.attempt");
   fs.renameSync(residue, path.join(stateDir, `state.lock.${kk.pid}`)); // simulate pid reuse
@@ -801,4 +801,25 @@ test("N22d: with --declare-cross-namespace the declaration is in the output, on 
   assert.equal(fs.lstatSync(fence).isDirectory(), true);
   assert.equal(record(s).verdict, "nested");
   assert.equal(record(s).declaration, declaration);
+});
+
+for (const [label, flags] of [
+  ["inherited procfs", ["-r", "-p", "-f"]],
+  ["own procfs", ["-r", "-p", "-f", "--mount-proc"]]
+]) test(`R8 (real, ${label}): stop-old run in a nested PID namespace refuses; the old process lives`, async (t) => {
+  if (!unshareWorks(flags)) {
+    t.skip(`unshare ${flags.join(" ")} not available`);
+    return;
+  }
+  const s = scenario(t);
+  const o = idleOld(s, t);
+  assert.equal((await acquireOnce(s, "w")).acquired, false);
+  const actorPath = new URL("./fenced-lock/lock-actor.mjs", import.meta.url).pathname;
+  const env = s.childEnv({ ACTOR_WORKSPACE: s.workspace, ACTOR_BARRIERS: s.barriers, ACTOR_ROLE: "nested", ACTOR_OP: JSON.stringify({ op: "stopOld", args: { graceMs: 200 } }) });
+  const run = spawnSync("unshare", [...flags, process.execPath, actorPath], { env, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const r = s.result("nested");
+  assert.equal(r.result, "domain", JSON.stringify(r));
+  assert.equal(o.child.exitCode, null, "the old process was signalled");
+  assert.equal(o.child.signalCode, null);
 });

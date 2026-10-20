@@ -256,7 +256,7 @@ test("U3: an unreadable /proc/<pid>/fd makes a matching process unproven", { ski
   const r = drainCheck({ ...PLUGIN_OPTS, domain: INITIAL, linuxReader: reader });
   const entry = r.processes.find((p) => p.pid === d.pid);
   assert.equal(entry?.verdict, "unproven", JSON.stringify(r.processes));
-  assert.match(entry.reason, /fd's onleesbaar/);
+  assert.match(entry.reason, /fds unreadable/);
   // The same process with readable fds is new.
   assert.equal(drainCheck({ ...PLUGIN_OPTS, domain: INITIAL }).processes.find((p) => p.pid === d.pid)?.verdict, "new");
   fs.writeFileSync(path.join(barriers, "new.release"), "");
@@ -306,7 +306,7 @@ test("U6: domainVerdict from fixtures: hidepid, subset=pid, no procfs, unreadabl
   // /proc replaced by a tmpfs: statfs says so.
   const tmpfs = domainVerdict({ platform: "linux", procRoot: fakeProc(t), statfs: statfs(0x01021994) });
   assert.equal(tmpfs.verdict, "unknown");
-  assert.match(tmpfs.reason, /geen procfs/);
+  assert.match(tmpfs.reason, /not procfs/);
   assert.equal(domainVerdict({ platform: "linux", procRoot: tmpdir(t) }).verdict, "unknown", "no ns link");
   // darwin: only with the M2 flag of the build and a canary that sees pid 1 and the parent.
   assert.equal(domainVerdict({ platform: "darwin" }).verdict, "unknown", "the build flag is off");
@@ -557,7 +557,7 @@ test("N31d: a symlink state.lock.<pid> to a file with two names counts as a resi
   assert.equal(found.length, 1, JSON.stringify(found));
   assert.equal(found[0].name, "state.lock.4242");
   assert.equal(found[0].nlink, 2);
-  assert.throws(() => lock.acquire({ deadlineMs: 300 }), (e) => e instanceof StateLockTimeout && /O2-restbestand/.test(e.message));
+  assert.throws(() => lock.acquire({ deadlineMs: 300 }), (e) => e instanceof StateLockTimeout && /O2 residue/.test(e.message));
   // One name only: no residue, the seal comes.
   fs.rmSync(path.join(dir, "second-name"));
   assert.equal(lock.residues().length, 0);
@@ -696,7 +696,7 @@ test("N32g (real): kill of a process of another uid gives eperm", (t) => {
 });
 
 test("N32h: an unidentified candidate gets no signal without the flag; with it, identity is pid, start time and comm", (t) => {
-  const unidentified = { pid: 4343, start: "200", script: null, sub: null, comm: "node", uid: 1000, reason: "argv onleesbaar" };
+  const unidentified = { pid: 4343, start: "200", script: null, sub: null, comm: "node", uid: 1000, reason: "argv unreadable" };
   const read = (p, signals) => (signals.length === 0 ? { start: "200", state: "S", argv: null, comm: "node" } : { gone: true });
   const a = stopOldWith(t, [unidentified], read);
   const ra = a.lock.stopOld({ graceMs: 100 });
@@ -770,7 +770,7 @@ test("N32l (v2.9): an empty argv that stays: still-alive after the settle time, 
   const took = performance.now() - started;
   assert.deepEqual(s.signals, []);
   assert.equal(r.outcomes[0].outcome, "still-alive");
-  assert.match(r.outcomes[0].detail, /identiteit niet te bevestigen/);
+  assert.match(r.outcomes[0].detail, /identity cannot be confirmed/);
   assert.equal(r.ok, false);
   assert.equal(r.result, "waiting");
   assert.equal(s.sealed(), false);
@@ -860,10 +860,84 @@ test("R4: a plugin script held open by an editor (comm not node or bun) gets no 
 });
 
 test("R5: a record without a start time is never signalled, also with --include-unidentified", (t) => {
-  const noStart = { pid: 4545, start: null, script: null, sub: null, comm: null, uid: null, reason: "stat onleesbaar (EACCES)" };
+  const noStart = { pid: 4545, start: null, script: null, sub: null, comm: null, uid: null, reason: "stat unreadable (EACCES)" };
   const s = stopOldWith(t, [noStart], () => ({ start: "1", state: "S", argv: ["anything"], comm: "anything" }));
   const r = s.lock.stopOld({ graceMs: 100, includeUnidentified: true });
   assert.deepEqual(s.signals, []);
   assert.equal(r.outcomes[0].outcome, "unidentified");
-  assert.match(r.outcomes[0].detail, /starttijd/);
+  assert.match(r.outcomes[0].detail, /start time/);
+});
+
+// ---------------------------------------------------------------------------
+// v2.11 (cross-family review): the marker right before a signal, and the PID
+// namespace stop-old signals from
+// ---------------------------------------------------------------------------
+
+test("R7: a target that opens the marker after the target selection gets no signal (now-proven) and the seal comes", (t) => {
+  let markerReads = 0;
+  const s = stopOldWith(t, [TARGET], () => alive(), {
+    markerReader: () => {
+      markerReads += 1;
+      return markerReads > 1; // false while the targets are chosen under A, true at the first signal check
+    }
+  });
+  const r = s.lock.stopOld({ graceMs: 100 });
+  assert.deepEqual(s.signals, []);
+  assert.equal(r.outcomes[0].outcome, "now-proven", JSON.stringify(r));
+  assert.equal(r.result, "sealed");
+  assert.equal(r.ok, true);
+});
+
+test("R8: stop-old never signals outside the init PID namespace, nor for a record scanned outside it (Linux)", (t) => {
+  const nested = () => ({ verdict: "nested", reason: "PID namespace pid:[1]", scope: "test" });
+  for (const [label, domain, recordVerdict] of [
+    ["caller nested", nested, "initial"],
+    ["record nested", INITIAL, "nested"]
+  ]) {
+    const { F, recordPath } = fencedDir(t, [TARGET]);
+    const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+    fs.writeFileSync(recordPath, JSON.stringify({ ...record, verdict: recordVerdict }));
+    const signals = [];
+    const lock = openFencedLock(F, {
+      ...PLUGIN_OPTS,
+      domain,
+      scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+      identityReader: () => alive(),
+      markerReader: () => false,
+      kill: (pid, sig) => signals.push([pid, sig]),
+      platform: "linux"
+    });
+    const r = lock.stopOld({ graceMs: 100 });
+    assert.deepEqual(signals, [], label);
+    assert.equal(r.result, "domain", `${label}: ${JSON.stringify(r)}`);
+    assert.equal(r.ok, false);
+  }
+});
+
+test("R7 (grace): a target that opens the marker during the grace after SIGTERM gets no SIGKILL; a second target that opens it while the first is stopped gets no signal at all", (t) => {
+  const second = { ...TARGET, pid: 4343, start: "300" };
+  let firstProven = false;
+  let secondProven = false;
+  const s = stopOldWith(
+    t,
+    [TARGET, second],
+    (p) => (p.pid === TARGET.pid ? alive() : alive({ start: "300" })),
+    {
+      markerReader: (p) => (p.pid === TARGET.pid ? firstProven : secondProven),
+      onKill: (pid, sig) => {
+        if (pid === TARGET.pid && sig === "SIGTERM") {
+          // during the grace of the first target both new processes finish loading
+          firstProven = true;
+          secondProven = true;
+        }
+      }
+    }
+  );
+  const r = s.lock.stopOld({ graceMs: 300 });
+  assert.deepEqual(s.signals, [[TARGET.pid, "SIGTERM"]], "only the first SIGTERM, before either proved anything");
+  assert.deepEqual(r.outcomes.map((o) => [o.pid, o.outcome]), [
+    [TARGET.pid, "now-proven"],
+    [second.pid, "now-proven"]
+  ]);
+  assert.equal(r.result, "sealed");
 });

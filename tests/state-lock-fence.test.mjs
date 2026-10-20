@@ -265,7 +265,7 @@ test("N17: on Node 20 the lock is unavailable with the version; nothing is writt
   const { stateDir } = paths(s);
   const a = s.actor("a", { op: "write" }, [], { nodePath: NODE20 });
   assert.equal((await a.exit).code, 1);
-  assert.match(fs.readFileSync(path.join(s.barriers, "a.error"), "utf8"), /Node >= 22\.13 nodig voor node:sqlite \(nu v20/);
+  assert.match(fs.readFileSync(path.join(s.barriers, "a.error"), "utf8"), /needs Node >= 22\.13 for node:sqlite \(running v20/);
   assert.deepEqual(fs.readdirSync(stateDir).filter((n) => n !== "jobs"), []);
 });
 

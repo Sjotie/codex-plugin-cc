@@ -95,8 +95,8 @@ function stateLockOptions(cwd) {
     deadlineMs: LOCK_TIMEOUT_MS,
     retryMs: LOCK_RETRY_DELAY_MS,
     ownerInfo: () => ({ script: path.basename(process.argv[1] ?? "") }),
-    timeoutHint: `zie: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"`,
-    fenceReadme: `Niet verwijderen: dit is het hek van de state-lock van de Codex-plugin (#1916). Status: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"\n`
+    timeoutHint: `see: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"`,
+    fenceReadme: `Do not remove: this is the fence of the Codex plugin state lock (#1916). Status: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"\n`
   };
 }
 
@@ -540,21 +540,11 @@ function workerGone(job) {
   return isWaitingJobStatus(job.status) && Number.isInteger(job.pid) && job.pid > 0 && !isProcessAlive(job.pid);
 }
 
-// stateMtimeMs: mtime of state.json. A job file older than the index was
-// written before the last index commit, so the index already holds it; only
-// newer job files (a crash between the two writes) are read.
-function needsReconcile(cwd, job, stateMtimeMs) {
+// Every member's JSON is read: a file time cannot tell whether the index holds
+// it (an unrelated commit makes state.json newer than a lagging job file).
+function needsReconcile(cwd, job) {
   if (workerGone(job)) {
     return true;
-  }
-  let jobMtimeMs;
-  try {
-    jobMtimeMs = fs.statSync(resolveJobFile(cwd, job.id)).mtimeMs;
-  } catch {
-    return false;
-  }
-  if (stateMtimeMs !== null && jobMtimeMs < stateMtimeMs) {
-    return false;
   }
   const effective = readEffective(cwd, job);
   if (effective.source === "unknown") {
@@ -598,15 +588,9 @@ function reconcileUnderLock(cwd) {
 }
 
 export function listJobs(cwd) {
-  let stateMtimeMs = null;
-  try {
-    stateMtimeMs = fs.statSync(resolveStateFile(cwd)).mtimeMs;
-  } catch {
-    stateMtimeMs = null;
-  }
   const state = loadState(cwd);
   // Lock-free first look: only take the lock when something needs a change.
-  if (!state.jobs.some((job) => needsReconcile(cwd, job, stateMtimeMs))) {
+  if (!state.jobs.some((job) => needsReconcile(cwd, job))) {
     return state.jobs;
   }
   try {
