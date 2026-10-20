@@ -300,6 +300,14 @@ export const MUTATIONS = [
     tests: [[UNIT, "R8"], [SEAL, "R8"]]
   },
   {
+    id: "no-procfs-binding",
+    rule: "v2.12 Sol r2: a seal record is judged only from the procfs that recorded it",
+    file: FL,
+    from: "    if (o.platform !== \"linux\") return true; // macOS: one process table, no PID namespaces",
+    to: "    return true; // MUTATION",
+    tests: [["tests/state-lock-sol-r2.test.mjs", "probe|reverse"]]
+  },
+  {
     id: "no-assertOwned-before-rename",
     rule: "A6/§6: assertOwned before every rename",
     file: STATE,

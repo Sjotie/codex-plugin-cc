@@ -854,13 +854,37 @@ export function openFencedLock(fencePath, options = {}) {
     return o.domain ? o.domain() : domainVerdict({ platform: o.platform, procRoot: o.procRoot });
   }
 
+  // The procfs a scan read (Linux): its device and the boot id. S0 holds pids
+  // and start times as that procfs shows them; only a reader of the same
+  // procfs can judge them. Elsewhere a missing pid is not a dead one (v2.12).
+  function procIdentity() {
+    if (o.procIdentity) return o.procIdentity();
+    if (o.platform !== "linux") return null;
+    let dev = null;
+    try {
+      dev = String(fs.statSync(o.procRoot).dev);
+    } catch {
+      dev = null;
+    }
+    return { dev, bootId: bootId() };
+  }
+
+  function sameProc(r) {
+    if (o.platform !== "linux") return true; // macOS: one process table, no PID namespaces
+    const here = procIdentity();
+    const there = r?.scanProc;
+    return Boolean(here?.dev && there?.dev && here.dev === there.dev && here.bootId === there.bootId);
+  }
+
   function writeSealRecord({ declaration } = {}) {
     const previous = readRecord();
     const publishedAt = previous?.publishedAt ?? nowIso();
-    const decl = declaration ?? previous?.declaration ?? null;
+    // A declaration speaks for the namespace it was made in: it carries over
+    // only to a scan of the same procfs.
+    const decl = declaration ?? (previous && sameProc(previous) ? previous.declaration : null) ?? null;
     const found = residues(); // first the residue check, then the scan (I5b, I6)
     const domain = currentDomain();
-    const head = { version: 1, publishedAt, verdict: domain.verdict, verdictReason: domain.reason, scope: domain.scope, declaration: decl };
+    const head = { version: 1, publishedAt, verdict: domain.verdict, verdictReason: domain.reason, scope: domain.scope, declaration: decl, scanProc: procIdentity() };
     if (found.length > 0) {
       writeRecord({ ...head, residues: found, S0: null, scannedAt: null, sealedAt: null });
       return;
@@ -892,16 +916,28 @@ export function openFencedLock(fencePath, options = {}) {
         if (!r) return { reason: "seal record unreadable after writing" };
       }
       if (r.sealedAt) return { sealed: true };
+      const here = currentDomain();
+      // v2.12: S0 is judged only from the procfs that recorded it. In the init
+      // PID namespace a record from elsewhere is scanned again (this procfs
+      // sees every process); anywhere else the reader waits: a pid it cannot
+      // see is not a dead process, and its own narrower scan must not replace
+      // the record.
+      const foreign = () =>
+        here.verdict !== "initial" && !sameProc(r)
+          ? { reason: `the seal record was made in another procfs (${r.verdict}); this process (${here.verdict}: ${here.reason}) cannot judge its old processes; a process in the init PID namespace seals it, e.g. state-lock status there` }
+          : null;
       if (r.residues.length > 0) {
         const found = residues();
         if (found.length > 0) return { reason: residueReason(found) };
+        if (foreign()) return foreign();
         writeSealRecord(); // a new check and a new scan, after T_r
         r = readRecord();
         if (!r) return { reason: "seal record unreadable after writing" };
         if (r.residues.length > 0) return { reason: residueReason(r.residues) };
       }
-      if (r.verdict !== "initial" && !r.declaration && currentDomain().verdict === "initial") {
-        writeSealRecord(); // v2.7: the first process in "initial" scans again
+      if (foreign()) return foreign();
+      if (here.verdict === "initial" && (!sameProc(r) || (r.verdict !== "initial" && !r.declaration))) {
+        writeSealRecord(); // v2.7/v2.12: the init namespace scans a record from elsewhere again
         r = readRecord();
         if (!r) return { reason: "seal record unreadable after writing" };
         if (r.residues.length > 0) return { reason: residueReason(r.residues) };
@@ -1131,7 +1167,9 @@ export function openFencedLock(fencePath, options = {}) {
         const r = out.record;
         if (!r) out.waitingOn = { kind: "record", detail: "no readable seal record; the next acquire scans" };
         else if (r.residues.length > 0) out.waitingOn = { kind: "residue", residues: r.residues };
-        else if (r.verdict !== "initial" && !r.declaration) out.waitingOn = { kind: "domain", verdict: r.verdict, reason: r.verdictReason };
+        else if (o.platform === "linux" && !sameProc(r) && currentDomain().verdict !== "initial") {
+          out.waitingOn = { kind: "domain", verdict: r.verdict, reason: "the seal record was made in another procfs; a process in the init PID namespace judges and seals it" };
+        } else if (r.verdict !== "initial" && !r.declaration) out.waitingOn = { kind: "domain", verdict: r.verdict, reason: r.verdictReason };
         else {
           const live = r.S0.filter((p) => stillWaitingOn(o, p)).map((p) => ({ ...p, argv: liveArgv(p) }));
           out.waitingOn = live.length > 0 ? { kind: "processes", processes: live } : { kind: "nothing", detail: "the next acquire writes the seal" };
@@ -1309,8 +1347,8 @@ export function openFencedLock(fencePath, options = {}) {
               targets: []
             };
           }
-          if (r.verdict !== "initial") {
-            writeSealRecord({ declaration: r.declaration });
+          if (r.verdict !== "initial" || !sameProc(r)) {
+            writeSealRecord();
             r = readRecord();
             if (!r) return { ok: false, result: "no-record", targets: [] };
             if (r.residues.length > 0) return { ok: false, result: "residue", reason: residueReason(r.residues), targets: [] };

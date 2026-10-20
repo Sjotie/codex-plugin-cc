@@ -593,6 +593,16 @@ test("N31g: a fifo and a socket named state.lock.<pid> count as residues", async
 const TARGET = { pid: 4242, start: "100", script: "codex-companion.mjs", sub: "task-worker", comm: "node", uid: 1000, reason: "geen marker-fd" };
 const PLUGIN_ARGV = ["node", "/p/scripts/codex-companion.mjs", "task-worker"];
 
+// The procfs identity a scan on this machine records (design v2.12): records
+// made by these tests must be judged here, not scanned again.
+function scanProc() {
+  let bootId = null;
+  try {
+    bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch {}
+  return LINUX ? { dev: String(fs.statSync("/proc").dev), bootId } : null;
+}
+
 function fencedDir(t, S0) {
   const dir = tmpdir(t);
   const F = path.join(dir, "state.lock");
@@ -604,6 +614,7 @@ function fencedDir(t, S0) {
     verdictReason: "test",
     scope: "test",
     declaration: null,
+    scanProc: scanProc(),
     residues: [],
     S0,
     scannedAt: new Date().toISOString(),
@@ -787,7 +798,7 @@ test("N32e: status --all names sealed, waiting-on-process and waiting-on-residue
   const live = oldProcess(t);
   await new Promise((r) => setTimeout(r, 50));
   const start = parseProcStat(fs.readFileSync(`/proc/${live.pid}/stat`, "utf8")).start;
-  const base = { version: 1, publishedAt: "2026-10-20T00:00:00Z", verdict: "initial", verdictReason: "t", scope: "t", declaration: null, scannedAt: "2026-10-20T00:00:00Z" };
+  const base = { version: 1, publishedAt: "2026-10-20T00:00:00Z", verdict: "initial", verdictReason: "t", scope: "t", declaration: null, scanProc: scanProc(), scannedAt: "2026-10-20T00:00:00Z" };
   const dirs = {
     sealed: { ...base, residues: [], S0: [], sealedAt: "2026-10-20T00:00:01Z" },
     process: { ...base, residues: [], S0: [{ ...TARGET, pid: live.pid, start }], sealedAt: null },
