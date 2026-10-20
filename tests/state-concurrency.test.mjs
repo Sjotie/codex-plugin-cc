@@ -14,7 +14,8 @@ import {
   resolveJobLogFile,
   resolveStateDir,
   resolveStateFile,
-  saveState,
+  __saveStateForTest as saveState,
+  openStateLock,
   upsertJob
 } from "../plugins/codex/scripts/lib/state.mjs";
 
@@ -243,113 +244,34 @@ test("saveState with stale snapshot does not delete concurrently-added jobs", ()
 });
 
 // ---------------------------------------------------------------------------
-// Test 3: stale lock from a dead process is automatically reclaimed.
+// Test 3 (#1916, design D3): an old lock file is never reclaimed automatically,
+// not even with a dead or unreadable PID. The writer waits and the timeout
+// names the guided route (state-lock adopt-legacy after a drain-check). The
+// old #1822 link tests are gone with the link publication; T5 in
+// state-lock-races.test.mjs covers the fallback race.
 // ---------------------------------------------------------------------------
-test("stale lock from dead process is automatically reclaimed", () => {
-  const workspace = makeTempDir();
-  const lockFile = path.join(resolveStateDir(workspace), LOCK_FILE_NAME);
-
-  // Ensure state dir exists
-  fs.mkdirSync(resolveStateDir(workspace), { recursive: true });
-
-  // Write a lock file with a PID that almost certainly doesn't exist.
-  fs.writeFileSync(lockFile, "999999", "utf8");
-  assert.equal(fs.existsSync(lockFile), true, "Lock file should exist before call");
-
-  // upsertJob should succeed by reclaiming the stale lock.
-  upsertJob(workspace, { id: "job-stale-lock", status: "running" });
-
-  const jobs = listJobs(workspace);
-  assert.equal(jobs.length, 1);
-  assert.equal(jobs[0].id, "job-stale-lock");
-
-  // Lock file should be cleaned up after the operation.
-  assert.equal(fs.existsSync(lockFile), false, "Lock file should be removed after operation");
-});
-
-// ---------------------------------------------------------------------------
-// Test 3b: corrupt/empty lock file is treated as stale and reclaimed.
-// ---------------------------------------------------------------------------
-test("corrupt lock file (empty or non-numeric) is treated as stale", () => {
-  const workspace = makeTempDir();
-  const lockFile = path.join(resolveStateDir(workspace), LOCK_FILE_NAME);
-
-  fs.mkdirSync(resolveStateDir(workspace), { recursive: true });
-
-  // Case 1: empty lock file (process crashed before writing PID).
-  fs.writeFileSync(lockFile, "", "utf8");
-  upsertJob(workspace, { id: "job-corrupt-empty", status: "running" });
-  let jobs = listJobs(workspace);
-  assert.equal(jobs.length, 1, "Should succeed with empty lock file");
-  assert.equal(fs.existsSync(lockFile), false, "Empty lock should be removed");
-
-  // Case 2: non-numeric content (corrupted).
-  fs.writeFileSync(lockFile, "garbage", "utf8");
-  upsertJob(workspace, { id: "job-corrupt-garbage", status: "running" });
-  jobs = listJobs(workspace);
-  assert.equal(jobs.length, 2, "Should succeed with corrupt lock file");
-  assert.equal(fs.existsSync(lockFile), false, "Corrupt lock should be removed");
-});
-
-// ---------------------------------------------------------------------------
-// Test 3c (#1822): on a file system without hard links, link() fails with one
-// of these codes and the lock is created directly instead.
-// ---------------------------------------------------------------------------
-for (const code of ["EPERM", "ENOTSUP", "EXDEV", "ENOSYS", "EINVAL"]) {
-  test(`without hard links (${code}) the lock is created directly and still released`, (t) => {
+for (const [label, content] of [
+  ["a dead PID", "999999"],
+  ["an empty file", ""],
+  ["garbage", "garbage"]
+]) {
+  test(`an old lock file with ${label} is never reclaimed; the timeout names adopt-legacy`, () => {
     const workspace = makeTempDir();
-    const link = t.mock.method(fs, "linkSync", () => {
-      throw Object.assign(new Error(`link: ${code}`), { code });
+    const lockFile = path.join(resolveStateDir(workspace), LOCK_FILE_NAME);
+    fs.mkdirSync(resolveStateDir(workspace), { recursive: true });
+    fs.writeFileSync(lockFile, content, "utf8");
+    const before = fs.lstatSync(lockFile);
+
+    const lock = openStateLock(workspace);
+    assert.throws(() => lock.acquire({ deadlineMs: 300 }), (error) => {
+      assert.equal(error.code, "ESTATELOCKTIMEOUT");
+      assert.match(error.message, /^Timed out waiting for state lock: /);
+      if (content === "999999") assert.match(error.message, /adopt-legacy/);
+      return true;
     });
-
-    upsertJob(workspace, { id: `job-${code}`, status: "running" });
-
-    assert.ok(link.mock.callCount() > 0, "link was attempted");
-    assert.deepEqual(listJobs(workspace).map((job) => job.id), [`job-${code}`]);
-    const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
-    assert.deepEqual(lockFiles, [], "no lock or pending lock file left");
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Test 3d (#1822): a retried link() over NFS can report EEXIST although the
-// link went through. The writer must see that the lock is its own instead of
-// waiting on itself until the lock times out.
-// ---------------------------------------------------------------------------
-test("a link reported as EEXIST that did go through counts as acquired", (t) => {
-  const workspace = makeTempDir();
-  const realLink = fs.linkSync;
-  t.mock.method(fs, "linkSync", (from, to) => {
-    realLink(from, to);
-    throw Object.assign(new Error("link: EEXIST"), { code: "EEXIST" });
-  });
-
-  const started = Date.now();
-  upsertJob(workspace, { id: "job-nfs", status: "running" });
-
-  assert.ok(Date.now() - started < 2000, "acquired at once, not after the lock timeout");
-  assert.deepEqual(listJobs(workspace).map((job) => job.id), ["job-nfs"]);
-  const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
-  assert.deepEqual(lockFiles, []);
-});
-
-// ---------------------------------------------------------------------------
-// Test 3e (#1822): any other link() error is not taken for "no hard links":
-// it reaches the caller, and neither the lock nor the pending file stays.
-// EACCES is one of them on purpose: it can be a real permission problem.
-// ---------------------------------------------------------------------------
-for (const code of ["EIO", "EACCES"]) {
-  test(`another link error (${code}) fails the write and leaves no lock behind`, (t) => {
-    const workspace = makeTempDir();
-    t.mock.method(fs, "linkSync", () => {
-      throw Object.assign(new Error(`link: ${code}`), { code });
-    });
-
-    assert.throws(() => upsertJob(workspace, { id: `job-${code}`, status: "running" }), { code });
-
-    const lockFiles = fs.readdirSync(resolveStateDir(workspace)).filter((f) => f.startsWith(LOCK_FILE_NAME));
-    assert.deepEqual(lockFiles, []);
-    assert.deepEqual(listJobs(workspace), []);
+    const after = fs.lstatSync(lockFile);
+    assert.equal(after.ino, before.ino, "the old lock file is untouched");
+    assert.equal(fs.readFileSync(lockFile, "utf8"), content);
   });
 }
 

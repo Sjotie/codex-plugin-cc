@@ -3,12 +3,28 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // #1983: a test run started inside an agent session inherits that session's ids, and
 // status/result then hide every job written without them. Tests own their environment.
 for (const name of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_TRANSCRIPT_PATH", "CLAUDE_CODE_SESSION_ID"]) {
   delete process.env[name];
 }
+
+// #1916: the seal of the state lock scans every process on the machine, and
+// other sessions on a developer machine may run old plugin processes. Tests
+// and every node process they start see only the processes a test exposes
+// (tests/fenced-lock/scan-scope.mjs); the default scope is empty.
+if (!process.env.FENCED_LOCK_SCAN_SCOPE) {
+  const scope = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "fenced-lock-scope-")), "scan-scope");
+  fs.writeFileSync(scope, "");
+  process.env.FENCED_LOCK_SCAN_SCOPE = scope;
+}
+const SCAN_SCOPE_MODULE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fenced-lock", "scan-scope.mjs");
+if (!String(process.env.NODE_OPTIONS ?? "").includes("scan-scope.mjs")) {
+  process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(SCAN_SCOPE_MODULE).href}`.trim();
+}
+await import("./fenced-lock/scan-scope.mjs");
 
 export function makeTempDir(prefix = "codex-plugin-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));

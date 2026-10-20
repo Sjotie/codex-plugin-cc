@@ -1,0 +1,1 @@
+fenced-lock protocol 1 (#1916). Elk proces dat fenced-lock.mjs laadt, houdt dit bestand open; de drain-check herkent zo nieuwe processen. Niet verwijderen of hernoemen.

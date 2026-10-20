@@ -9,8 +9,8 @@ import {
   readJobFile,
   reconcileJobWorkerState,
   resolveJobFile,
-  upsertJob,
-  writeJobFile
+  updateJobRecord,
+  upsertJob
 } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -271,9 +271,18 @@ export async function waitForTerminalJob(workspaceRoot, jobId, options = {}) {
       if (storedJob) {
         const reconciliation = reconcileJobWorkerState(workspaceRoot, storedJob);
         if (reconciliation.outcome === "failed") {
-          storedJob = reconciliation.job;
-          writeJobFile(workspaceRoot, jobId, storedJob);
-          upsertJob(workspaceRoot, storedJob);
+          // Re-check under the lock: a cancel or the worker's own final record
+          // may have landed since this read (design §6.2, A4).
+          const failedRecord = reconciliation.job;
+          storedJob = updateJobRecord(workspaceRoot, jobId, (existing) => {
+            if (!existing || !isWaitingJobStatus(existing.status)) {
+              return null;
+            }
+            if (Number.isInteger(existing.pid) && existing.pid > 0 && isProcessAlive(existing.pid)) {
+              return null;
+            }
+            return { ...existing, ...failedRecord };
+          }) ?? storedJob;
         } else if (reconciliation.outcome === "terminal") {
           storedJob = reconciliation.storedJob;
           upsertJob(workspaceRoot, reconciliation.job);
@@ -351,16 +360,12 @@ export function settleCancellationAfterTermination(
     pid,
     errorMessage: CANCELLATION_TERMINATION_FAILED_MESSAGE
   };
-  writeJobFile(workspaceRoot, job.id, restoredJob);
-  upsertJob(workspaceRoot, {
-    ...job,
-    status: job.status,
-    phase: restoredJob.phase,
-    pid,
+  // JSON and index in one locked update, JSON first (design §6.2, A7).
+  updateJobRecord(workspaceRoot, job.id, () => ({
+    ...restoredJob,
     completedAt: job.completedAt ?? null,
-    cancelledAt: job.cancelledAt ?? null,
-    errorMessage: CANCELLATION_TERMINATION_FAILED_MESSAGE
-  });
+    cancelledAt: job.cancelledAt ?? null
+  }));
 
   return {
     processStopped: false,

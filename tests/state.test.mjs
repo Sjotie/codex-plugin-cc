@@ -11,7 +11,7 @@ import {
   resolveJobLogFile,
   resolveStateDir,
   resolveStateFile,
-  saveState,
+  __saveStateForTest as saveState,
   writeJobFile
 } from "../plugins/codex/scripts/lib/state.mjs";
 

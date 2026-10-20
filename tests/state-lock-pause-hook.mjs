@@ -53,3 +53,24 @@ fs.readFileSync = function (p, ...rest) {
   if (typeof p === "string" && path.basename(p) === "state.json") pause("state-read");
   return out;
 };
+
+// The new lock (#1916): state.lock is a fence directory and the lock is an
+// SQLite transaction on state.lock.db. "lock-visible" is right after BEGIN
+// EXCLUSIVE succeeds; a BUSY means another writer holds it.
+try {
+  const { DatabaseSync } = await import("node:sqlite");
+  const exec = DatabaseSync.prototype.exec;
+  DatabaseSync.prototype.exec = function (sql) {
+    const begin = String(sql).trim().toUpperCase().startsWith("BEGIN");
+    try {
+      const out = exec.call(this, sql);
+      if (begin) pause("lock-visible");
+      return out;
+    } catch (error) {
+      if (begin && (error.errcode & 0xff) === 5) fs.writeFileSync(path.join(dir, `${name}.waiting`), "busy");
+      throw error;
+    }
+  };
+} catch {
+  // no node:sqlite: only the old lock
+}

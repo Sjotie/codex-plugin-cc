@@ -27,6 +27,7 @@
 //
 // Events written to WRITER_BARRIERS: <role>.paused.<point>, <role>.entered,
 // <role>.contended, <role>.fenced, <role>.overlap, <role>.done, <role>.error
+import "./scan-scope.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";

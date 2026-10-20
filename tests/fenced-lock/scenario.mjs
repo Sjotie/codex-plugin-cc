@@ -42,9 +42,14 @@ export function scenario(t, { pluginData: sharedPluginData } = {}) {
     }
     return list.find(has);
   };
+  const scanScope = path.join(barriers, "scan-scope");
+  fs.writeFileSync(scanScope, "");
+  // Make a process visible to the seal scans of this scenario (scan-scope.mjs).
+  const expose = (pid) => fs.appendFileSync(scanScope, `${pid}\n`);
   const childEnv = (extra = {}) => ({
     ...process.env,
     CLAUDE_PLUGIN_DATA: pluginData,
+    FENCED_LOCK_SCAN_SCOPE: scanScope,
     ...extra
   });
 
@@ -83,7 +88,7 @@ export function scenario(t, { pluginData: sharedPluginData } = {}) {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  return { root, workspace, barriers, pluginData, has, signal, wait, start, errors, childEnv };
+  return { root, workspace, barriers, pluginData, has, signal, wait, start, errors, childEnv, expose };
 }
 
 // An external process that tries to take the new kernel lock once and reports

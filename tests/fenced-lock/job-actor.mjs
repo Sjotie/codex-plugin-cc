@@ -12,6 +12,7 @@
 //                    (renameSync: the target); action: pause | kill | fail:<CODE>
 //
 // Events: <role>.paused.<name>, <role>.done (with the JSON result), <role>.error
+import "./scan-scope.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";

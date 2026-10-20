@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
+import { openFencedLock } from "./fenced-lock.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -17,13 +19,9 @@ const RESUMABLE_TASK_MAX_AGE_ENV = "CODEX_COMPANION_RESUMABLE_TASK_MAX_AGE_MS";
 const DEFAULT_RESUMABLE_TASK_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting.";
 
-const LOCK_FILE_NAME = "state.lock";
+const LOCK_NAME = "state.lock";
 const LOCK_RETRY_DELAY_MS = 50;
 const LOCK_TIMEOUT_MS = 10000;
-// link() errors that mean the file system has no hard links (FAT, some
-// SMB, sshfs and FUSE mounts), as opposed to a lock that already exists.
-// EACCES stays out: it can also be a real permission problem.
-const LINK_UNSUPPORTED_CODES = new Set(["EPERM", "ENOTSUP", "EXDEV", "ENOSYS", "EINVAL"]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -69,101 +67,54 @@ export function ensureStateDir(cwd) {
 }
 
 // ---------------------------------------------------------------------------
-// File locking — serializes concurrent updateState / saveState calls so the
-// read-modify-write cycle in updateState() is atomic across processes.
-// The lock file holds the owner's PID so stale locks from crashed processes
-// can be reclaimed; publishLock() makes it appear with that PID already in it.
+// State lock (#1916): a fence directory on state.lock plus a kernel lock on
+// state.lock.db, through the shared fenced-lock module. Old plugin versions
+// cannot take or remove the fence; a fence admits new writers only once it is
+// sealed (no old plugin process from before the fence still alive).
 // ---------------------------------------------------------------------------
 
-function resolveLockFile(cwd) {
-  return path.join(resolveStateDir(cwd), LOCK_FILE_NAME);
-}
+const PLUGIN_SCRIPT_RE = /[\\/]scripts[\\/](codex-companion|session-lifecycle-hook|stop-review-gate-hook|app-server-broker)\.mjs$/;
+const COMPANION_SCRIPT = fileURLToPath(new URL("../codex-companion.mjs", import.meta.url));
 
-function sleepSync(ms) {
-  // Synchronous sleep without burning CPU: Atomics.wait blocks the thread
-  // until the timeout elapses (the buffer is never notified).
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-// Publish the lock with its PID already in it: write a private file, then
-// link it into place. link() fails with EEXIST just like O_EXCL, but other
-// processes never see an empty state.lock from a live owner. An empty lock
-// reads as stale in acquireLock, so creating the file first and writing the
-// PID second let a second writer take the lock from a live first one, and
-// both then saved state from their own snapshot (#1822).
-function publishLock(lockFile) {
-  const pendingFile = `${lockFile}.${process.pid}`;
-  try {
-    // Outside the link catch: a failed write is not "no hard links".
-    fs.writeFileSync(pendingFile, String(process.pid));
-    try {
-      fs.linkSync(pendingFile, lockFile);
-    } catch (err) {
-      // A retried link() over NFS can report EEXIST for a link that did go
-      // through; two links on our pending file mean state.lock is ours.
-      if (err.code === "EEXIST" && fs.statSync(pendingFile).nlink === 2) return;
-      if (!LINK_UNSUPPORTED_CODES.has(err.code)) throw err;
-      // No hard links here: create the lock directly, as before #1822. A writer
-      // that arrives between the create and the write can still take it over.
-      const fd = fs.openSync(lockFile, "wx");
-      fs.writeFileSync(fd, String(process.pid));
-      fs.closeSync(fd);
-    }
-  } finally {
-    fs.rmSync(pendingFile, { force: true });
+// A plugin process is one whose argv names one of the plugin's scripts (design §5).
+export function matchPluginArgv(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const m = PLUGIN_SCRIPT_RE.exec(argv[i]);
+    if (m) return { script: `${m[1]}.mjs`, sub: String(argv[i + 1] ?? "").slice(0, 64) || null };
   }
+  return null;
 }
 
-function acquireLock(cwd) {
-  ensureStateDir(cwd);
-  const lockFile = resolveLockFile(cwd);
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      publishLock(lockFile);
-      return true;
-    } catch (err) {
-      if (err.code !== "EEXIST") throw err;
-      // Lock exists — check if the owner is still alive.
-      try {
-        const content = fs.readFileSync(lockFile, "utf8").trim();
-        const pid = parseInt(content, 10);
-        // Treat NaN, 0, or dead PID as stale/corrupt.
-        if (!pid || !isProcessAlive(pid)) {
-          // Re-read before unlinking: another process may have already
-          // reclaimed this lock with a fresh PID since our first read.
-          const recheck = fs.readFileSync(lockFile, "utf8").trim();
-          if (recheck === content) {
-            fs.unlinkSync(lockFile);
-          }
-          continue;
-        }
-      } catch {
-        // Lock file was removed between checks — retry immediately.
-        continue;
-      }
-      sleepSync(LOCK_RETRY_DELAY_MS);
-    }
-  }
-  return false;
+function stateLockOptions(cwd) {
+  return {
+    argvMatch: matchPluginArgv,
+    // O2 leaves state.lock.<pid>; with two names it reads as "already mine" (design §4.1).
+    residueMatch: (name) => /^state\.lock\.[0-9]+$/.test(name),
+    // The old broker only imports resolveStateDir from state.mjs (bouwvoorwaarde 4).
+    noLockPathScripts: new Set(["app-server-broker.mjs"]),
+    deadlineMs: LOCK_TIMEOUT_MS,
+    retryMs: LOCK_RETRY_DELAY_MS,
+    ownerInfo: () => ({ script: path.basename(process.argv[1] ?? "") }),
+    timeoutHint: `zie: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"`
+  };
 }
 
-function releaseLock(cwd) {
-  try {
-    fs.unlinkSync(resolveLockFile(cwd));
-  } catch {
-    // Lock already removed — nothing to do.
-  }
+export function resolveLockPath(cwd) {
+  return path.join(resolveStateDir(cwd), LOCK_NAME);
+}
+
+export function openStateLock(cwd) {
+  return openFencedLock(resolveLockPath(cwd), stateLockOptions(cwd));
 }
 
 function withStateLock(cwd, fn) {
-  if (!acquireLock(cwd)) {
-    throw new Error(`Timed out waiting for state lock: ${resolveLockFile(cwd)}`);
-  }
+  ensureStateDir(cwd);
+  const lock = openStateLock(cwd);
+  const handle = lock.acquire();
   try {
-    return fn();
+    return fn({ lock, handle });
   } finally {
-    releaseLock(cwd);
+    lock.release(handle);
   }
 }
 
@@ -210,7 +161,7 @@ function isRecentJob(job, nowMs, maxAgeMs) {
   return Number.isFinite(updatedMs) && nowMs - updatedMs < maxAgeMs;
 }
 
-function pruneJobs(jobs) {
+function pruneJobs(jobs, protectedByEffective = new Set()) {
   const sorted = [...jobs].sort(byNewestFirst);
   if (sorted.length <= MAX_JOBS) {
     return sorted;
@@ -228,7 +179,7 @@ function pruneJobs(jobs) {
   const protectedIds = new Set();
   const sessionsWithResumable = new Set();
   for (const job of sorted) {
-    if (isWaitingJobStatus(job.status)) {
+    if (isWaitingJobStatus(job.status) || protectedByEffective.has(job.id)) {
       protectedIds.add(job.id);
     }
     const sessionKey = job.sessionId ?? "";
@@ -274,15 +225,77 @@ function removeFileIfExists(filePath) {
   }
 }
 
+// The effective status of an index member (design §6.5): its job JSON when
+// that is readable and names the same id, the index copy when there is no
+// JSON, and "unknown" otherwise. Unknown members are never pruned.
+const EFFECTIVE_FIELDS = ["status", "phase", "pid", "completedAt", "threadId", "turnId", "summary", "errorMessage", "failure"];
+
+function readEffective(cwd, job) {
+  let raw;
+  try {
+    raw = fs.readFileSync(resolveJobFile(cwd, job.id), "utf8");
+  } catch (error) {
+    return error?.code === "ENOENT" ? { source: "index" } : { source: "unknown" };
+  }
+  try {
+    const record = JSON.parse(raw);
+    if (record && record.id === job.id && typeof record.status === "string") {
+      return { source: "json", record };
+    }
+  } catch {
+    // unreadable: unknown
+  }
+  return { source: "unknown" };
+}
+
+function applyEffective(job, effective) {
+  if (effective.source !== "json") {
+    return job;
+  }
+  let next = job;
+  for (const field of EFFECTIVE_FIELDS) {
+    if (Object.hasOwn(effective.record, field) && effective.record[field] !== job[field]) {
+      next = next === job ? { ...job } : next;
+      next[field] = effective.record[field];
+    }
+  }
+  return next;
+}
+
+function renameUnderLock(tempFile, target, ctx) {
+  try {
+    ctx.lock.assertOwned(ctx.handle);
+    fs.renameSync(tempFile, target);
+  } catch (error) {
+    fs.rmSync(tempFile, { force: true });
+    throw error;
+  }
+}
+
 /**
- * Internal save — caller must already hold the state lock.
- * Writes atomically (temp file + rename) so concurrent readers never see a
- * partially-written state.json.
+ * Internal save; the caller holds the state lock (ctx). Commit before prune
+ * (design §6.3): the index is renamed into place first, and only then are the
+ * artifacts removed of exactly the jobs the prune dropped from the index read
+ * under this lock. A crash in between leaves orphans, never an index entry
+ * without its files.
  */
-function saveStateLocked(cwd, state) {
-  const previousJobs = loadState(cwd).jobs;
+function saveStateLocked(cwd, state, ctx) {
+  const current = loadState(cwd);
   ensureStateDir(cwd);
-  const nextJobs = pruneJobs(state.jobs ?? []);
+  let jobs = state.jobs ?? [];
+  const protectedIds = new Set();
+  if (jobs.length > MAX_JOBS) {
+    // Only a commit that would prune needs the effective status (§6.5).
+    jobs = jobs.map((job) => {
+      const effective = readEffective(cwd, job);
+      if (effective.source === "unknown") {
+        protectedIds.add(job.id);
+        return job;
+      }
+      return applyEffective(job, effective);
+    });
+  }
+  const nextJobs = pruneJobs(jobs, protectedIds);
   const nextState = {
     version: STATE_VERSION,
     config: {
@@ -292,35 +305,42 @@ function saveStateLocked(cwd, state) {
     jobs: nextJobs
   };
 
-  const retainedIds = new Set(nextJobs.map((job) => job.id));
-  for (const job of previousJobs) {
-    if (retainedIds.has(job.id)) {
-      continue;
-    }
-    removeJobFile(resolveJobFile(cwd, job.id));
-    removeFileIfExists(job.logFile);
-  }
-
   const stateFile = resolveStateFile(cwd);
   const tempFile = `${stateFile}.tmp.${process.pid}`;
   fs.writeFileSync(tempFile, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
-  fs.renameSync(tempFile, stateFile);
+  renameUnderLock(tempFile, stateFile, ctx);
+
+  const retainedIds = new Set(nextJobs.map((job) => job.id));
+  const offeredIds = new Set(jobs.map((job) => job.id));
+  for (const job of current.jobs) {
+    if (retainedIds.has(job.id) || !offeredIds.has(job.id)) {
+      continue;
+    }
+    try {
+      removeJobFile(resolveJobFile(cwd, job.id));
+      removeFileIfExists(job.logFile);
+    } catch (error) {
+      process.stderr.write(`state: committed; cleanup failed for job ${job.id} (${error?.code ?? error?.message})\n`);
+    }
+  }
   return nextState;
 }
 
-/**
- * Persist state, acquiring the lock first to avoid racing with concurrent
- * updateState / saveState callers.
- */
-export function saveState(cwd, state) {
-  return withStateLock(cwd, () => saveStateLocked(cwd, state));
+// Replacing the index with a snapshot read outside the lock loses jobs that
+// other writers added meanwhile, so saveState is internal (design §6.4).
+// Change the index with updateState, which reads it under the lock.
+function saveState(cwd, state) {
+  return withStateLock(cwd, (ctx) => saveStateLocked(cwd, state, ctx));
 }
 
+// Tests only: write a full index (prune behaviour) under the lock.
+export const __saveStateForTest = saveState;
+
 export function updateState(cwd, mutate) {
-  return withStateLock(cwd, () => {
+  return withStateLock(cwd, (ctx) => {
     const state = loadState(cwd);
     mutate(state);
-    return saveStateLocked(cwd, state);
+    return saveStateLocked(cwd, state, ctx);
   });
 }
 
@@ -350,7 +370,7 @@ export function upsertJob(cwd, jobPatch) {
 }
 
 export function updateJobRecord(cwd, jobId, mutate) {
-  return withStateLock(cwd, () => {
+  return withStateLock(cwd, (ctx) => {
     const jobFile = resolveJobFile(cwd, jobId);
     let existing = null;
     try {
@@ -366,7 +386,8 @@ export function updateJobRecord(cwd, jobId, mutate) {
       return existing;
     }
 
-    writeJobFile(cwd, jobId, nextJob);
+    // The job JSON first, then the index (design §6.5).
+    writeJobFileLocked(cwd, jobId, nextJob, ctx);
     const state = loadState(cwd);
     const timestamp = nowIso();
     const existingIndex = state.jobs.findIndex((job) => job.id === jobId);
@@ -383,7 +404,7 @@ export function updateJobRecord(cwd, jobId, mutate) {
         updatedAt: timestamp
       };
     }
-    saveStateLocked(cwd, state);
+    saveStateLocked(cwd, state, ctx);
     return nextJob;
   });
 }
@@ -456,48 +477,59 @@ export function reconcileJobWorkerState(cwd, job) {
   };
 }
 
-function reconcileActiveJobs(cwd, state) {
-  const staleJobs = [];
-  let changed = false;
-  const jobs = state.jobs.map((job) => {
-    const reconciliation = reconcileJobWorkerState(cwd, job);
-    if (reconciliation.outcome === "unchanged") {
-      return job;
-    }
+function workerGone(job) {
+  return isWaitingJobStatus(job.status) && Number.isInteger(job.pid) && job.pid > 0 && !isProcessAlive(job.pid);
+}
 
-    changed = true;
-    if (reconciliation.outcome === "failed") {
-      staleJobs.push(reconciliation.job);
-    }
-    return reconciliation.job;
+function needsReconcile(cwd, job) {
+  const effective = readEffective(cwd, job);
+  if (effective.source === "unknown") {
+    return false;
+  }
+  const next = applyEffective(job, effective);
+  return next !== job || workerGone(next);
+}
+
+// Reconcile under the lock, on the effective status of every member (design
+// §6.2, §6.5): a waiting job whose worker is gone becomes failed (JSON first,
+// then the index); an index that lags behind its JSON is brought up to date.
+function reconcileUnderLock(cwd) {
+  return withStateLock(cwd, (ctx) => {
+    const state = loadState(cwd);
+    state.jobs = state.jobs.map((job) => {
+      const effective = readEffective(cwd, job);
+      if (effective.source === "unknown") {
+        return job;
+      }
+      let next = applyEffective(job, effective);
+      if (workerGone(next)) {
+        const completedAt = nowIso();
+        const failed = {
+          status: "failed",
+          phase: "failed",
+          pid: null,
+          completedAt,
+          updatedAt: completedAt,
+          errorMessage: UNREPORTED_PROCESS_EXIT_MESSAGE
+        };
+        if (effective.source === "json") {
+          writeJobFileLocked(cwd, job.id, { ...effective.record, ...failed }, ctx);
+        }
+        next = { ...next, ...failed };
+      }
+      return next;
+    });
+    return saveStateLocked(cwd, state, ctx).jobs;
   });
-
-  if (!changed) {
-    return state.jobs;
-  }
-
-  const nextState = saveState(cwd, { ...state, jobs });
-  for (const job of staleJobs) {
-    const jobFile = resolveJobFile(cwd, job.id);
-    try {
-      writeJobFile(cwd, job.id, {
-        ...readJobFile(jobFile),
-        status: job.status,
-        phase: job.phase,
-        pid: job.pid,
-        completedAt: job.completedAt,
-        errorMessage: job.errorMessage
-      });
-    } catch {
-      // An absent or unreadable per-job file does not prevent the index reconciliation.
-    }
-  }
-  return nextState.jobs;
 }
 
 export function listJobs(cwd) {
   const state = loadState(cwd);
-  return reconcileActiveJobs(cwd, state);
+  // Lock-free first look: only take the lock when something needs a change.
+  if (!state.jobs.some((job) => needsReconcile(cwd, job))) {
+    return state.jobs;
+  }
+  return reconcileUnderLock(cwd);
 }
 
 export function setConfig(cwd, key, value) {
@@ -524,6 +556,17 @@ export function writeJobFile(cwd, jobId, payload) {
   const tempFile = `${jobFile}.${process.pid}.tmp`;
   fs.writeFileSync(tempFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   fs.renameSync(tempFile, jobFile);
+  return jobFile;
+}
+
+// The same write for an existing record, under the state lock: the rename
+// only happens while this process still owns the lock (design §6.2).
+function writeJobFileLocked(cwd, jobId, payload, ctx) {
+  ensureStateDir(cwd);
+  const jobFile = resolveJobFile(cwd, jobId);
+  const tempFile = `${jobFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tempFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  renameUnderLock(tempFile, jobFile, ctx);
   return jobFile;
 }
 
