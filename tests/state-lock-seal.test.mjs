@@ -31,6 +31,16 @@ function record(s) {
   }
 }
 
+// Wait until the seal record holds a scan (S0 is a list) that names pid, up to
+// a deadline: a scan under load can take longer than any fixed wait.
+async function waitInS0(s, pid, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!(record(s)?.S0 ?? []).some((p) => p.pid === pid) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return record(s);
+}
+
 // An idle process that looks like an old plugin process: argv names a plugin
 // script, and it never loads the new module (no protocol marker).
 function idleOld(s, t, { script = "codex-companion.mjs", sub = "task-worker", body = "sleep 60; :" } = {}) {
@@ -317,9 +327,10 @@ test("N24c: an adopter killed between its two renames: the next writer fences la
   assert.equal((await d.exit).signal, "SIGKILL");
   assert.equal(fs.existsSync(fence), false, "precondition: empty path, Y's file in Q");
   const w = s.start("w");
-  await new Promise((r) => setTimeout(r, 400));
+  const r = await waitInS0(s, y.pid); // W's lazy fence and its scan
+  assert.ok(r?.S0.some((p) => p.pid === y.pid), JSON.stringify(r));
+  await new Promise((r) => setTimeout(r, 200));
   assert.equal(s.has("w.entered"), false);
-  assert.ok(record(s)?.S0.some((p) => p.pid === y.pid));
   s.signal("y.release");
   await y.exit;
   await s.wait("w.entered");
@@ -504,9 +515,10 @@ test("N31a: an old O2 writer with a reused pid cannot enter after the seal: the 
   await s.wait("kk.entered"); // the acceptance branch: in its section without a file on F
   assert.equal(fs.existsSync(path.join(stateDir, `state.lock.${kk.pid}`)), false, "its finally removed the residue");
   const w = s.start("w");
-  await new Promise((r) => setTimeout(r, 400));
-  assert.equal(s.has("w.entered"), false, "the new scan finds K′");
-  assert.ok(record(s).S0.some((p) => p.pid === kk.pid));
+  const r = await waitInS0(s, kk.pid);
+  assert.ok(r?.S0.some((p) => p.pid === kk.pid), `the new scan finds K′: ${JSON.stringify(r)}`);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(s.has("w.entered"), false, "W waits for K′");
   s.signal("kk.release");
   await kk.exit;
   await s.wait("w.entered");
