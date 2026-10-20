@@ -1067,8 +1067,79 @@ test("R9e: seal --declare-cross-namespace on a foreign record scans here under t
 test("R9f: stop-old in the init namespace scans a record from another procfs again before choosing targets", (t) => {
   const r = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-0", init: true } });
   const signals = [];
-  const result = boundLock(r.F, { here: { dev: "Y", bootId: "boot-1", init: true }, domain: INITIAL, signals }).stopOld({ graceMs: 50 });
+  // The recorded pid looks alive from here: only the rescan keeps stop-old from signalling it.
+  const result = boundLock(r.F, { here: { dev: "Y", bootId: "boot-1", init: true }, domain: INITIAL, signals, alivePids: [TARGET.pid] }).stopOld({ graceMs: 50 });
   assert.deepEqual(signals, [], "the foreign pids were never signalled");
   assert.equal(result.result, "sealed", JSON.stringify(result));
   assert.equal(r.read().scanProc.bootId, "boot-1");
+});
+
+test("R9g: a nested reader takes init from its own domain, so an init record of the same boot stays foreign to it", (t) => {
+  if (!LINUX) {
+    t.skip("Linux procfs identity");
+    return;
+  }
+  // No procIdentity hook: the module reads this procfs and derives init from the injected domain.
+  const r = boundRecord(t, { verdict: "initial", scanProc: { ...scanProc(), dev: "another-procfs", init: true } });
+  const before = r.read();
+  const lock = openFencedLock(r.F, {
+    ...PLUGIN_OPTS,
+    domain: NESTED,
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    identityReader: () => ({ gone: true }),
+    markerReader: () => false,
+    platform: "linux"
+  });
+  assert.equal(lock.tryAcquire(), null);
+  assert.deepEqual(r.read(), before);
+});
+
+test("R9h: an unreadable boot id is not compared (no lockout)", (t) => {
+  const r = boundRecord(t, { verdict: "nested", declaration: "D", scanProc: { dev: "A", bootId: null, init: false } });
+  const h = boundLock(r.F, { here: { dev: "A", bootId: null, init: false }, domain: NESTED }).tryAcquire();
+  assert.ok(h, "the same procfs judges its own record when the boot id cannot be read");
+});
+
+test("R9i: seal --declare-cross-namespace on a sealed record changes nothing", (t) => {
+  const r = boundRecord(t, { verdict: "initial", scanProc: { ...PROC_B, init: true }, sealedAt: "2026-10-20T00:00:00Z" });
+  const before = r.read();
+  const result = boundLock(r.F, { here: PROC_A, domain: NESTED }).seal({ domainDeclaration: "x" });
+  assert.equal(result.result, "sealed");
+  assert.deepEqual(r.read(), before);
+});
+
+test("R9j: replacedForeign stays on later scans of the same procfs", (t) => {
+  const r = boundRecord(t, { verdict: "initial", scanProc: { ...PROC_B, init: true } });
+  const residue = path.join(path.dirname(r.F), "state.lock.4321");
+  fs.writeFileSync(residue, "1");
+  fs.linkSync(residue, path.join(path.dirname(r.F), "elsewhere"));
+  const lock = openFencedLock(r.F, {
+    ...PLUGIN_OPTS,
+    residueMatch: (name) => /^state\.lock\.[0-9]+$/.test(name),
+    domain: NESTED,
+    procIdentity: () => PROC_A,
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    identityReader: () => ({ gone: true }),
+    markerReader: () => false,
+    platform: "linux"
+  });
+  assert.equal(lock.seal({ domainDeclaration: "op" }).result, "waiting", "the residue holds the seal");
+  assert.ok(r.read().replacedForeign);
+  fs.rmSync(residue);
+  const h = lock.tryAcquire();
+  assert.ok(h);
+  lock.release(h);
+  assert.deepEqual(r.read().replacedForeign.S0.map((p) => p.pid), [TARGET.pid], "the audit trail survives the rescan");
+  assert.equal(r.read().declaration, "op");
+});
+
+test("R9k: a passing unknown domain verdict is read again, not kept for the life of the lock", (t) => {
+  const r = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-0", init: true } });
+  const verdicts = [{ verdict: "unknown", reason: "mountinfo unreadable (EMFILE)", scope: "t" }];
+  const lock = boundLock(r.F, { here: { dev: "Y", bootId: "boot-1", init: false }, domain: () => verdicts.shift() ?? INITIAL() });
+  // procIdentity is injected here with init false; the domain decides canJudge.
+  assert.equal(lock.tryAcquire(), null, "unknown: no judgment");
+  const h = lock.tryAcquire();
+  assert.ok(h, "initial on the next attempt: scanned again and sealed");
+  lock.release(h);
 });

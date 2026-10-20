@@ -850,12 +850,15 @@ export function openFencedLock(fencePath, options = {}) {
     return found;
   }
 
-  // The domain and the procfs of this process do not change while it lives:
-  // read them once per lock.
+  // The PID namespace of a process does not change while it lives: a
+  // definitive verdict is read once per lock. "unknown" can be a passing
+  // error (EMFILE on mountinfo, a failed canary) and is read again.
   let domainMemo = null;
   function currentDomain() {
-    domainMemo ??= o.domain ? o.domain() : domainVerdict({ platform: o.platform, procRoot: o.procRoot });
-    return domainMemo;
+    if (domainMemo) return domainMemo;
+    const d = o.domain ? o.domain() : domainVerdict({ platform: o.platform, procRoot: o.procRoot });
+    if (d.verdict !== "unknown") domainMemo = d;
+    return d;
   }
 
   // The procfs a scan read (Linux): its device, the boot id, and whether it
@@ -873,9 +876,10 @@ export function openFencedLock(fencePath, options = {}) {
       } catch {
         dev = null;
       }
-      procMemo = { dev, bootId: bootId(), init: currentDomain().verdict === "initial" };
+      procMemo = { dev, bootId: bootId() };
     }
-    return procMemo;
+    // init comes from this reader's own domain, never from the record.
+    return { ...procMemo, init: currentDomain().verdict === "initial" };
   }
 
   // Same numbering: the same boot, and either both in the init PID namespace
@@ -884,9 +888,19 @@ export function openFencedLock(fencePath, options = {}) {
     if (o.platform !== "linux") return true; // macOS: one process table, no PID namespaces
     const here = procIdentity();
     const there = r?.scanProc;
-    if (!here?.bootId || !there?.bootId || here.bootId !== there.bootId) return false;
+    if (!here || !there) return false;
+    // The boot id only tells that a record is from before a reboot; when it
+    // cannot be read it is not compared (after a reboot every recorded process
+    // is dead anyway, and a reused pid has another start time).
+    if (here.bootId && there.bootId && here.bootId !== there.bootId) return false;
     if (here.init && there.init) return true;
     return Boolean(here.dev && there.dev && here.dev === there.dev);
+  }
+
+  // May this process judge (or scan again over) record r? Only with the same
+  // numbering, or from the init namespace, which scans again.
+  function canJudge(r) {
+    return sameProc(r) || currentDomain().verdict === "initial";
   }
 
   // replaced: the foreign record an operator's declaration replaces (seal).
@@ -895,7 +909,9 @@ export function openFencedLock(fencePath, options = {}) {
     const publishedAt = previous?.publishedAt ?? nowIso();
     // A declaration speaks for the namespace it was made in: it carries over
     // only to a scan of the same procfs.
-    const decl = declaration ?? (previous && sameProc(previous) ? previous.declaration : null) ?? null;
+    const same = Boolean(previous && sameProc(previous));
+    const decl = declaration ?? (same ? previous.declaration : null) ?? null;
+    const replacedForeign = replaced ?? (same ? previous.replacedForeign : null) ?? null;
     const found = residues(); // first the residue check, then the scan (I5b, I6)
     const domain = currentDomain();
     const head = {
@@ -906,7 +922,7 @@ export function openFencedLock(fencePath, options = {}) {
       scope: domain.scope,
       declaration: decl,
       scanProc: procIdentity(),
-      ...(replaced ? { replacedForeign: replaced } : {})
+      ...(replacedForeign ? { replacedForeign } : {})
     };
     if (found.length > 0) {
       writeRecord({ ...head, residues: found, S0: null, scannedAt: null, sealedAt: null });
@@ -926,11 +942,10 @@ export function openFencedLock(fencePath, options = {}) {
   //   declaration) | processes (old ones still alive) | sealable
   function judge(r) {
     if (r.sealedAt) return { state: "sealed" };
+    if (!canJudge(r)) return { state: "foreign" };
     if (r.residues.length > 0) return { state: "residue" };
     const here = currentDomain();
-    const same = sameProc(r);
-    if (!same && here.verdict !== "initial") return { state: "foreign" };
-    if (!same || (here.verdict === "initial" && r.verdict !== "initial" && !r.declaration)) return { state: "rescan" };
+    if (!sameProc(r) || (here.verdict === "initial" && r.verdict !== "initial" && !r.declaration)) return { state: "rescan" };
     if (r.verdict !== "initial" && !r.declaration) return { state: "domain" };
     const rest = r.S0.filter((p) => stillWaitingOn(o, p));
     return rest.length > 0 ? { state: "processes", rest } : { state: "sealable" };
@@ -977,9 +992,8 @@ export function openFencedLock(fencePath, options = {}) {
         if (j.state === "residue") {
           const found = residues();
           if (found.length > 0) return { reason: residueReason(found) };
-          // The residue is gone: a new check and a new scan, after T_r; but
-          // never by a reader that cannot judge this record.
-          if (!sameProc(r) && currentDomain().verdict !== "initial") return { reason: foreignReason(r) };
+          // The residue is gone: a new check and a new scan, after T_r (judge
+          // already refused a reader that cannot judge this record).
         }
         // residue gone, or rescan (v2.7/v2.12: the init namespace scans a record from elsewhere again)
         writeSealRecord();
@@ -1340,6 +1354,7 @@ export function openFencedLock(fencePath, options = {}) {
       if (!st?.isDirectory()) return { result: "no-fence", kind: kindOf(st) };
       h.fence = fileId(st);
       const r = readRecord();
+      if (r?.sealedAt) return { result: "sealed", record: r };
       if (domainDeclaration) {
         if (r && sameProc(r)) {
           writeRecord({ ...r, declaration: domainDeclaration });
@@ -1350,7 +1365,7 @@ export function openFencedLock(fencePath, options = {}) {
           // The replaced record stays in the new one (replacedForeign).
           writeSealRecord({
             declaration: domainDeclaration,
-            replaced: r ? { verdict: r.verdict, verdictReason: r.verdictReason, scanProc: r.scanProc ?? null, S0: r.S0, residues: r.residues } : null
+            replaced: r ? { verdict: r.verdict, verdictReason: r.verdictReason, declaration: r.declaration ?? null, scanProc: r.scanProc ?? null, S0: r.S0, residues: r.residues } : null
           });
         }
       }
@@ -1393,6 +1408,7 @@ export function openFencedLock(fencePath, options = {}) {
             };
           }
           if (r.verdict !== "initial" || !sameProc(r)) {
+            // a record from elsewhere: scan again here first (canJudge: init)
             writeSealRecord();
             r = readRecord();
             if (!r) return { ok: false, result: "no-record", targets: [] };

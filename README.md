@@ -352,6 +352,14 @@ What `status` can report, and what to do:
   namespace, or macOS before its landing proof). Check by hand that no old
   plugin process runs in another namespace, then run `state-lock seal
   --declare-cross-namespace "<who, which namespaces, how drained>"`.
+- **`foreign`: the record was made in another procfs** (for example by the host
+  while you are in a container with its own `/proc`). This namespace cannot see
+  those processes, and an unseen process is not a dead one, so nothing here
+  seals it on its own. Seal from the host (any state change there, or
+  `state-lock stop-old`), or, only when you know the processes of that record
+  are gone, `state-lock seal --declare-cross-namespace "<…>"` here.
+- **`rescan`**: the record was made elsewhere; the next state change (or
+  `state-lock stop-old`) in this namespace scans again.
 
 To go back to an older plugin version (the older version cannot pass the fence):
 

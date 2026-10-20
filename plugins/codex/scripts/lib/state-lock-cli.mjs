@@ -45,7 +45,16 @@ the moved object was the expected one and the fence stands.`,
 
 Only needed when the domain verdict is not "initial" (a sandbox with its own
 PID namespace, or macOS before its landing proof). Records the declaration and
-seals once no recorded old process still lives. Exit code 0 when sealed.`,
+seals once no recorded old process still lives. Exit code 0 when sealed.
+
+When the record was made in another procfs (status: waitingOn.kind "foreign",
+e.g. by the host while this runs in a container), this namespace cannot see
+the recorded processes. Then seal scans here instead, under the declaration,
+which so also vouches that the processes of the replaced record are gone; the
+replaced record is kept in the new one (replacedForeign). Prefer sealing from
+the init PID namespace when there is one: any state change there, or
+state-lock stop-old, scans again and judges every process. A sealed record is
+never changed.`,
   "stop-old": `Usage: codex-companion state-lock stop-old (--cwd <dir> | --all) [--grace-ms 5000] [--include-unidentified]
 
 Stops only the old plugin processes an unsealed fence waits for, each after a

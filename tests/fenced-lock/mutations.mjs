@@ -47,8 +47,8 @@ export const MUTATIONS = [
     id: "no-rescan-from-initial",
     rule: "v2.7: the first initial-domain process scans again",
     file: FL,
-    from: "    if (!same || (here.verdict === \"initial\" && r.verdict !== \"initial\" && !r.declaration)) return { state: \"rescan\" };",
-    to: "    if (!same) return { state: \"rescan\" };",
+    from: "    if (!sameProc(r) || (here.verdict === \"initial\" && r.verdict !== \"initial\" && !r.declaration)) return { state: \"rescan\" };",
+    to: "    if (!sameProc(r)) return { state: \"rescan\" };",
     tests: [[SEAL, "N32b"]]
   },
   {
@@ -311,9 +311,9 @@ export const MUTATIONS = [
     id: "foreign-judged",
     rule: "v2.12 R9a: a reader of another procfs never judges the record",
     file: FL,
-    from: "    if (!same && here.verdict !== \"initial\") return { state: \"foreign\" };",
+    from: "    if (!canJudge(r)) return { state: \"foreign\" };\n",
     to: "",
-    tests: [[UNIT, "R9a"], ["tests/state-lock-sol-r2.test.mjs", "probe"]]
+    tests: [[UNIT, "R9a|R9d"], ["tests/state-lock-sol-r2.test.mjs", "probe"]]
   },
   {
     id: "no-init-key",
@@ -327,17 +327,9 @@ export const MUTATIONS = [
     id: "declaration-carries-anywhere",
     rule: "v2.12 R9c: a declaration carries over only within the same procfs",
     file: FL,
-    from: "(previous && sameProc(previous) ? previous.declaration : null)",
-    to: "previous?.declaration",
+    from: "    const decl = declaration ?? (same ? previous.declaration : null) ?? null;",
+    to: "    const decl = declaration ?? previous?.declaration ?? null;",
     tests: [[UNIT, "R9c"]]
-  },
-  {
-    id: "residue-rescan-foreign",
-    rule: "v2.12 R9d: a nested reader never rescans a foreign residue record",
-    file: FL,
-    from: "          if (!sameProc(r) && currentDomain().verdict !== \"initial\") return { reason: foreignReason(r) };",
-    to: "",
-    tests: [[UNIT, "R9d"]]
   },
   {
     id: "seal-stamps-foreign",
@@ -354,6 +346,46 @@ export const MUTATIONS = [
     from: "          if (r.verdict !== \"initial\" || !sameProc(r)) {",
     to: "          if (r.verdict !== \"initial\") {",
     tests: [[UNIT, "R9f"]]
+  },
+  {
+    id: "init-from-own-domain",
+    rule: "v2.12 R9g: init comes from the reader's own domain",
+    file: FL,
+    from: "    return { ...procMemo, init: currentDomain().verdict === \"initial\" };",
+    to: "    return { ...procMemo, init: true };",
+    tests: [[UNIT, "R9g"]]
+  },
+  {
+    id: "boot-id-required",
+    rule: "v2.12 R9h: an unreadable boot id is not compared",
+    file: FL,
+    from: "    if (here.bootId && there.bootId && here.bootId !== there.bootId) return false;",
+    to: "    if (!here.bootId || !there.bootId || here.bootId !== there.bootId) return false;",
+    tests: [[UNIT, "R9h"]]
+  },
+  {
+    id: "seal-reopens-sealed",
+    rule: "v2.12 R9i: seal on a sealed record changes nothing",
+    file: FL,
+    from: "      if (r?.sealedAt) return { result: \"sealed\", record: r };\n",
+    to: "",
+    tests: [[UNIT, "R9i"]]
+  },
+  {
+    id: "replaced-foreign-dropped",
+    rule: "v2.12 R9j: replacedForeign stays within the same procfs",
+    file: FL,
+    from: "(same ? previous.replacedForeign : null)",
+    to: "null",
+    tests: [[UNIT, "R9j"]]
+  },
+  {
+    id: "unknown-domain-cached",
+    rule: "v2.12 R9k: a passing unknown verdict is read again",
+    file: FL,
+    from: "    if (d.verdict !== \"unknown\") domainMemo = d;",
+    to: "    domainMemo = d;",
+    tests: [[UNIT, "R9k"]]
   },
   {
     id: "no-assertOwned-before-rename",
