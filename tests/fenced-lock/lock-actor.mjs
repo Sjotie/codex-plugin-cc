@@ -68,6 +68,14 @@ for (const fn of new Set(gates.map((g) => g.fn).filter((fn) => fn !== "sql"))) {
     return around(fn, target, () => original.call(this, first, second, ...rest));
   };
 }
+let procScans = 0;
+if (op.countProcScans) {
+  const readdirSync = fs.readdirSync;
+  fs.readdirSync = function (dir, ...rest) {
+    if (String(dir) === "/proc") procScans += 1;
+    return readdirSync.call(this, dir, ...rest);
+  };
+}
 let begins = 0;
 if (op.countBegins) {
   const { DatabaseSync } = await import("node:sqlite");
@@ -132,9 +140,9 @@ try {
       try {
         const handle = lock.acquire({ deadlineMs: op.deadlineMs ?? 10_000 });
         lock.release(handle);
-        result = { acquired: true, begins };
+        result = { acquired: true, begins, procScans };
       } catch (error) {
-        result = { acquired: false, code: error.code, message: error.message, begins };
+        result = { acquired: false, code: error.code, message: error.message, begins, procScans };
       }
       break;
     }

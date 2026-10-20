@@ -407,6 +407,11 @@ function linuxReader(procRoot) {
   };
 }
 
+// The /proc reader of the scan, for tests that wrap one of its calls.
+export function linuxProcReader(procRoot = "/proc") {
+  return linuxReader(procRoot);
+}
+
 function hasMarker(links) {
   return links.some((link) => link.replace(/ \(deleted\)$/, "").endsWith(`/${PROTOCOL_MARKER}`));
 }

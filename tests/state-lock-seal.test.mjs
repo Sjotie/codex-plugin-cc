@@ -613,3 +613,184 @@ test("N32c: stop-old ends a stopped old process with SIGCONT and SIGTERM/SIGKILL
   assert.equal(r.outcomes[0].outcome, "killed");
   assert.equal((await acquireOnce(s, "w2")).acquired, true);
 });
+
+// ---------------------------------------------------------------------------
+// N27d, N24b, N22, U3 (old worker between open(wx) and its pid write)
+// ---------------------------------------------------------------------------
+
+test("N27d: wait rounds read only the pids of S0, never all of /proc again", { skip: process.platform !== "linux" && "Linux /proc" }, async (t) => {
+  const s = scenario(t);
+  idleOld(s, t);
+  const a = s.actor("w", { op: "acquire", deadlineMs: 800, countBegins: true, countProcScans: true });
+  await a.exit;
+  const r = s.result("w");
+  assert.equal(r.acquired, false, JSON.stringify(r));
+  assert.ok(r.begins >= 3, `only ${r.begins} rounds`);
+  assert.equal(r.procScans, 1, `the /proc enumeration ran ${r.procScans} times in ${r.begins} rounds`);
+});
+
+test("N24b: a writer holding A between assertOwned and the index rename keeps its commit; an adopter and a second writer wait", async (t) => {
+  const s = scenario(t);
+  const { stateDir } = paths(s);
+  const w1 = s.actor("w1", { op: "write" }, [{ fn: "renameSync", match: "state\\.json$", when: "before", action: "pause", name: "index" }]);
+  await s.wait("w1.paused.index");
+  const adopter = s.actor("adopter", { op: "adopt", args: { expectDev: "1", expectIno: "1", expectSha: "0".repeat(64) } });
+  const w2 = s.actor("w2", { op: "write" });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(s.has("adopter.done"), false, "the adopter did not wait for A");
+  assert.equal(s.has("w2.done"), false, "the second writer did not wait for A");
+  s.signal("w1.resume.index");
+  await Promise.all([w1.exit, adopter.exit, w2.exit]);
+  assert.deepEqual(s.errors(), []);
+  assert.equal(s.result("adopter").code, "ADOPT_NOT_LEGACY");
+  const ids = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.map((j) => j.id).sort();
+  assert.deepEqual(ids, ["w1", "w2"]);
+});
+
+test("U3: an old O1 worker paused between open(wx) and its pid write: drain not-drained, adopt refuses, nothing moved", async (t) => {
+  const s = scenario(t);
+  const { fence } = paths(s);
+  old(s, "o", "o1", { gates: { publication: "pause" } });
+  await s.wait("o.paused.publication");
+  const drain = s.actor("drain", { op: "drain" });
+  await drain.exit;
+  assert.equal(s.result("drain").result, "not-drained");
+  const st = await statusOf(s);
+  assert.equal(st.kind, "file");
+  const a = s.actor("a", { op: "adopt", args: { expectDev: st.legacy.dev, expectIno: st.legacy.ino, expectSha: st.legacy.sha256 } });
+  await a.exit;
+  assert.equal(s.result("a").ok, false, JSON.stringify(s.result("a")));
+  assert.equal(fs.lstatSync(fence).isFile(), true, "nothing moved");
+});
+
+function unshareWorks(flags) {
+  return process.platform === "linux" && spawnSync("unshare", [...flags, "true"]).status === 0;
+}
+
+// The host pid of the process unshare -f forked.
+function forkedChild(pid) {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      const kids = fs.readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8").trim().split(/\s+/).filter(Boolean);
+      if (kids.length > 0) return Number(kids[0]);
+    } catch {}
+    if (Date.now() > deadline) throw new Error(`no child of ${pid}`);
+    spawnSync("sleep", ["0.01"]);
+  }
+}
+
+for (const [label, flags] of [
+  ["inherited procfs", ["-r", "-p", "-f"]],
+  ["own procfs", ["-r", "-p", "-f", "--mount-proc"]]
+]) {
+  test(`N22a/b: adopt from a nested PID namespace (${label}) refuses without the declaration; nothing moved`, async (t) => {
+    if (!unshareWorks(flags)) {
+      t.skip(`unshare ${flags.join(" ")} not available`);
+      return;
+    }
+    const s = scenario(t);
+    const { fence } = paths(s);
+    await legacyX(s);
+    const o = old(s, "o", "o1", { gates: { attempt: "pause" } }); // a live old writer in the init namespace
+    await s.wait("o.paused.attempt");
+    const st = await statusOf(s);
+    const actorPath = new URL("./fenced-lock/lock-actor.mjs", import.meta.url).pathname;
+    const op = { op: "adopt", args: { expectDev: st.legacy.dev, expectIno: st.legacy.ino, expectSha: st.legacy.sha256 } };
+    const env = s.childEnv({ ACTOR_WORKSPACE: s.workspace, ACTOR_BARRIERS: s.barriers, ACTOR_ROLE: "nested", ACTOR_OP: JSON.stringify(op) });
+    const run = spawnSync("unshare", [...flags, process.execPath, actorPath], { env, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(s.result("nested").code, "ADOPT_DOMAIN_NESTED", JSON.stringify(s.result("nested")));
+    assert.equal(fs.lstatSync(fence).isFile(), true, "nothing moved");
+    o.child.kill("SIGKILL");
+  });
+}
+
+test("N22c: adopt in the init namespace sees an old writer in a nested namespace and refuses", async (t) => {
+  const flags = ["-r", "-p", "-f"];
+  if (!unshareWorks(flags)) {
+    t.skip("unshare -r -p -f not available");
+    return;
+  }
+  const { stateMjsFor } = await import("./fenced-lock/old-trees.mjs");
+  const s = scenario(t);
+  const { fence } = paths(s);
+  await legacyX(s);
+  const writer = new URL("./fenced-lock/writer.mjs", import.meta.url).pathname;
+  const env = s.childEnv({
+    WRITER_STATE_MJS: stateMjsFor("o1"),
+    WRITER_WORKSPACE: s.workspace,
+    WRITER_BARRIERS: s.barriers,
+    WRITER_ROLE: "nestedold",
+    WRITER_MODE: "owner",
+    WRITER_GATES: JSON.stringify({ attempt: "pause" })
+  });
+  const u = spawn("unshare", [...flags, process.execPath, writer, "/plugin/scripts/codex-companion.mjs", "task-worker"], { env, stdio: "ignore" });
+  const uexit = new Promise((r) => u.once("exit", r));
+  t.after(async () => {
+    if (u.exitCode == null && u.signalCode == null) u.kill("SIGKILL");
+    await uexit;
+  });
+  await s.wait("nestedold.paused.attempt");
+  const hostPid = forkedChild(u.pid);
+  s.expose(hostPid);
+  t.after(() => {
+    try {
+      process.kill(hostPid, "SIGKILL");
+    } catch {}
+  });
+  const drain = s.actor("drain", { op: "drain" });
+  await drain.exit;
+  const entry = s.result("drain").processes.find((p) => p.pid === hostPid);
+  assert.equal(entry?.verdict, "unproven", JSON.stringify(s.result("drain")));
+  const a = await adopt(s, "a");
+  await a.exit;
+  assert.equal(s.result("a").code, "ADOPT_NOT_DRAINED", JSON.stringify(s.result("a")));
+  assert.equal(fs.lstatSync(fence).isFile(), true, "nothing moved");
+});
+
+test("N22d: with --declare-cross-namespace the declaration is in the output, on stderr and in adopt.json", async (t) => {
+  const flags = ["-r", "-p", "-f"];
+  if (!unshareWorks(flags)) {
+    t.skip("unshare -r -p -f not available");
+    return;
+  }
+  const s = scenario(t);
+  const { stateDir, fence } = paths(s);
+  await legacyX(s);
+  const st = await statusOf(s);
+  const declaration = "test: one sandbox, namespace pid:[x], drained by hand " + Date.now();
+  const companion = new URL("../plugins/codex/scripts/codex-companion.mjs", import.meta.url).pathname;
+  const scanScope = new URL("./fenced-lock/scan-scope.mjs", import.meta.url).pathname;
+  const run = spawnSync(
+    "unshare",
+    [
+      ...flags,
+      process.execPath,
+      `--import=${scanScope}`,
+      companion,
+      "state-lock",
+      "adopt-legacy",
+      "--cwd",
+      s.workspace,
+      "--expect-dev",
+      st.legacy.dev,
+      "--expect-ino",
+      st.legacy.ino,
+      "--expect-sha",
+      st.legacy.sha256,
+      "--declare-cross-namespace",
+      declaration
+    ],
+    { env: s.childEnv({ NODE_NO_WARNINGS: "1" }), encoding: "utf8" }
+  );
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.ok(run.stdout.includes(declaration), "not in the output");
+  assert.ok(run.stderr.includes(declaration), "not on stderr");
+  const logs = fs.readdirSync(stateDir).filter((n) => n.endsWith(".adopt.json"));
+  assert.equal(logs.length, 1);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, logs[0]), "utf8")).declaration, declaration);
+  assert.equal(fs.lstatSync(fence).isDirectory(), true);
+  assert.equal(record(s).verdict, "nested");
+  assert.equal(record(s).declaration, declaration);
+});
