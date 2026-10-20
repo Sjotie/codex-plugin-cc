@@ -1,6 +1,7 @@
 // fenced-lock: one lock primitive for the Codex plugin state lock and the
 // host reaper lock (Homebase #1916; design docs/design/1916-state-lock-admission.md
-// in the homebase repo, v2.8).
+// in the homebase repo, v2.10). Source: factory-core shared/fenced-lock; the
+// plugin keeps a byte-equal copy (fenced-lock.source.json).
 //
 // <fencePath> (e.g. state.lock) becomes a directory, the fence: old writers
 // cannot take a directory as their lock and cannot remove it. Next to it,
@@ -12,7 +13,7 @@
 // A fence only admits new writers once it is sealed (I6): right after the
 // fence appears, the module checks for O2 residues (a pending lock file with
 // two names) and then scans for old plugin processes (S0). The seal is written
-// once every process in S0 is gone. The module never puts anything back on
+// once every process in S0 is gone or now holds the protocol marker (v2.10). The module never puts anything back on
 // the fence path and never deletes a file an old writer can observe.
 //
 // Plain ESM without dependencies; node:sqlite (Node >= 22.13) or bun:sqlite.
