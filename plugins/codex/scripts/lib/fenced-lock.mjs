@@ -1579,8 +1579,7 @@ export function openFencedLock(fencePath, options = {}) {
       const term = send("SIGTERM");
       if (term === "eperm") return result("eperm");
       if (term === "gone") return result("already-gone");
-      const afterTerm = waitGone(graceMs);
-      if (afterTerm === "moved") return moved();
+      const afterTerm = waitGone(graceMs); // "moved": before() below reads again and says so
       if (afterTerm === "gone") return result("terminated");
       if (afterTerm === "changed") return result("identity-changed");
       done = before("terminated"); // the identity and the marker read again right before SIGKILL
