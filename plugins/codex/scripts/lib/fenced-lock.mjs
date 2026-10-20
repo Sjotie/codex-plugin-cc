@@ -33,7 +33,7 @@ const PROC_SUPER_MAGIC = 0x9fa0;
 const PF_KTHREAD = 0x00200000;
 const RECORD_NAME = "fence.json";
 const OWNER_NAME = "owner.json";
-const README_TEXT = "Niet verwijderen: dit is het hek van de state-lock (#1916). Zie: codex-companion state-lock status\n";
+const README_TEXT = "Niet verwijderen: dit is het hek van een fenced lock (#1916). De status geeft het commando van de eigenaar van deze lock.\n";
 const GONE_CODES = new Set(["ENOENT", "ESRCH"]);
 const RENAME_LOST_CODES = new Set(["ENOTDIR", "ENOTEMPTY", "EEXIST", "EISDIR"]);
 
@@ -120,7 +120,7 @@ async function loadSqlite() {
     }
   } catch (error) {
     return {
-      error: `codex-companion state-lock heeft Node >= 22.13 nodig (nu ${process.version})`,
+      error: `state-lock heeft Node >= 22.13 nodig voor node:sqlite (nu ${process.version})`,
       reason: error?.code ?? "NO_SQLITE"
     };
   }
@@ -925,7 +925,7 @@ export function openFencedLock(fencePath, options = {}) {
     const P = path.join(dir, `${base}.prep-${hex(8)}`);
     fs.mkdirSync(P);
     try {
-      fs.writeFileSync(path.join(P, "README"), README_TEXT);
+      fs.writeFileSync(path.join(P, "README"), o.fenceReadme ?? README_TEXT);
     } catch (error) {
       fs.rmSync(P, { recursive: true, force: true });
       throw error;

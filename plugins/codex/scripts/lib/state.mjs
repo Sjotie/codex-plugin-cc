@@ -95,7 +95,8 @@ function stateLockOptions(cwd) {
     deadlineMs: LOCK_TIMEOUT_MS,
     retryMs: LOCK_RETRY_DELAY_MS,
     ownerInfo: () => ({ script: path.basename(process.argv[1] ?? "") }),
-    timeoutHint: `zie: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"`
+    timeoutHint: `zie: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"`,
+    fenceReadme: `Niet verwijderen: dit is het hek van de state-lock van de Codex-plugin (#1916). Status: node "${COMPANION_SCRIPT}" state-lock status --cwd "${cwd}"\n`
   };
 }
 
