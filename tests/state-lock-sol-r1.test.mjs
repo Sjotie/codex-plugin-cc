@@ -44,7 +44,11 @@ test('independent: a process acquiring marker after target selection must get no
   const target={pid:4242,start:'100',script:'codex-companion.mjs',sub:'task-worker',comm:'node'};
   fs.writeFileSync(path.join(fence,'fence.json'),JSON.stringify({version:1,verdict:'initial',residues:[],S0:[target],sealedAt:null}));
   let reads=0, marker=false; const signals=[];
+  // Not in the original probe: the domain and platform are pinned, so the
+  // namespace gate of v2.11 cannot make this test green on a non-initial host.
   const lock=openFencedLock(fence,{
+    domain:()=>({verdict:'initial',reason:'test',scope:'test'}),
+    platform:'linux',
     identityReader:()=>{ reads++; if(reads>=2) marker=true; return {start:'100',state:'S',argv:['node','/p/scripts/codex-companion.mjs','task-worker'],comm:'node'};},
     markerReader:()=>marker,
     kill:(pid,sig)=>{signals.push({pid,sig,marker});throw Object.assign(new Error('spy'),{code:'EPERM'});}

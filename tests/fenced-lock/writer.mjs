@@ -47,7 +47,9 @@ const original = {
   readFileSync: fs.readFileSync,
   writeFileSync: fs.writeFileSync,
   existsSync: fs.existsSync,
-  appendFileSync: fs.appendFileSync
+  appendFileSync: fs.appendFileSync,
+  mkdirSync: fs.mkdirSync,
+  readdirSync: fs.readdirSync
 };
 const eventPath = (name) => path.join(barriers, name);
 const signal = (name) => original.writeFileSync.call(fs, eventPath(`${role}.${name}`), "");
@@ -148,19 +150,25 @@ try {
   // No node:sqlite (old Node): only the old protocols can run here.
 }
 
-function startTime(pid) {
+// [state, start time] of a process from one read of /proc/<pid>/stat, or null.
+function procStat(pid) {
   try {
     const stat = original.readFileSync.call(fs, `/proc/${pid}/stat`, "utf8");
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return { state: fields[0], start: fields[19] };
   } catch {
-    return "?";
+    return null;
   }
 }
 
-function readMark() {
+function startTime(pid) {
+  return procStat(pid)?.start ?? "?";
+}
+
+function readMark(file) {
   try {
-    const [r, pid, start] = original.readFileSync.call(fs, eventPath("critical"), "utf8").split(" ");
-    return { role: r, pid: Number(pid), start };
+    const [r, pid, start] = original.readFileSync.call(fs, file, "utf8").split(" ");
+    return Number.isInteger(Number(pid)) && Number(pid) > 0 ? { role: r, pid: Number(pid), start } : null;
   } catch {
     return null;
   }
@@ -172,12 +180,9 @@ function holderAlive({ pid, start }) {
   } catch (error) {
     if (error.code === "ESRCH") return false;
   }
-  if (start === "?") return true;
-  const now = startTime(pid);
-  if (now === "?") return false;
-  const stat = original.readFileSync.call(fs, `/proc/${pid}/stat`, "utf8");
-  if (stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z")) return false;
-  return now === start;
+  if (start === "?") return true; // no /proc: alive is the conservative answer
+  const now = procStat(pid);
+  return Boolean(now) && now.state !== "Z" && now.start === start;
 }
 
 try {
@@ -188,26 +193,25 @@ try {
   }
   updateState(workspace, (state) => {
     if (mode === "crash") process.exit(0); // like process death: no finally runs
-    // The critical mark names its holder (role, pid, start time). A mark whose
-    // holder is dead is a section that ended by a crash, not an overlap: log
-    // it as "dead" and take the mark over (the oracle must survive SIGKILL).
-    let mine = true;
-    const mark = `${role} ${process.pid} ${startTime(process.pid)}`;
-    for (;;) {
-      try {
-        original.writeFileSync.call(fs, eventPath("critical"), mark, { flag: "wx" });
-        break;
-      } catch {
-        const holder = readMark();
-        if (holder && !holderAlive(holder)) {
-          original.appendFileSync.call(fs, eventPath("oracle.log"), `dead ${holder.role} ${process.hrtime.bigint()}\n`);
-          original.unlinkSync.call(fs, eventPath("critical"));
-          continue;
-        }
-        if (!holder) continue; // the holder just left
-        mine = false;
+    // The oracle (crash-proof, review of 4ad0c73): every section writes its own
+    // mark sections/<role> (role, pid, start time; written to a temp name and
+    // renamed, so never half written), then lists the others. A mark of a
+    // living holder is an overlap; a mark of a dead holder (gone, zombie,
+    // other start time) is a section that ended in a crash: logged as "dead"
+    // and never counted. Nobody removes another holder's mark.
+    const sections = eventPath("sections");
+    original.mkdirSync.call(fs, sections, { recursive: true });
+    const own = path.join(sections, role);
+    original.writeFileSync.call(fs, `${own}.tmp`, `${role} ${process.pid} ${startTime(process.pid)}`);
+    original.renameSync.call(fs, `${own}.tmp`, own);
+    for (const name of original.readdirSync.call(fs, sections)) {
+      if (name === role || name.endsWith(".tmp")) continue;
+      const holder = readMark(path.join(sections, name));
+      if (!holder) continue; // that holder just left
+      if (holderAlive(holder)) {
         signal("overlap");
-        break;
+      } else {
+        original.appendFileSync.call(fs, eventPath("oracle.log"), `dead ${holder.role} ${process.hrtime.bigint()}\n`);
       }
     }
     original.appendFileSync.call(fs, eventPath("oracle.log"), `enter ${role} ${process.hrtime.bigint()}\n`);
@@ -218,7 +222,7 @@ try {
       if (mode === "owner") waitFor(`${role}.release`);
     } finally {
       original.appendFileSync.call(fs, eventPath("oracle.log"), `exit ${role} ${process.hrtime.bigint()}\n`);
-      if (mine) original.unlinkSync.call(fs, eventPath("critical"));
+      original.unlinkSync.call(fs, own);
     }
     mutationFinished = true;
   });

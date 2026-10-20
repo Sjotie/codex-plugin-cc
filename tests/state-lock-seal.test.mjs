@@ -820,6 +820,8 @@ for (const [label, flags] of [
   assert.equal(run.status, 0, run.stderr);
   const r = s.result("nested");
   assert.equal(r.result, "domain", JSON.stringify(r));
-  assert.equal(o.child.exitCode, null, "the old process was signalled");
-  assert.equal(o.child.signalCode, null);
+  // Read the old process from /proc, not from the child object (spawnSync
+  // blocked the event loop, so its exit event cannot have run yet).
+  const stat = fs.readFileSync(`/proc/${o.pid}/stat`, "utf8");
+  assert.equal(stat.slice(stat.lastIndexOf(")") + 2)[0] === "Z", false, "the old process was signalled");
 });

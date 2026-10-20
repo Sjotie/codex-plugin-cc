@@ -888,11 +888,11 @@ test("R7: a target that opens the marker after the target selection gets no sign
   assert.equal(r.ok, true);
 });
 
-test("R8: stop-old never signals outside the init PID namespace, nor for a record scanned outside it (Linux)", (t) => {
+test("R8: stop-old never signals outside the init PID namespace; from the init namespace a record scanned elsewhere is scanned again first (Linux)", (t) => {
   const nested = () => ({ verdict: "nested", reason: "PID namespace pid:[1]", scope: "test" });
   for (const [label, domain, recordVerdict] of [
-    ["caller nested", nested, "initial"],
-    ["record nested", INITIAL, "nested"]
+    ["caller nested, record initial", nested, "initial"],
+    ["caller nested, record nested", nested, "nested"]
   ]) {
     const { F, recordPath } = fencedDir(t, [TARGET]);
     const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
@@ -912,6 +912,28 @@ test("R8: stop-old never signals outside the init PID namespace, nor for a recor
     assert.equal(r.result, "domain", `${label}: ${JSON.stringify(r)}`);
     assert.equal(r.ok, false);
   }
+  // Caller in the init namespace, record scanned in a nested one: a new scan
+  // (here: no old process) replaces the record before any signal.
+  const { F, recordPath } = fencedDir(t, [TARGET]);
+  const record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  fs.writeFileSync(recordPath, JSON.stringify({ ...record, verdict: "nested", declaration: "test sandbox" }));
+  const signals = [];
+  const lock = openFencedLock(F, {
+    ...PLUGIN_OPTS,
+    domain: INITIAL,
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    identityReader: () => alive(),
+    markerReader: () => false,
+    kill: (pid, sig) => signals.push([pid, sig]),
+    platform: "linux"
+  });
+  const r = lock.stopOld({ graceMs: 100 });
+  assert.deepEqual(signals, [], "the nested record's pids are never signalled");
+  assert.equal(r.result, "sealed", JSON.stringify(r));
+  const after = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+  assert.equal(after.verdict, "initial");
+  assert.deepEqual(after.S0, []);
+  assert.equal(after.declaration, "test sandbox", "the declaration is kept");
 });
 
 test("R7 (grace): a target that opens the marker during the grace after SIGTERM gets no SIGKILL; a second target that opens it while the first is stopped gets no signal at all", (t) => {
@@ -935,9 +957,11 @@ test("R7 (grace): a target that opens the marker during the grace after SIGTERM 
   );
   const r = s.lock.stopOld({ graceMs: 300 });
   assert.deepEqual(s.signals, [[TARGET.pid, "SIGTERM"]], "only the first SIGTERM, before either proved anything");
-  assert.deepEqual(r.outcomes.map((o) => [o.pid, o.outcome]), [
-    [TARGET.pid, "now-proven"],
-    [second.pid, "now-proven"]
+  assert.deepEqual(r.outcomes.map((o) => [o.pid, o.outcome, o.signalsSent]), [
+    [TARGET.pid, "now-proven", ["SIGTERM"]],
+    [second.pid, "now-proven", []]
   ]);
+  assert.match(r.outcomes[0].detail, /no further signal after SIGTERM/);
+  assert.match(r.outcomes[1].detail, /never signalled/);
   assert.equal(r.result, "sealed");
 });

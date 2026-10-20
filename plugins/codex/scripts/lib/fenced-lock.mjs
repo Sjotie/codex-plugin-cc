@@ -1086,7 +1086,7 @@ export function openFencedLock(fencePath, options = {}) {
         }
       } else if (rest.startsWith("quarantine-")) {
         counts.quarantine++;
-        if (!names.includes(`${name}.adopt.json`)) anomalies.push({ name, problem: "Q zonder logboek" });
+        if (!names.includes(`${name}.adopt.json`)) anomalies.push({ name, problem: "quarantine without its adopt log" });
       } else if (residueMatch(name)) {
         // counted under residues
       } else {
@@ -1288,24 +1288,33 @@ export function openFencedLock(fencePath, options = {}) {
       try {
         const st = lstatOrNull(F);
         if (!st?.isDirectory()) return { ok: false, result: "no-fence", targets: [] };
-        const r = readRecord();
+        let r = readRecord();
         if (!r) return { ok: false, result: "no-record", targets: [] };
         if (r.sealedAt) return { ok: true, result: "sealed", targets: [] };
         if (r.residues.length > 0) return { ok: false, result: "residue", reason: residueReason(r.residues), targets: [] };
         if (r.S0 === null) return { ok: false, result: "no-scan", targets: [] };
         // Linux: the pids in S0 come from a procfs, kill() uses the pids of the
-        // caller's PID namespace. They are the same numbers only when both are
-        // the init namespace with its full procfs (v2.11). macOS has no PID
-        // namespaces.
+        // caller's PID namespace. They are the same numbers only in the init
+        // namespace with its full procfs (v2.11). There, a record scanned
+        // elsewhere is scanned again first (residue check, then scan; the v2.7
+        // rule of sealState), so its pids are this namespace's. macOS has no
+        // PID namespaces.
         if (o.platform === "linux") {
           const here = currentDomain();
-          if (here.verdict !== "initial" || r.verdict !== "initial") {
+          if (here.verdict !== "initial") {
             return {
               ok: false,
               result: "domain",
-              reason: `stop-old signals only from the init PID namespace with a full procfs, for a record scanned there (here: ${here.verdict}, ${here.reason}; record: ${r.verdict}); run it on the host, or seal with state-lock seal --declare-cross-namespace`,
+              reason: `stop-old only signals from the init PID namespace with a full procfs (here: ${here.verdict}, ${here.reason}); run it in the init namespace (on the host), or seal with state-lock seal --declare-cross-namespace`,
               targets: []
             };
+          }
+          if (r.verdict !== "initial") {
+            writeSealRecord({ declaration: r.declaration });
+            r = readRecord();
+            if (!r) return { ok: false, result: "no-record", targets: [] };
+            if (r.residues.length > 0) return { ok: false, result: "residue", reason: residueReason(r.residues), targets: [] };
+            if (r.verdict !== "initial" || r.S0 === null) return { ok: false, result: "domain", reason: `the new scan gave domain ${r.verdict}`, targets: [] };
           }
         }
         targets = r.S0.filter((p) => stillWaitingOn(o, p));
@@ -1344,12 +1353,11 @@ export function openFencedLock(fencePath, options = {}) {
       if (t.script && t.comm && !JS_RUNTIME.test(t.comm) && !includeUnidentified) {
         return { ...who, outcome: "unidentified", detail: `comm ${t.comm} is not a JS runtime` };
       }
-      // Before every signal: identity, then the marker. A target that holds the
-      // marker by now proves the new protocol and is never signalled (v2.11).
-      const check = () => {
+      const sent = [];
+      const result = (outcome, detail) => ({ ...who, outcome, ...(detail ? { detail } : {}), signalsSent: [...sent] });
+      const identity = () => {
         try {
-          const c = identityNow(o, t);
-          return c.status === "same" && markerNow(o, t) === true ? { status: "proven" } : c;
+          return identityNow(o, t);
         } catch {
           return { status: "unreadable" };
         }
@@ -1357,6 +1365,7 @@ export function openFencedLock(fencePath, options = {}) {
       const send = (sig) => {
         try {
           kill(t.pid, sig);
+          sent.push(sig);
           return null;
         } catch (error) {
           if (error.code === "EPERM") return "eperm";
@@ -1364,53 +1373,59 @@ export function openFencedLock(fencePath, options = {}) {
           throw error;
         }
       };
+      // Poll the identity until the target is gone or changed, or the time is up.
       const waitGone = (ms) => {
         const end = performance.now() + ms;
         for (;;) {
-          const now = check();
-          if (now.status === "gone" || now.status === "changed" || now.status === "proven") return now.status;
-          if (performance.now() >= end) return now.status;
+          const now = identity();
+          if (now.status === "gone" || now.status === "changed" || performance.now() >= end) return now.status;
           sleepSync(50);
         }
       };
-      // Settle "unverified" (an exiting process) before deciding to signal.
-      const settled = () => {
-        const c = check();
-        return c.status === "unverified" ? { status: waitGone(500) } : c;
+      // Right before every signal: the identity (an exiting process with an
+      // empty argv is settled first), then the marker (v2.11: a target that
+      // holds it by now proves the new protocol and gets no further signal).
+      // Returns null to go on, or the outcome.
+      const before = (goneOutcome) => {
+        let c = identity();
+        if (c.status === "unverified") {
+          const settled = waitGone(500);
+          c = settled === "same" ? identity() : { status: settled };
+        }
+        if (c.status === "gone") return result(goneOutcome);
+        if (c.status === "changed") return result("identity-changed");
+        if (c.status !== "same") return result("still-alive", "identity cannot be confirmed");
+        if (markerNow(o, t) === true) {
+          return result("now-proven", sent.length === 0 ? "holds the protocol marker now: never signalled" : `holds the protocol marker now: no further signal after ${sent.join(", ")}`);
+        }
+        stopped = c.stopped;
+        return null;
       };
-      const proven = { ...who, outcome: "now-proven", detail: "holds the protocol marker now: never signalled" };
-      let c = settled();
-      if (c.status === "proven") return proven;
-      if (c.status === "gone") return { ...who, outcome: "already-gone" };
-      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identity cannot be confirmed" };
-      if (c.stopped) {
+      let stopped = false;
+      let done = before("already-gone");
+      if (done) return done;
+      if (stopped) {
         const e = send("SIGCONT");
-        if (e === "eperm") return { ...who, outcome: "eperm" };
+        if (e === "eperm") return result("eperm");
+        if (e === "gone") return result("already-gone");
+        done = before("already-gone");
+        if (done) return done;
       }
-      c = settled();
-      if (c.status === "proven") return proven;
-      if (c.status === "gone") return { ...who, outcome: "already-gone" };
-      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identity cannot be confirmed" };
       const term = send("SIGTERM");
-      if (term === "eperm") return { ...who, outcome: "eperm" };
+      if (term === "eperm") return result("eperm");
+      if (term === "gone") return result("already-gone");
       const afterTerm = waitGone(graceMs);
-      if (afterTerm === "proven") return proven;
-      if (afterTerm === "gone") return { ...who, outcome: "terminated" };
-      if (afterTerm === "changed") return { ...who, outcome: "identity-changed" };
-      c = settled();
-      if (c.status === "proven") return proven;
-      if (c.status === "gone") return { ...who, outcome: "terminated" };
-      if (c.status === "changed") return { ...who, outcome: "identity-changed" };
-      if (c.status !== "same") return { ...who, outcome: "still-alive", detail: "identity cannot be confirmed" };
+      if (afterTerm === "gone") return result("terminated");
+      if (afterTerm === "changed") return result("identity-changed");
+      done = before("terminated"); // the identity and the marker read again right before SIGKILL
+      if (done) return done;
       const k = send("SIGKILL");
-      if (k === "eperm") return { ...who, outcome: "eperm" };
+      if (k === "eperm") return result("eperm");
+      if (k === "gone") return result("terminated");
       const afterKill = waitGone(2_000);
-      if (afterKill === "proven") return proven;
-      if (afterKill === "gone") return { ...who, outcome: "killed" };
-      if (afterKill === "changed") return { ...who, outcome: "identity-changed" };
-      return { ...who, outcome: "still-alive" };
+      if (afterKill === "gone") return result("killed");
+      if (afterKill === "changed") return result("identity-changed");
+      return result("still-alive");
     }
   }
 

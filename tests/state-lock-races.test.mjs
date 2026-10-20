@@ -157,7 +157,7 @@ test("N1: an owner killed inside the section frees the lock at once; state is th
 
 // The oracle itself (review of 4ad0c73, N28): a mark of a living holder is an
 // overlap, a mark left by a holder that died in its section is not.
-test("oracle: a living holder's critical mark is an overlap; a dead holder's mark is logged as dead and taken over", { skip: process.platform !== "linux" && "Linux /proc" }, async (t) => {
+test("oracle: a living holder's section mark is an overlap; a dead holder's mark is logged as dead, not counted", { skip: process.platform !== "linux" && "Linux /proc" }, async (t) => {
   const startOf = (pid) => {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
     return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
@@ -171,7 +171,8 @@ test("oracle: a living holder's critical mark is an overlap; a dead holder's mar
       await held;
     });
     await new Promise((r) => setTimeout(r, 30));
-    fs.writeFileSync(path.join(s.barriers, "critical"), `x ${holder.pid} ${startOf(holder.pid)}`);
+    fs.mkdirSync(path.join(s.barriers, "sections"));
+    fs.writeFileSync(path.join(s.barriers, "sections", "x"), `x ${holder.pid} ${startOf(holder.pid)}`);
     if (!living) {
       holder.kill("SIGKILL");
       await held;

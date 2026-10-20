@@ -151,16 +151,16 @@ export const MUTATIONS = [
     id: "no-reread-before-sigkill",
     rule: "N32f: identity read again right before SIGKILL",
     file: FL,
-    from: "      c = settled();\n      if (c.status === \"gone\") return { ...who, outcome: \"terminated\" };",
-    to: "      c = { status: \"same\" };\n      if (c.status === \"gone\") return { ...who, outcome: \"terminated\" };",
+    from: "      done = before(\"terminated\"); // the identity and the marker read again right before SIGKILL\n      if (done) return done;",
+    to: "",
     tests: [[UNIT, "N32f"]]
   },
   {
     id: "eperm-as-gone",
     rule: "N32g: EPERM is not gone",
     file: FL,
-    from: "      if (term === \"eperm\") return { ...who, outcome: \"eperm\" };",
-    to: "      if (term === \"eperm\") return { ...who, outcome: \"already-gone\" };",
+    from: "      if (term === \"eperm\") return result(\"eperm\");",
+    to: "      if (term === \"eperm\") return result(\"already-gone\");",
     tests: [[UNIT, "N32g"]]
   },
   {
@@ -287,8 +287,8 @@ export const MUTATIONS = [
     id: "no-marker-before-signal",
     rule: "v2.11 R7: the marker is checked again right before every signal",
     file: FL,
-    from: "          return c.status === \"same\" && markerNow(o, t) === true ? { status: \"proven\" } : c;",
-    to: "          return c;",
+    from: "        if (markerNow(o, t) === true) {\n          return result(\"now-proven\"",
+    to: "        if (false) {\n          return result(\"now-proven\"",
     tests: [[UNIT, "R7"]]
   },
   {
