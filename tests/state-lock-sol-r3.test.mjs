@@ -14,14 +14,16 @@ import assert from "node:assert/strict";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PROBE = path.join(ROOT, "tests/fenced-lock/sol-r3/proc-remount.mjs");
-const unshareWorks = (flags) => process.platform === "linux" && spawnSync("unshare", [...flags, "true"]).status === 0;
 
 test("Sol r3 probe: a new procfs mounted on /proc under a lock never lets it seal a host record whose old process lives", (t) => {
-  if (!unshareWorks(["-r", "-p", "-f", "-m"]) || !unshareWorks(["-r", "-p", "-f", "--mount-proc"])) {
+  // the probe's own route: a procfs mounted on /proc inside -m
+  const mountWorks = process.platform === "linux" && spawnSync("unshare", ["-r", "-p", "-f", "-m", "mount", "-t", "proc", "proc", "/proc"]).status === 0;
+  if (!mountWorks) {
     t.skip("unshare -r -p -f -m with a procfs mount not available");
     return;
   }
   const run = spawnSync(process.execPath, [PROBE], { encoding: "utf8", env: { ...process.env, REVIEW_PLUGIN: ROOT } });
+  assert.ok(run.stdout.trim().startsWith("{"), `the probe printed no result:\n${run.stdout}\n${run.stderr}`);
   const out = JSON.parse(run.stdout);
   assert.equal(out.alive, true, "precondition: the old host process lives");
   assert.notEqual(out.result.beforeDev, out.result.afterDev, "precondition: another procfs came on /proc");

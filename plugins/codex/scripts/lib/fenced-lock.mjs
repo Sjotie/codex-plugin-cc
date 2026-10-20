@@ -897,6 +897,15 @@ export function openFencedLock(fencePath, options = {}) {
 
   const PROC_MOVED = "the procfs at /proc changed while it was read; nothing was decided on it, try again";
 
+  // Every decision on /proc reads goes through here: fn reads /proc, and its
+  // result counts only when the view after the reads is still view (Linux;
+  // elsewhere, or without a view, always). -> { moved: true } | { moved: false, value }
+  function inView(view, fn) {
+    const value = fn();
+    if (view && o.platform === "linux" && !sameView(view, hereNow())) return { moved: true };
+    return { moved: false, value };
+  }
+
   // Same numbering: the same boot, and either both in the init PID namespace
   // (every full procfs there shows the same pids) or the same procfs mount.
   function sameProc(r, here) {
@@ -949,13 +958,13 @@ export function openFencedLock(fencePath, options = {}) {
       writeRecord({ ...head, residues: found, S0: null, scannedAt: null, sealedAt: null });
       return true;
     }
-    const { processes } = scanProcesses(o);
-    const S0 = processes
-      .filter((p) => p.verdict === "unproven")
-      .map((p) => ({ pid: p.pid, start: p.start, script: p.script, sub: p.sub, comm: p.comm, uid: p.uid, reason: p.reason }));
     // The scan read whatever procfs was on /proc at the time: it belongs to
     // scanProc only when that is still the procfs there.
-    if (!sameView(here, hereNow())) return false;
+    const scan = inView(here, () => scanProcesses(o));
+    if (scan.moved) return false;
+    const S0 = scan.value.processes
+      .filter((p) => p.verdict === "unproven")
+      .map((p) => ({ pid: p.pid, start: p.start, script: p.script, sub: p.sub, comm: p.comm, uid: p.uid, reason: p.reason }));
     writeRecord({ ...head, residues: [], S0, scannedAt: nowIso(), sealedAt: null });
     return true;
   }
@@ -974,10 +983,11 @@ export function openFencedLock(fencePath, options = {}) {
     if (r.residues.length > 0) return { state: "residue", here };
     if (!sameProc(r, here) || (here.domain.verdict === "initial" && r.verdict !== "initial" && !r.declaration)) return { state: "rescan", here };
     if (r.verdict !== "initial" && !r.declaration) return { state: "domain", here };
-    const rest = r.S0.filter((p) => stillWaitingOn(o, p));
     // A pid missing from another procfs is not a dead process: the liveness
     // reads count only when the procfs they went to is still the one judged.
-    if (!sameView(here, hereNow())) return { state: "moved", here };
+    const read = inView(here, () => r.S0.filter((p) => stillWaitingOn(o, p)));
+    if (read.moved) return { state: "moved", here };
+    const rest = read.value;
     return rest.length > 0 ? { state: "processes", rest, here } : { state: "sealable", here };
   }
 
@@ -1252,7 +1262,10 @@ export function openFencedLock(fencePath, options = {}) {
         else if (j.state === "moved") out.waitingOn = { kind: "moved", detail: PROC_MOVED };
         else if (j.state === "rescan") out.waitingOn = { kind: "rescan", detail: "the record was made in another procfs or domain; the next acquire (or stop-old) here scans again" };
         else if (j.state === "domain") out.waitingOn = { kind: "domain", verdict: r.verdict, reason: r.verdictReason };
-        else if (j.state === "processes") out.waitingOn = { kind: "processes", processes: j.rest.map((p) => ({ ...p, argv: liveArgv(p) })) };
+        else if (j.state === "processes") {
+          const shown = inView(j.here, () => j.rest.map((p) => ({ ...p, argv: liveArgv(p) })));
+          out.waitingOn = shown.moved ? { kind: "moved", detail: PROC_MOVED } : { kind: "processes", processes: shown.value };
+        }
         else out.waitingOn = { kind: "nothing", detail: "the next acquire writes the seal" };
       }
     } else if (st?.isFile()) {
@@ -1454,8 +1467,9 @@ export function openFencedLock(fencePath, options = {}) {
             if (r.verdict !== "initial" || r.S0 === null) return { ok: false, result: "domain", reason: `the new scan gave domain ${r.verdict}`, targets: [] };
           }
         }
-        targets = r.S0.filter((p) => stillWaitingOn(o, p));
-        if (view && !sameView(view, hereNow())) return { ok: false, result: "moved", reason: PROC_MOVED, targets: [] };
+        const chosen = inView(view, () => r.S0.filter((p) => stillWaitingOn(o, p)));
+        if (chosen.moved) return { ok: false, result: "moved", reason: PROC_MOVED, targets: [] };
+        targets = chosen.value;
       } finally {
         unlock(h);
       }
@@ -1471,12 +1485,16 @@ export function openFencedLock(fencePath, options = {}) {
       h.fence = fileId(st);
       const z = sealState();
       const r = readRecord();
-      const notTargeted = (r?.S0 ?? [])
-        .filter((p) => !targets.some((t) => t.pid === p.pid && t.start === p.start) && stillWaitingOn(o, p))
-        .map((p) => ({ pid: p.pid, start: p.start, script: p.script, outcome: "not-targeted" }));
+      const left = inView(view, () =>
+        (r?.S0 ?? [])
+          .filter((p) => !targets.some((t) => t.pid === p.pid && t.start === p.start) && stillWaitingOn(o, p))
+          .map((p) => ({ pid: p.pid, start: p.start, script: p.script, outcome: "not-targeted" }))
+      );
+      const notTargeted = left.moved ? [] : left.value;
       const gone = new Set(["terminated", "killed", "already-gone", "identity-changed", "now-proven"]);
-      const allGone = outcomes.every((x) => gone.has(x.outcome)) && notTargeted.length === 0;
-      return { ok: allGone && Boolean(z.sealed), result: z.sealed ? "sealed" : "waiting", reason: z.reason ?? null, outcomes: [...outcomes, ...notTargeted] };
+      const allGone = !left.moved && outcomes.every((x) => gone.has(x.outcome)) && notTargeted.length === 0;
+      const reason = left.moved ? PROC_MOVED : (z.reason ?? null);
+      return { ok: allGone && Boolean(z.sealed), result: z.sealed ? "sealed" : "waiting", reason, outcomes: [...outcomes, ...notTargeted] };
     } finally {
       unlock(h);
     }
@@ -1493,13 +1511,19 @@ export function openFencedLock(fencePath, options = {}) {
       }
       const sent = [];
       const result = (outcome, detail) => ({ ...who, outcome, ...(detail ? { detail } : {}), signalsSent: [...sent] });
+      // Each identity read counts only in the view the targets were chosen
+      // in: a pid means that process only in that procfs ("moved" otherwise).
       const identity = () => {
-        try {
-          return identityNow(o, t);
-        } catch {
-          return { status: "unreadable" };
-        }
+        const read = inView(view, () => {
+          try {
+            return identityNow(o, t);
+          } catch {
+            return { status: "unreadable" };
+          }
+        });
+        return read.moved ? { status: "moved" } : read.value;
       };
+      const moved = () => result("still-alive", `${PROC_MOVED}: no further signal`);
       const send = (sig) => {
         try {
           kill(t.pid, sig);
@@ -1516,7 +1540,7 @@ export function openFencedLock(fencePath, options = {}) {
         const end = performance.now() + ms;
         for (;;) {
           const now = identity();
-          if (now.status === "gone" || now.status === "changed" || performance.now() >= end) return now.status;
+          if (now.status === "gone" || now.status === "changed" || now.status === "moved" || performance.now() >= end) return now.status;
           sleepSync(50);
         }
       };
@@ -1525,17 +1549,18 @@ export function openFencedLock(fencePath, options = {}) {
       // holds it by now proves the new protocol and gets no further signal).
       // Returns null to go on, or the outcome.
       const before = (goneOutcome) => {
-        // A pid means the chosen process only in the procfs it was chosen in.
-        if (view && !sameView(view, hereNow())) return result("still-alive", `${PROC_MOVED}: no signal`);
         let c = identity();
         if (c.status === "unverified") {
           const settled = waitGone(500);
           c = settled === "same" ? identity() : { status: settled };
         }
+        if (c.status === "moved") return moved();
         if (c.status === "gone") return result(goneOutcome);
         if (c.status === "changed") return result("identity-changed");
         if (c.status !== "same") return result("still-alive", "identity cannot be confirmed");
-        if (markerNow(o, t) === true) {
+        const marker = inView(view, () => markerNow(o, t));
+        if (marker.moved) return moved();
+        if (marker.value === true) {
           return result("now-proven", sent.length === 0 ? "holds the protocol marker now: never signalled" : `holds the protocol marker now: no further signal after ${sent.join(", ")}`);
         }
         stopped = c.stopped;
@@ -1555,6 +1580,7 @@ export function openFencedLock(fencePath, options = {}) {
       if (term === "eperm") return result("eperm");
       if (term === "gone") return result("already-gone");
       const afterTerm = waitGone(graceMs);
+      if (afterTerm === "moved") return moved();
       if (afterTerm === "gone") return result("terminated");
       if (afterTerm === "changed") return result("identity-changed");
       done = before("terminated"); // the identity and the marker read again right before SIGKILL
@@ -1563,6 +1589,7 @@ export function openFencedLock(fencePath, options = {}) {
       if (k === "eperm") return result("eperm");
       if (k === "gone") return result("terminated");
       const afterKill = waitGone(2_000);
+      if (afterKill === "moved") return moved();
       if (afterKill === "gone") return result("killed");
       if (afterKill === "changed") return result("identity-changed");
       return result("still-alive");

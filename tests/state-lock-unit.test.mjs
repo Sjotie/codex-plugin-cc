@@ -1281,36 +1281,46 @@ test("R10d: a scan during which the procfs changes is not written", (t) => {
   assert.deepEqual(r.read(), before, "the record of the other boot stays; the scan counts for neither procfs");
 });
 
-test("R10e: stop-old sends no signal once the procfs on /proc is no longer the one the targets were chosen in", (t) => {
+test("R10e: stop-old decides and signals only on reads from the procfs the targets were chosen in", (t) => {
   const Y = { dev: "Y", bootId: "boot-1", init: true };
-  const run = (changeAt) => {
+  // moveOn(event): the moment another procfs comes on /proc; from then on the old pid is not visible.
+  const run = (moveOn, graceMs = 0) => {
     const r = boundRecord(t, { verdict: "initial", scanProc: Y });
-    let reads = 0;
+    let movedNow = false;
     const signals = [];
     const lock = openFencedLock(r.F, {
       ...PLUGIN_OPTS,
       domain: INITIAL,
-      // view read 1: the targets are chosen; 2: right after the choice; 3: before the first signal
-      procIdentity: () => (++reads >= changeAt ? { ...Y, dev: "Z", init: false } : Y),
+      procIdentity: () => (movedNow ? { ...Y, dev: "Z" } : Y),
       scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
-      identityReader: (p) => ({ start: p.start, state: "S", argv: PLUGIN_ARGV, comm: "node" }),
+      identityReader: (p) => {
+        if (movedNow) return { gone: true };
+        if (moveOn === "choice") movedNow = true;
+        return { start: p.start, state: "S", argv: PLUGIN_ARGV, comm: "node" };
+      },
       markerReader: () => false,
-      kill: (pid, sig) => signals.push([pid, sig]),
+      kill: (pid, sig) => {
+        signals.push(sig);
+        if (moveOn === "sigterm") movedNow = true;
+      },
       platform: "linux"
     });
-    return { result: lock.stopOld({ graceMs: 0 }), signals };
+    return { result: lock.stopOld({ graceMs }), signals };
   };
-  const control = run(Infinity);
-  assert.deepEqual(control.signals.map(([, sig]) => sig), ["SIGTERM", "SIGKILL"], "positive control: without the change both signals go");
-  const atSignal = run(3);
-  assert.deepEqual(atSignal.signals, [], "no signal into another procfs's numbering");
-  const outcome = atSignal.result.outcomes.find((x) => x.pid === TARGET.pid);
-  assert.equal(outcome.outcome, "still-alive");
-  assert.match(outcome.detail, /procfs at \/proc changed/);
-  assert.equal(atSignal.result.ok, false);
-  const atChoice = run(2);
-  assert.deepEqual(atChoice.signals, []);
+  const control = run(null);
+  assert.deepEqual(control.signals, ["SIGTERM", "SIGKILL"], "positive control: without a change both signals go");
+  const atChoice = run("choice");
+  assert.deepEqual(atChoice.signals, [], "the targets were read from a procfs that is gone: no signal");
   assert.equal(atChoice.result.result, "moved");
+  for (const graceMs of [0, 200]) {
+    // after SIGTERM: the old pid is missing from the new procfs; that is not "terminated"
+    const afterTerm = run("sigterm", graceMs);
+    assert.deepEqual(afterTerm.signals, ["SIGTERM"], `grace ${graceMs}: no SIGKILL on reads from another procfs`);
+    const outcome = afterTerm.result.outcomes.find((x) => x.pid === TARGET.pid);
+    assert.equal(outcome.outcome, "still-alive", `grace ${graceMs}: ${JSON.stringify(outcome)}`);
+    assert.match(outcome.detail, /procfs at \/proc changed/);
+    assert.equal(afterTerm.result.ok, false);
+  }
 });
 
 test("R10f: a rescan runs only in the view that decided it", (t) => {
@@ -1319,10 +1329,11 @@ test("R10f: a rescan runs only in the view that decided it", (t) => {
   const r = boundRecord(t, { verdict: "initial", scanProc: { dev: "X", bootId: "boot-0", init: true } });
   const before = r.read();
   let reads = 0;
+  // read 1: judge, in the init namespace of another boot (so: rescan); from read 2 on, a nested procfs
   const lock = openFencedLock(r.F, {
     ...PLUGIN_OPTS,
     domain: () => (reads >= 1 ? NESTED() : INITIAL()),
-    procIdentity: () => (++reads >= 2 ? PROC_A : { dev: "Y", bootId: "boot-0", init: true }),
+    procIdentity: () => (++reads >= 2 ? PROC_A : { dev: "Y", bootId: "boot-1", init: true }),
     scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
     identityReader: () => ({ gone: true }),
     markerReader: () => false,
@@ -1330,4 +1341,27 @@ test("R10f: a rescan runs only in the view that decided it", (t) => {
   });
   assert.equal(lock.tryAcquire(), null);
   assert.deepEqual(r.read(), before, "the record of the other procfs stays");
+});
+
+test("R10g: status shows no argv read from another procfs than the one judged", (t) => {
+  const r = boundRecord(t, { verdict: "nested", declaration: "D", scanProc: PROC_A });
+  let movedNow = false;
+  let reads = 0;
+  const lock = openFencedLock(r.F, {
+    ...PLUGIN_OPTS,
+    domain: NESTED,
+    procIdentity: () => (movedNow ? PROC_B : PROC_A),
+    scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
+    // read 1: the liveness read of judge; read 2: the argv status shows
+    identityReader: (p) => {
+      if (++reads === 2) movedNow = true;
+      return { start: p.start, state: "S", argv: PLUGIN_ARGV, comm: "node" };
+    },
+    markerReader: () => false,
+    platform: "linux"
+  });
+  assert.equal(lock.status().waitingOn.kind, "moved");
+  movedNow = false;
+  reads = 10;
+  assert.equal(lock.status().waitingOn.kind, "processes", "positive control");
 });

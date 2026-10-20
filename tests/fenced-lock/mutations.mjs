@@ -87,8 +87,8 @@ export const MUTATIONS = [
     id: "scan-every-round",
     rule: "N27d: wait rounds read only S0",
     file: FL,
-    from: "    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    // A pid missing",
-    to: "    writeSealRecord();\n    r = readRecord();\n    const rest = r.S0.filter((p) => stillWaitingOn(o, p));\n    // A pid missing",
+    from: "    const read = inView(here, () => r.S0.filter(",
+    to: "    writeSealRecord();\n    r = readRecord();\n    const read = inView(here, () => r.S0.filter(",
     tests: [[SEAL, "N27d"]]
   },
   {
@@ -287,7 +287,7 @@ export const MUTATIONS = [
     id: "no-marker-before-signal",
     rule: "v2.11 R7: the marker is checked again right before every signal",
     file: FL,
-    from: "        if (markerNow(o, t) === true) {\n          return result(\"now-proven\"",
+    from: "        if (marker.value === true) {\n          return result(\"now-proven\"",
     to: "        if (false) {\n          return result(\"now-proven\"",
     tests: [[UNIT, "R7"]]
   },
@@ -399,16 +399,16 @@ export const MUTATIONS = [
     id: "judge-ignores-move",
     rule: "v2.13 R10c: liveness reads count only when the procfs is still the judged one",
     file: FL,
-    from: "    if (!sameView(here, hereNow())) return { state: \"moved\", here };\n",
-    to: "",
+    from: "    if (read.moved) return { state: \"moved\", here };\n",
+    to: "    if (false) return { state: \"moved\", here };\n",
     tests: [[UNIT, "R10c"]]
   },
   {
     id: "scan-ignores-move",
     rule: "v2.13 R10d: a scan during which the procfs changed is not written",
     file: FL,
-    from: "    if (!sameView(here, hereNow())) return false;\n    writeRecord({ ...head, residues: [], S0",
-    to: "    writeRecord({ ...head, residues: [], S0",
+    from: "    if (scan.moved) return false;\n",
+    to: "",
     tests: [[UNIT, "R10d"]]
   },
   {
@@ -421,19 +421,43 @@ export const MUTATIONS = [
   },
   {
     id: "signal-ignores-move",
-    rule: "v2.13 R10e: no signal once the procfs is not the one the targets were chosen in",
+    rule: "v2.13 R10e: every identity read in stop-old counts only in the view the targets were chosen in",
     file: FL,
-    from: "        if (view && !sameView(view, hereNow())) return result(",
-    to: "        if (false) return result(",
+    from: "        return read.moved ? { status: \"moved\" } : read.value;",
+    to: "        return read.value ?? { status: \"moved\" };",
     tests: [[UNIT, "R10e"]]
   },
   {
     id: "choice-ignores-move",
     rule: "v2.13 R10e: the target choice counts only when the procfs did not change during it",
     file: FL,
-    from: "        if (view && !sameView(view, hereNow())) return { ok: false, result: \"moved\"",
+    from: "        if (chosen.moved) return { ok: false, result: \"moved\"",
     to: "        if (false) return { ok: false, result: \"moved\"",
     tests: [[UNIT, "R10e"]]
+  },
+  {
+    id: "view-check-off",
+    rule: "v2.13: inView is the one place that compares the view after the reads",
+    file: FL,
+    from: "    if (view && o.platform === \"linux\" && !sameView(view, hereNow())) return { moved: true };",
+    to: "",
+    tests: [[UNIT, "R10c|R10e|R10g"], ["tests/state-lock-sol-r3.test.mjs", "probe"]]
+  },
+  {
+    id: "grace-moved-is-gone",
+    rule: "v2.13 R10e: a pid missing from another procfs during the grace is not terminated",
+    file: FL,
+    from: "      if (afterTerm === \"moved\") return moved();\n",
+    to: "",
+    tests: [[UNIT, "R10e"]]
+  },
+  {
+    id: "status-argv-any-view",
+    rule: "v2.13 R10g: status shows no argv from another procfs",
+    file: FL,
+    from: "          out.waitingOn = shown.moved ?",
+    to: "          out.waitingOn = false ?",
+    tests: [[UNIT, "R10g"]]
   },
   {
     id: "no-assertOwned-before-rename",
