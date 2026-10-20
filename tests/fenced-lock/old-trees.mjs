@@ -22,11 +22,11 @@ export function oldStateMjs(which) {
   const spec = OLD_PROTOCOLS[which];
   if (!spec) throw new Error(`unknown old protocol ${which}`);
   const full = execFileSync("git", ["rev-parse", `${spec.ref}^{commit}`], { cwd: REPO, encoding: "utf8" }).trim();
-  const dir = path.join(os.tmpdir(), `fenced-lock-old-${full.slice(0, 12)}`);
+  const dir = path.join(os.tmpdir(), `fenced-lock-old-${full.slice(0, 12)}-plugin`);
   const stateFile = path.join(dir, STATE_REL);
   if (!fs.existsSync(stateFile)) {
     const staging = fs.mkdtempSync(path.join(os.tmpdir(), "fenced-lock-old-staging-"));
-    execFileSync("sh", ["-c", `git archive --format=tar "$1" plugins/codex/scripts | tar -x -C "$2"`, "sh", full, staging], {
+    execFileSync("sh", ["-c", `git archive --format=tar "$1" plugins/codex | tar -x -C "$2"`, "sh", full, staging], {
       cwd: REPO
     });
     try {
