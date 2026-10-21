@@ -770,6 +770,9 @@ export function defaultJudgeLegacy(file) {
 
 export function openFencedLock(fencePath, options = {}) {
   const o = withDefaults(options);
+  // An explicitly absent/broken certificate is a refusal, never a request
+  // to fall back to the process-scanning path.
+  const consumerOnly = Object.hasOwn(options, "consumeAdmission");
   const F = path.resolve(fencePath);
   const A = `${F}.db`;
   const dir = path.dirname(F);
@@ -946,7 +949,7 @@ export function openFencedLock(fencePath, options = {}) {
   // record from elsewhere is allowed only from that view). Returns false, and
   // writes nothing, when the procfs at /proc is not that view, or changed
   // during the scan.
-  function writeSealRecord({ declaration, replaced = null, view = null } = {}) {
+  function writeSealRecord({ declaration, replaced = null, view = null, requireComplete = false } = {}) {
     const here = hereNow();
     if (view && !sameView(o, view, here)) return false;
     const previous = readRecord();
@@ -978,6 +981,11 @@ export function openFencedLock(fencePath, options = {}) {
     // scanProc only when that is still the procfs there.
     const scan = inView(o, here, () => scanProcesses(o));
     if (scan.moved) return false;
+    if (requireComplete && (!scan.value?.self?.matched || scan.value.self.pid !== process.pid ||
+      !Array.isArray(scan.value.processes) || !scan.value.processes.every((p) => p &&
+        recordedIdentity(p) && (p.verdict === "new" || p.verdict === "unproven")))) {
+      throw new Error("admission scan incomplete: no matched self or process inventory");
+    }
     const S0 = scan.value.processes
       .filter((p) => p.verdict === "unproven")
       .map((p) => ({ pid: p.pid, start: p.start, script: p.script, sub: p.sub, comm: p.comm, uid: p.uid, reason: p.reason }));
@@ -1022,11 +1030,11 @@ export function openFencedLock(fencePath, options = {}) {
       .join(", ");
   }
 
-  function sealState() {
+  function sealState({ requireComplete = false } = {}) {
     try {
       let r = readRecord();
       if (!r) {
-        if (!writeSealRecord()) return { reason: PROC_MOVED };
+        if (!writeSealRecord({ requireComplete })) return { reason: PROC_MOVED };
         r = readRecord();
         if (!r) return { reason: "seal record unreadable after writing" };
       }
@@ -1052,7 +1060,7 @@ export function openFencedLock(fencePath, options = {}) {
           // already refused a reader that cannot judge this record).
         }
         // residue gone, or rescan (v2.7/v2.12: the init namespace scans a record from elsewhere again)
-        if (!writeSealRecord({ view: j.here })) return { reason: PROC_MOVED };
+        if (!writeSealRecord({ view: j.here, requireComplete })) return { reason: PROC_MOVED };
         r = readRecord();
         if (!r) return { reason: "seal record unreadable after writing" };
       }
@@ -1076,7 +1084,7 @@ export function openFencedLock(fencePath, options = {}) {
     return P;
   }
 
-  function publishFence() {
+  function publishFence({ requireComplete = false } = {}) {
     const P = prepare();
     try {
       fs.renameSync(P, F);
@@ -1086,7 +1094,7 @@ export function openFencedLock(fencePath, options = {}) {
       throw error;
     }
     try {
-      writeSealRecord();
+      writeSealRecord({ requireComplete });
     } catch {
       // a fence without a record gets its check and scan on the next acquire
     }
@@ -1107,6 +1115,7 @@ export function openFencedLock(fencePath, options = {}) {
 
   // One attempt: a held handle with a sealed fence, or a reason to wait.
   function attempt() {
+    if (consumerOnly) return consumeAttempt();
     const h = lockAuthority();
     if (h === null) return { reason: busyReason() };
     if (h === "retry") return { reason: "the lock database was replaced from outside" };
@@ -1147,7 +1156,7 @@ export function openFencedLock(fencePath, options = {}) {
 
   function acquire({ deadlineMs = o.deadlineMs } = {}) {
     ensureAvailable();
-    fs.mkdirSync(dir, { recursive: true });
+    if (!consumerOnly) fs.mkdirSync(dir, { recursive: true });
     const deadline = performance.now() + deadlineMs;
     let reason = "";
     for (;;) {
@@ -1163,7 +1172,7 @@ export function openFencedLock(fencePath, options = {}) {
 
   function tryAcquire() {
     ensureAvailable();
-    fs.mkdirSync(dir, { recursive: true });
+    if (!consumerOnly) fs.mkdirSync(dir, { recursive: true });
     return attempt().handle ?? null;
   }
 
@@ -1177,6 +1186,140 @@ export function openFencedLock(fencePath, options = {}) {
     if (a !== h.a) throw new StateLockLost(`${A} was replaced or removed`);
     const st = lstatOrNull(F);
     if (!st || !st.isDirectory() || fileId(st) !== h.fence) throw new StateLockLost(`the fence ${F} was replaced or removed`);
+  }
+
+  // ---- scoped hook admission -------------------------------------------
+
+  function canonicalFence() {
+    return path.join(fs.realpathSync(dir), base);
+  }
+
+  // Stronger validation for the certificate route. In particular S0=null
+  // means no process inventory was established, never an empty inventory.
+  function recordedIdentity(p) {
+    return Boolean(p && Number.isInteger(p.pid) && p.pid > 0 &&
+      (p.start === null || (typeof p.start === "string" && p.start.length > 0) ||
+        (typeof p.start === "number" && Number.isFinite(p.start))));
+  }
+
+  function admissionRecord(r) {
+    return Boolean(r && r.version === 1 && r.verdict === "initial" &&
+      Array.isArray(r.residues) && r.residues.length === 0 &&
+      Array.isArray(r.S0) && r.S0.every(recordedIdentity) &&
+      typeof r.scannedAt === "string" && r.scannedAt.length > 0 &&
+      typeof r.sealedAt === "string" && r.sealedAt.length > 0);
+  }
+
+  function boundTo(r, h) {
+    return r?.admissionBinding?.authority === h.a && r.admissionBinding.fenceId === h.fence;
+  }
+
+  function consumeAttempt() {
+    let h = null;
+    try {
+      const c = o.consumeAdmission;
+      if (!c || c.version !== 1 || typeof c.fence !== "string" ||
+        typeof c.authority !== "string" || typeof c.fenceId !== "string" ||
+        typeof c.recordHash !== "string" || !/^[a-f0-9]{64}$/.test(c.recordHash)) {
+        return { reason: "admission certificate missing or malformed" };
+      }
+      if (c.fence !== canonicalFence()) return { reason: "admission belongs to another state root" };
+      const f = lstatOrNull(F);
+      const a = lstatOrNull(A);
+      if (!f?.isDirectory() || fileId(f) !== c.fenceId) return { reason: "admission fence missing or replaced" };
+      if (!a?.isFile() || fileId(a) !== c.authority) return { reason: "admission authority missing or replaced" };
+      h = lockAuthority();
+      if (h === null) return { reason: busyReason() };
+      if (h === "retry") { h = null; return { reason: "admission authority replaced" }; }
+      h.fence = c.fenceId;
+      assertOwned(h);
+      if (h.a !== c.authority) throw new Error("admission authority changed");
+      const rs = lstatOrNull(recordPath);
+      if (!rs?.isFile()) throw new Error("admission record missing or not a regular file");
+      const bytes = fs.readFileSync(recordPath);
+      const r = JSON.parse(bytes.toString("utf8"));
+      if (!admissionRecord(r)) throw new Error("admission record missing, malformed or unsealed");
+      if (!boundTo(r, h)) throw new Error("admission record belongs to another fence or authority");
+      if (sha256(bytes) !== c.recordHash) throw new Error("admission record changed");
+      assertOwned(h);
+      writeOwner(h);
+      return { handle: h };
+    } catch (error) {
+      if (h) unlock(h);
+      return { reason: `admission refused (${error.code ?? error.message})` };
+    }
+  }
+
+  function prepareAttempt() {
+    const h = lockAuthority();
+    if (h === null) return { reason: busyReason() };
+    if (h === "retry") return { reason: "the lock database was replaced from outside" };
+    try {
+      let st = lstatOrNull(F);
+      if (st === null) { publishFence({ requireComplete: true }); st = lstatOrNull(F); }
+      if (!st?.isDirectory()) return { reason: st?.isFile() ? o.judgeLegacy(F) : "admission fence unavailable" };
+      h.fence = fileId(st);
+      if (!lstatOrNull(A)?.isFile()) return { reason: "admission authority is not a regular file" };
+      // Even an already-bound seal cannot turn an unknown hook invocation
+      // into a proven preparation route.
+      const admissionView = viewOf(o);
+      if (admissionView.domain.verdict !== "initial") return { reason: "admission requires a proven initial domain" };
+      // The normal macOS route memoizes a definitive view. Hook preparation
+      // has a stricter boundary: its canary must pass again on every call.
+      viewMemo = admissionView;
+      let r = readRecord();
+      if (r && (r.S0 === null && r.residues.length === 0)) return { reason: "admission record has no process inventory" };
+      if (r && Array.isArray(r.S0) && !r.S0.every(recordedIdentity)) return { reason: "admission record has malformed process identities" };
+      // Never discard an existing unsealed S0 just because a new scan no
+      // longer sees its processes. Judge those original identities first.
+      let z = sealState({ requireComplete: true });
+      if (!z.sealed) return z;
+      r = readRecord();
+      if (!admissionRecord(r)) return { reason: "admission record invalid after seal" };
+      if (!boundTo(r, h)) {
+        // Generic/old/copied seals prove nothing about this particular F/A.
+        // Establish the complete inventory again after the current F exists.
+        if (!writeSealRecord({ requireComplete: true })) return { reason: PROC_MOVED };
+        z = sealState({ requireComplete: true });
+        if (!z.sealed) return z;
+        r = readRecord();
+        if (!admissionRecord(r)) return { reason: "admission inventory incomplete" };
+        writeRecord({ ...r, admissionBinding: { authority: h.a, fenceId: h.fence } });
+      }
+      assertOwned(h);
+      const bytes = fs.readFileSync(recordPath);
+      const final = JSON.parse(bytes.toString("utf8"));
+      if (!admissionRecord(final) || !boundTo(final, h)) return { reason: "admission record changed during preparation" };
+      assertOwned(h);
+      return { admission: { version: 1, fence: canonicalFence(), authority: h.a, fenceId: h.fence, recordHash: sha256(bytes) } };
+    } catch (error) {
+      return { reason: `admission preparation failed (${error.code ?? error.message})` };
+    } finally {
+      unlock(h);
+    }
+  }
+
+  function prepareAdmission({ deadlineMs = o.deadlineMs } = {}) {
+    try {
+      ensureAvailable();
+      fs.mkdirSync(dir, { recursive: true });
+      const deadline = performance.now() + deadlineMs;
+      for (;;) {
+        const result = prepareAttempt();
+        if (result.admission) return { ok: true, admission: result.admission };
+        if (performance.now() >= deadline) return { ok: false, reason: result.reason };
+        sleepSync(o.retryMs);
+      }
+    } catch (error) {
+      return { ok: false, reason: `admission preparation failed (${error.code ?? error.message})` };
+    }
+  }
+
+  function mutation(fn) {
+    return (...args) => {
+      if (consumerOnly) throw new FencedLockError("ADMISSION_CONSUMER_ONLY", "an admission consumer cannot prepare or mutate a fence");
+      return fn(...args);
+    };
   }
 
   // ---- maintenance commands ---------------------------------------------
@@ -1662,10 +1805,11 @@ export function openFencedLock(fencePath, options = {}) {
     release,
     assertOwned,
     status,
-    adoptLegacy,
-    seal,
-    stopOld,
-    unfence,
+    prepareAdmission: mutation(prepareAdmission),
+    adoptLegacy: mutation(adoptLegacy),
+    seal: mutation(seal),
+    stopOld: mutation(stopOld),
+    unfence: mutation(unfence),
     drainCheck: () => drainCheck(o),
     residues
   };
