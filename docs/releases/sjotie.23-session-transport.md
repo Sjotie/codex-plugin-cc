@@ -1,8 +1,8 @@
 # Session certificate transport — verification gate
 
 Ticket #1916. Tier H: process identity and state integrity. This work is local
-to the candidate branches. No push, landing, tag, publication or installed
-plugin update is authorized. Native startup/resume is proven; actual compact reveals a functional blocker below.
+to the candidate branches. Backup pushes to those branches are authorized;
+landing, tags, publication and installed-plugin updates remain unauthorized. Native startup/resume is proven; actual compact reveals a functional blocker below.
 
 ## Contract
 
@@ -67,8 +67,8 @@ only at SessionStart's actual preparation call.
 | Sandbox and no rescan | Both real Bash journeys get EPERM on denied write; Stop/End receive no exported proof, all consumers make zero ps/lsof calls | Only SessionStart scans |
 | Completion semantics | `t1916-timestampreceipt.mialwt/summary.json`: startup/resume exit zero grants; exit one and SIGKILL after stdout refuse in Bash/Stop/End | Provider labels can say hook_success even on failure; numeric exit zero required |
 | Timeout | Final normal hooks 1156/271 ms under unchanged production 5000 ms | Earlier real 5018 ms timeout safely refused; availability boundary retained |
-| Interactive compact | Actual source compact, same SID, new generation, exit-zero receipt 333 ms; Stop completes next review and old certificate refuses unchanged | Fresh Bash safely refuses despite that current receipt: **functional blocker**; exact Bash envelope was not captured, so stale export is only a hypothesis |
-| Interactive clear | Actual End reason clear on old SID; SessionStart clear uses a new SID, receipt 142 ms, Bash acquires and Stop completes next review. Later readonly state shows old SID pending/no admission and earlier queued job cancelled | Full clear assertion stays incomplete: compact denial produced no captured compact capability/job; replay encounters ENOENT; final exit observation times out, owned child stopped and awaited |
+| Interactive compact | Latest observation: Bash retains g0/resume and full-envelope hash while same ENVfile, managed receipt and actual A-row contain g1/compact; Stop 6→7, current g1 control works in same sandbox | Exact first refusal: row.generation differs from consumer.generation. Functional blocker; internal provider delivery/cache step unknown |
+| Interactive clear | Current g1 capture is available and positively consumed before clear. Actual End clear and new-SID SessionStart observed; readonly old row pending/no admission and earlier queued job cancelled | Post-clear Bash rejected by Claude automatic approval as Code from External. No g1 replay after clear; permission unchanged, owned child stopped/awaited |
 
 The product emits the observed official `hookSpecificOutput.additionalContext`
 format with a fresh neutral context timestamp. Actual model input contains
@@ -85,10 +85,10 @@ review** while the actual compact Bash path is unavailable. No disk lookup,
 cache or fallback has been added to Bash. This observed limitation is reported
 for an explicit route decision. The fixed Stop/End transport is proven on
 startup/resume and Stop after compact; it does not establish fresh Bash env
-propagation after compact. Stale environment export is a hypothesis: the observer
-did not capture the actual compact Bash envelope. The actual action run is red,
-not waived. Its first launcher failure (socket stdin, no Claude child) is kept
-separately from the subsequent genuine PTY product observations.
+propagation after compact. The [observation-only diagnosis and options](sjotie.23-compact-diagnosis.md)
+and its durable JSON prove the stale envelope and exact failed predicate. The
+action run remains red; the post-clear replay is approval-blocked. The earlier
+launcher-only socket-stdin failure remains separate from product observations.
 
 Reproduce deterministic controls through the machine test slot:
 
@@ -105,10 +105,10 @@ runs the real setup/job paths, Stop runs the real enabled review task through
 an owned local fake Codex, and End must persist real cancellation. An EPERM
 write control proves Bash sandboxing. Only owned children are stopped and
 awaited. The existing five-second SessionStart timeout stays unchanged.
-Summary JSON files pin each run's source/harness hashes. Subsequent observer-only
-changes add explicit missing-capture reporting and optional environment binding
-metadata; those changes were syntax-checked only, not claimed as a new native
-run. Full paths live on
+Summary JSON files pin each run's source/harness hashes. The latest actual
+PTY controller and its probe/bootstrap/replay hashes match the local observation
+controls. The live normal-journey launcher's encrypted-capture setup was syntax
+checked; the existing normal 2/2 run remains its earlier pinned evidence. Full paths live on
 the ticket; raw transcripts and account material are not committed.
 
 ## Boundaries and undo

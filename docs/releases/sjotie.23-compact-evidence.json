@@ -1,0 +1,323 @@
+{
+  "ticket": 1916,
+  "kind": "observation-only-no-product-fix",
+  "productSource": {
+    "pluginCommit": "5a0ea2e099a9b3e275ae72604d83722da8273fb2",
+    "coreCommit": "3982b9947291996586bddf6fe06736c71ed63818",
+    "moduleSha256": "e0c4c59fb32f4329b4759e3849849b834a361fe543e0ba97d4b6f61ad9502842",
+    "filesChecked": 53,
+    "changed": []
+  },
+  "runtime": {
+    "claudeVersion": "2.1.301",
+    "claudeBinarySha256": "1f04c69e1c24e4d0a716a863af0aad8fc64d49a499334c29701f073700276b99",
+    "platform": "Darwin arm64",
+    "interactivePTY": true
+  },
+  "controls": {
+    "current": {
+      "passed": 19,
+      "failed": 0,
+      "summaryPath": "/private/var/tmp/0o63ecs/s/1e0c7e2c2af59990-mvi4opz9ce422e/t1916-observation-controls-oO9Grg/summary.json"
+    },
+    "oldHarness": {
+      "passed": 1,
+      "failed": 2,
+      "summaryPath": "/private/var/tmp/0o63ecs/s/1e0c7e2c2af59990-mvi4opz9ce422e/t1916-observation-controls-fWjdAQ/summary.json"
+    }
+  },
+  "harnessHashes": {
+    "macos-companion-actions.mjs": "7f5d9413f85ba924281cb4a22230b564a51d09a741c647052f500ceebccae95f",
+    "macos-companion-bootstrap.mjs": "c3f511799522d33a732cf624375cf5ad3a86b0c0d77440921f4150c8291902dc",
+    "macos-companion-probe.mjs": "b4cd3144f5c133741ea6dd436b3de75ca6723f143971657a494e241ede00d280",
+    "macos-companion-replay.mjs": "f14dcb4259c1871a72e2b577d5dc84150dd80990af98e3122c9e4ffd9da220a7"
+  },
+  "calls": [
+    {
+      "stage": "initial",
+      "environment": {
+        "names": [
+          "CLAUDE_CODE_SESSION_ID",
+          "CODEX_COMPANION_SESSION_ID",
+          "CODEX_COMPANION_LOCK_ADMISSION",
+          "CLAUDE_CONFIG_DIR",
+          "CLAUDE_PLUGIN_DATA"
+        ],
+        "nativeSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "companionSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "certificateVersion": 2,
+        "generation": "bf8a723173e82dd24a0559665efdb3f0a47b7db94f1d54c8056bf60ccf45a67b",
+        "source": "resume",
+        "certificateSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "certificateStateRootSha256": "95107b6bc0bb76a01a67f8c48512a4b1594901416056f05b47206e1ac6989edf",
+        "certificateConfigRootSha256": "e5aadda616da5ed999d6c439213dd54c70bb2f9cabf0772d303b160317b8e44a",
+        "bindingEpochSha256": "f7b6a40ebffd1da9cf0a3603aec7801174345f43403d4615d41ea66634d6fccb",
+        "fullEnvelopeSha256": "cf7f1cfd1a63cbc99dbb368806c85606b79321b67f381b15a7957f71a54a7b95",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3"
+      },
+      "storeAtActualAcquire": {
+        "sessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "rowPresent": true,
+        "rowPayloadSha256": "3dff9be925c7d1c5c6ee7642ad3ba3ea9bb0a9f2767eb3d2fe9203d9bb68cba2",
+        "state": "ready",
+        "generation": "bf8a723173e82dd24a0559665efdb3f0a47b7db94f1d54c8056bf60ccf45a67b",
+        "bindingEpochSha256": "f7b6a40ebffd1da9cf0a3603aec7801174345f43403d4615d41ea66634d6fccb",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+        "authoritySha256": "60b6905620023f146d6d7981b37e9c00bf19f79a5a18c90d1eb292af392df392",
+        "fenceSha256": "8dd56368b25edfe3acc625b7abfd659c9ffcce8c585eaa5fc8baf44effc099cf"
+      },
+      "sessionStartExports": [
+        {
+          "generation": "bf8a723173e82dd24a0559665efdb3f0a47b7db94f1d54c8056bf60ccf45a67b",
+          "source": "resume",
+          "fullEnvelopeSha256": "cf7f1cfd1a63cbc99dbb368806c85606b79321b67f381b15a7957f71a54a7b95",
+          "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+          "envFilePathSha256": "e57e9c61a7215f3b0b91a0731a9e981e7dccbcdc1d995623735313b8cc54d7e7",
+          "envFileIdentitySha256": "6a942e93fa1ea355aa2987498d43ff323d805b6897ea43182dbb2382a5ef5ed0",
+          "envFileSha256": "7c900998342594c13f5fbe9f67e525e5e27f92230c2cf44d9d90439ef80b0d47",
+          "keyAbsent": true
+        }
+      ],
+      "comparisons": {
+        "generationMatches": true,
+        "baseCertificateMatches": true,
+        "bindingEpochMatches": true,
+        "authorityIdentityUnchanged": true
+      },
+      "defaultConsumer": {
+        "acquired": true,
+        "stateUnchanged": false,
+        "witness": "EPERM",
+        "observerComplete": true,
+        "inconclusive": false,
+        "error": null
+      },
+      "currentSessionStartCertificateControl": {
+        "identity": "captured-session-counterfactual",
+        "generation": "bf8a723173e82dd24a0559665efdb3f0a47b7db94f1d54c8056bf60ccf45a67b",
+        "source": "resume",
+        "nativeSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "fullEnvelopeSha256": "cf7f1cfd1a63cbc99dbb368806c85606b79321b67f381b15a7957f71a54a7b95",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+        "acquired": true,
+        "refusal": null,
+        "stateUnchanged": true
+      },
+      "previousSessionStartCertificateControl": {
+        "identity": "captured-session-counterfactual",
+        "generation": "bf8a723173e82dd24a0559665efdb3f0a47b7db94f1d54c8056bf60ccf45a67b",
+        "source": "resume",
+        "nativeSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "fullEnvelopeSha256": "cf7f1cfd1a63cbc99dbb368806c85606b79321b67f381b15a7957f71a54a7b95",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+        "acquired": true,
+        "refusal": null,
+        "stateUnchanged": true
+      }
+    },
+    {
+      "stage": "compact",
+      "environment": {
+        "names": [
+          "CLAUDE_CODE_SESSION_ID",
+          "CODEX_COMPANION_SESSION_ID",
+          "CODEX_COMPANION_LOCK_ADMISSION",
+          "CLAUDE_CONFIG_DIR",
+          "CLAUDE_PLUGIN_DATA"
+        ],
+        "nativeSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "companionSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "certificateVersion": 2,
+        "generation": "bf8a723173e82dd24a0559665efdb3f0a47b7db94f1d54c8056bf60ccf45a67b",
+        "source": "resume",
+        "certificateSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "certificateStateRootSha256": "95107b6bc0bb76a01a67f8c48512a4b1594901416056f05b47206e1ac6989edf",
+        "certificateConfigRootSha256": "e5aadda616da5ed999d6c439213dd54c70bb2f9cabf0772d303b160317b8e44a",
+        "bindingEpochSha256": "f7b6a40ebffd1da9cf0a3603aec7801174345f43403d4615d41ea66634d6fccb",
+        "fullEnvelopeSha256": "cf7f1cfd1a63cbc99dbb368806c85606b79321b67f381b15a7957f71a54a7b95",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3"
+      },
+      "storeAtActualAcquire": {
+        "sessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "rowPresent": true,
+        "rowPayloadSha256": "ff39caf79f0acc19d9aa96f0c349cd6065b07835ad287d7387ea0564d7318e22",
+        "state": "ready",
+        "generation": "ef4dcba07a23f544fb23950181abafd3bb549fd13552e1d1087f7f9e6b07cc41",
+        "bindingEpochSha256": "f7b6a40ebffd1da9cf0a3603aec7801174345f43403d4615d41ea66634d6fccb",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+        "authoritySha256": "60b6905620023f146d6d7981b37e9c00bf19f79a5a18c90d1eb292af392df392",
+        "fenceSha256": "8dd56368b25edfe3acc625b7abfd659c9ffcce8c585eaa5fc8baf44effc099cf"
+      },
+      "sessionStartExports": [
+        {
+          "generation": "ef4dcba07a23f544fb23950181abafd3bb549fd13552e1d1087f7f9e6b07cc41",
+          "source": "compact",
+          "fullEnvelopeSha256": "900d255735dbb278d70f3291e1f2f4357476a3d76f800af2a89684d230479db0",
+          "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+          "envFilePathSha256": "e57e9c61a7215f3b0b91a0731a9e981e7dccbcdc1d995623735313b8cc54d7e7",
+          "envFileIdentitySha256": "6a942e93fa1ea355aa2987498d43ff323d805b6897ea43182dbb2382a5ef5ed0",
+          "envFileSha256": "f762a5d18ed68798ffe618a154ee76419a7a5b58ecafc14371c7af72422a81ca",
+          "keyAbsent": true
+        }
+      ],
+      "comparisons": {
+        "generationMatches": false,
+        "baseCertificateMatches": true,
+        "bindingEpochMatches": true,
+        "authorityIdentityUnchanged": true
+      },
+      "defaultConsumer": {
+        "acquired": false,
+        "stateUnchanged": true,
+        "witness": "EPERM",
+        "observerComplete": true,
+        "inconclusive": false,
+        "error": {
+          "name": "StateLockTimeout",
+          "code": "ESTATELOCKTIMEOUT",
+          "rule": "session generation pending, revoked or foreign",
+          "reasonSha256": "905b6b12fca68152931cec674f9b3e1bb17e443bb933c575a81a413724285019",
+          "messageSha256": "a293aa3a6dd5aaab7c4392c0cefbfae24806640fad3ecc85681cc99350552aed"
+        }
+      },
+      "currentSessionStartCertificateControl": {
+        "identity": "captured-session-counterfactual",
+        "generation": "ef4dcba07a23f544fb23950181abafd3bb549fd13552e1d1087f7f9e6b07cc41",
+        "source": "compact",
+        "nativeSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "fullEnvelopeSha256": "900d255735dbb278d70f3291e1f2f4357476a3d76f800af2a89684d230479db0",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+        "acquired": true,
+        "refusal": null,
+        "stateUnchanged": true
+      },
+      "previousSessionStartCertificateControl": {
+        "identity": "captured-session-counterfactual",
+        "generation": "bf8a723173e82dd24a0559665efdb3f0a47b7db94f1d54c8056bf60ccf45a67b",
+        "source": "resume",
+        "nativeSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "fullEnvelopeSha256": "cf7f1cfd1a63cbc99dbb368806c85606b79321b67f381b15a7957f71a54a7b95",
+        "baseCertificateSha256": "5f40958d21b0b39cf06f8c2e00840c1df78ac600772106012b7b54cf655933a3",
+        "acquired": false,
+        "refusal": {
+          "name": "StateLockTimeout",
+          "code": "ESTATELOCKTIMEOUT",
+          "rule": "session generation pending, revoked or foreign",
+          "reasonSha256": "905b6b12fca68152931cec674f9b3e1bb17e443bb933c575a81a413724285019"
+        },
+        "stateUnchanged": true
+      }
+    }
+  ],
+  "conclusion": {
+    "staleBashEnvelopeProven": true,
+    "firstFailingPredicate": "row.generation !== consumer.generation",
+    "sourceFunction": "validateSessionConsumer",
+    "sourcePath": "shared/fenced-lock/fenced-lock.mjs",
+    "sourceLine": 1390,
+    "currentCertificateWorksInSameSandbox": true,
+    "providerInternalCacheCauseProven": false,
+    "compactProductPathFunctional": false
+  },
+  "clear": {
+    "replayProven": false,
+    "approvalRejected": true,
+    "approvalRule": "Code from External",
+    "afterClearBashStarted": false,
+    "oldSessionReadonlyFootprint": [
+      {
+        "sessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "state": "pending",
+        "generation": "82adfb63813d87d11739d118093d172c7227f0f5092cdf743de307a206c25fcd",
+        "hasAdmission": false,
+        "rowPayloadSha256": "e030562b15dcf8f01f7c09bcbe1ebdb85feeb9853ac1710a4cbfa09d0ef70076"
+      }
+    ],
+    "lifecycleInputs": [
+      {
+        "event": "SessionEnd",
+        "sessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "nativeSessionSha256": "1c3dcee9125f8c49e9c5ca132fe6f39364d43866d5b951999a013a94a49f07f4",
+        "source": null,
+        "reason": "clear",
+        "cwdSha256": "7c58ae0200fe24e644e7423748f07cf0d9d908f2c70390dc38a9a367548e6eb2",
+        "transcriptPathSha256": "ffa9c89327b450dbb4c0784ae4f86ab34e2220be3da05c08cd2dfd309ca22740"
+      },
+      {
+        "event": "SessionEnd",
+        "sessionSha256": "a4e974862a7418ca82730c7c16c5f35676b3c28e91ebaf5658ff85940f838ded",
+        "nativeSessionSha256": "a4e974862a7418ca82730c7c16c5f35676b3c28e91ebaf5658ff85940f838ded",
+        "source": null,
+        "reason": "other",
+        "cwdSha256": "7c58ae0200fe24e644e7423748f07cf0d9d908f2c70390dc38a9a367548e6eb2",
+        "transcriptPathSha256": "49ee7926269b7eb1a4a483fa921a6e45587f44b0bdf5c4e2fab9733fd3ded3ec"
+      },
+      {
+        "event": "SessionStart",
+        "sessionSha256": "a4e974862a7418ca82730c7c16c5f35676b3c28e91ebaf5658ff85940f838ded",
+        "nativeSessionSha256": "a4e974862a7418ca82730c7c16c5f35676b3c28e91ebaf5658ff85940f838ded",
+        "source": "clear",
+        "reason": null,
+        "cwdSha256": "7c58ae0200fe24e644e7423748f07cf0d9d908f2c70390dc38a9a367548e6eb2",
+        "transcriptPathSha256": "49ee7926269b7eb1a4a483fa921a6e45587f44b0bdf5c4e2fab9733fd3ded3ec"
+      }
+    ],
+    "jobCleanup": [
+      {
+        "name": "native-end-action-mviegg5p-initial",
+        "state": "cancelled"
+      }
+    ],
+    "permissionToolResults": [
+      {
+        "toolUseSha256": "f8eaa9a89e12475e347bb7e2a8514e4548236ddaf7d09668e5e9d41d30c4cfe1",
+        "error": true,
+        "mentionsAutoMode": true,
+        "mentionsExternalCode": true,
+        "contentSha256": "10a37dca61e98d43d428f64b078e1c71b8fe2bc902c58701e5bb01cfc0fae4d0"
+      }
+    ],
+    "label": "read-only footprint, not a post-clear Bash replay"
+  },
+  "integrity": {
+    "keyAbsent": true,
+    "ownedClaudeGone": true,
+    "retainedOwnPid": null,
+    "productUnchanged": true
+  },
+  "rawEvidence": [
+    {
+      "path": "/private/var/tmp/0o63ecs/s/1e0c7e2c2af59990-mvi4opz9ce422e/fenced-lock-companion-1la5OW/actions-summary.json",
+      "sha256": "8d7b0b7c5e8f81d7f5caa697f8a85cc191cb57115b5f9950ad5fb45d4f5ecdd9"
+    },
+    {
+      "path": "/private/var/tmp/0o63ecs/s/1e0c7e2c2af59990-mvi4opz9ce422e/fenced-lock-companion-1la5OW/actions-observation-after-clear.json",
+      "sha256": "40694259a5219b9048bbf05be11aa95df4370fadd69e0c32795baf1bffdc850a"
+    },
+    {
+      "path": "/private/var/tmp/0o63ecs/s/1e0c7e2c2af59990-mvi4opz9ce422e/fenced-lock-companion-1la5OW/actions-product-byte-check.json",
+      "sha256": "b4b7866e711cb2f08d388efddae41165a0d227fde6cdaedfb3224070a53ff957"
+    }
+  ],
+  "requestCoverage": [
+    {
+      "stage": "beforeCompact",
+      "bashRequests": 1,
+      "startedProbes": 1,
+      "rejected": 0
+    },
+    {
+      "stage": "afterCompact",
+      "bashRequests": 1,
+      "startedProbes": 1,
+      "rejected": 0
+    },
+    {
+      "stage": "afterClear",
+      "bashRequests": 1,
+      "startedProbes": 0,
+      "rejected": 1
+    }
+  ],
+  "requestCoverageNote": "API request blob copies have the same tool-use ID and are not additional requests; no hidden retries or overwritten second probe"
+}

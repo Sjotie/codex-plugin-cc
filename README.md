@@ -43,8 +43,11 @@ Every new SessionStart for the same session ID invalidates its previous
 generation before preparation. SessionEnd revokes its original activation after
 persistent cancellation. Native startup/resume now works end to end.
 **Native release gate remains open:** after actual interactive compact, Stop
-uses the new generation, but fresh Bash safely refuses; its cause is unproven.
-The candidate is functionally incomplete; no alternate Bash admission is supplied. See
+uses the new generation, but Bash retains its old envelope and safely refuses
+on the generation check. The provider delivery/cache step remains unknown.
+The candidate is functionally incomplete; no alternate Bash admission is supplied.
+The [compact diagnosis and options](docs/releases/sjotie.23-compact-diagnosis.md)
+records the measured cause and the blocked post-clear replay. See
 the [transport evidence](docs/releases/sjotie.23-session-transport.md).
 
 ## Install

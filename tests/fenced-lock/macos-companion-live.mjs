@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { OLD_PROTOCOLS } from "./old-trees.mjs";
 
@@ -61,7 +61,7 @@ const settings = path.join(root, "settings.json");
 json(settings, { sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { denyWrite: [path.join(root, "outside-denied")] } }, enabledPlugins: {}, permissions: { allow: ["Bash(node:*)"] } });
 const env = { ...process.env };
 for (const key of Object.keys(env)) if (key.startsWith("CODEX_COMPANION_") || key.startsWith("FENCED_LOCK_SCAN_") || ["CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "NODE_OPTIONS"].includes(key)) delete env[key];
-Object.assign(env, { TERM: "dumb", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", FENCED_LOCK_NATIVE_ROOT: root, CLAUDE_PLUGIN_DATA: path.join(root, "data"), CODEX_HOME: path.join(root, "codex-home"), NODE_OPTIONS: `--import=${pathToFileURL(bootstrap).href}`, PATH: `${bin}${path.delimiter}${env.PATH}` });
+Object.assign(env, { TERM: "dumb", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", FENCED_LOCK_NATIVE_ROOT: root, FENCED_LOCK_NATIVE_CAPTURE_KEY: randomBytes(32).toString("base64"), CLAUDE_PLUGIN_DATA: path.join(root, "data"), CODEX_HOME: path.join(root, "codex-home"), NODE_OPTIONS: `--import=${pathToFileURL(bootstrap).href}`, PATH: `${bin}${path.delimiter}${env.PATH}` });
 const children = [];
 function start(command, args, options) {
   const child = spawn(command, args, options);
@@ -96,7 +96,7 @@ try {
     if (writer && mode !== "old-writer" && writer.child.exitCode === null && writer.child.signalCode === null) { writer.child.kill("SIGTERM"); await writer.exit; }
     const expectedAdmission = ["admitted", "startup", "resume", "recover"].includes(mode);
     const resume = mode !== "old-writer" && mode !== "startup" && sessionId;
-    json(path.join(root, "native-config.json"), { phase, mode, ...(expectedAdmission ? { captureAdmission: `${phase}.admission.json` } : {}) });
+    json(path.join(root, "native-config.json"), { phase, mode, ...(expectedAdmission ? { captureAdmission: `${phase}.admission.enc.json` } : {}) });
     const command = [process.execPath, probe, root, phase].map(quote).join(" ");
     fs.writeFileSync(path.join(plugin, "commands/native-probe.md"), `---\ndescription: Native companion admission proof\nallowed-tools: Bash(node:*)\n---\nRun exactly this Bash command once, then say OK. Do not run other commands.\n\n\x60\x60\x60bash\n${command}\n\x60\x60\x60\n`);
     const beforeArtifacts = artifacts();
@@ -112,8 +112,8 @@ try {
     const input = inputs.at(-1);
     const transcript = input?.transcriptPath ? readLines(input.transcriptPath) : [];
     const receipts = transcript.filter((record) => record.type === "attachment" && record.sessionId === sessionId && record.cwd === root && record.attachment?.hookEvent === "SessionStart" && record.attachment.command === sessionStartCommand).flatMap((record) => { try { const output = JSON.parse(record.attachment.stdout), receipt = output.codexStateLockAdmission; return receipt?.generation ? [{ generation: receipt.generation, source: receipt.source, exitCode: record.attachment.exitCode, type: record.attachment.type, hookName: record.attachment.hookName, durationMs: record.attachment.durationMs, context: output.hookSpecificOutput?.additionalContext ?? null }] : []; } catch { return []; } });
-    const capturedAdmission = readJson(path.join(root, `${phase}.admission.json`));
-    const admissionAfterEnd = capturedAdmission ? JSON.parse(execFileSync(process.execPath, [replay, root], { env: { ...env, ...capturedAdmission }, encoding: "utf8", timeout: 10_000 })) : null;
+    const cipherFile = path.join(root, `${phase}.admission.enc.json`);
+    const admissionAfterEnd = fs.existsSync(cipherFile) ? JSON.parse(execFileSync(process.execPath, [replay, root, cipherFile], { env, encoding: "utf8", timeout: 10_000 })) : null;
     const events = readLines(path.join(root, "events.jsonl")).filter((event) => event.phase === phase);
     const consumerScans = events.filter((event) => event.kind === "process-inspection" && !event.allowedProducer);
     const entries = events.filter((event) => event.kind === "entry" && ["Stop", "SessionEnd"].includes(event.event));

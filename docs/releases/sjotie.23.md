@@ -3,8 +3,9 @@
 **Tier H:** process identity, mutual exclusion and job artifact integrity.
 The whole candidate is **not landable and not ready for final cross-family
 review**. Actual interactive compact has a fresh-Bash refusal; no alternate
-Bash admission route is supplied. No push, plugin-main landing, publication,
-tag, deployment or installation update is authorized.
+Bash admission route is supplied. Only backup pushes to the candidate branches
+are authorized; no plugin-main landing, publication, tag, deployment or
+installation update is authorized.
 
 ## Provenance and contract
 
@@ -47,8 +48,8 @@ slot, including normal waits; no global settings changed.
 | Native startup/resume | Both pass: real sandboxed `/codex:native-probe` commits setup/job; enabled Stop completes review jobs 0→1→2; End cancels index/job and expires old certificate | Byte-equal product, exact raw production hook commands; local owned fake Codex for Stop body |
 | Sandbox / no rescan | Actual denied write EPERM; Stop/End inherit no proof exports; zero consumer ps/lsof | SessionStart alone scans |
 | Managed completion | Startup/resume exit zero grants; exit one and SIGKILL-after-stdout refuse in all three consumers | `hook_success` type alone is insufficient |
-| Actual compact | Same SID, new generation, current exit-zero receipt 333 ms; Stop 3→4; old capability refuses with unchanged state | Fresh Bash refuses despite current receipt: functional blocker, cause unproven; exact Bash envelope not recorded |
-| Actual clear | End reason clear for old SID; new SID/current receipt 142 ms; Bash acquires, Stop 4→5. Later readonly state: old SID pending/no admission, earlier queued job cancelled | Full replay incomplete after compact produced no capability capture/job; final `/exit` observation timed out; only owned child stopped/awaited, no retained PID |
+| Actual compact | Latest actual observation: same SID/epoch/base cert/A, same ENVfile now contains g1, actual A SELECT ready/g1, Bash still has exact g0/resume envelope; Stop 6→7; g1 control works in same sandbox | First refusal is row.generation !== consumer.generation. No product fix; provider cache/delivery internals unknown |
+| Actual clear | Current g1 capture and pre-clear positive control complete; actual End clear/new SID; old row pending/no admission and initial job cancelled | Post-clear Bash refused by Claude automatic approval as Code from External; replay unmeasured. No alternate execution route; own child stopped/awaited |
 | Hook timeout | Final startup/resume 1156/271 ms under unchanged 5000 ms; interactive resume 571 ms | Earlier genuine 5018 ms timeout safely refused; availability limitation retained |
 | Earlier M1/M2/M3 | First route2 source `95a1778c` / `c4668fbf`: native marker, old owned O2 blocks; after exit same F seals; missing record/replaced F/other root refuse; root/other-user inventory sampled | Historical five-scenario proof pinned to that source; not relabeled final-source proof |
 | Windows | Explicitly unsupported | Native loading/W1–W6 unmeasured |
@@ -59,6 +60,10 @@ token. Suppressed custom-only JSON and static-context probes failed to retain
 the current resume receipt. Their cause is unknown. There is no blind seal,
 cache or process fallback.
 
+The [compact diagnosis and design options](sjotie.23-compact-diagnosis.md)
+includes a [durable sanitized JSON](sjotie.23-compact-evidence.json), 19/19
+local observer controls and the exact cause. Product files remain unchanged.
+
 ## Evidence files
 
 The retained session temp root is:
@@ -66,7 +71,11 @@ The retained session temp root is:
 These files are local evidence, not permanent release assets:
 
 - `fenced-lock-companion-1la5OW/summary.json`: final startup/resume, hashes/timings.
-- `fenced-lock-companion-1la5OW/actions-summary.json`: genuine PTY compact/clear, red; cleanup.
+- `fenced-lock-companion-1la5OW/actions-summary.json`: latest genuine PTY cause observation, red product path; cleanup.
+- `fenced-lock-companion-1la5OW/actions-observation-after-clear.json`: approval refusal and readonly footprint; no sandbox replay.
+- `fenced-lock-companion-1la5OW/actions-summary.companion-red.json`: earlier partial compact/clear fixture.
+- `t1916-observation-controls-oO9Grg/summary.json`: current 19/19 controls.
+- `t1916-observation-controls-fWjdAQ/summary.json`: old harness, 1 pass / 2 directed failures.
 - `fenced-lock-companion-1la5OW/actions-state-after.json`: readonly clear footprint.
 - `fenced-lock-companion-1la5OW/actions-summary.unsupported-stdin.json`: earlier launcher-only socket-stdin failure, zero Claude actions.
 - `fenced-lock-companion-KLHg0i/summary.json`: causal previous-candidate companion failure.
