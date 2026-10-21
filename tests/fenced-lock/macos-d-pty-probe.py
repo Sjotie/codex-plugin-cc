@@ -85,7 +85,11 @@ if (root && m) {
   let token = null;
   const write = process.stdout.write.bind(process.stdout);
   process.stdout.write = (chunk, ...rest) => { try { const t = JSON.parse(String(chunk)).codexStateLockAdmission; if (t) token = t; } catch {} return write(chunk, ...rest); };
-  process.on("exit", (code) => log({ kind: "hook-exit", at: Date.now(), code, attemptId: token?.attemptId ?? null, capabilityId: token?.capabilityId ?? null, source: token?.source ?? null }));
+  // The hook exports Claude's transcript_path to CLAUDE_ENV_FILE; read it back
+  // instead of guessing Claude's project-directory naming.
+  const transcriptPath = () => { try { const m = [...fs.readFileSync(process.env.CLAUDE_ENV_FILE, "utf8").matchAll(/^export CODEX_COMPANION_TRANSCRIPT_PATH='(.*)'$/gm)].at(-1); return m ? m[1] : null; } catch { return null; } };
+  process.on("exit", (code) => { const t = event === "SessionStart" ? transcriptPath() : null;
+    log({ kind: "hook-exit", at: Date.now(), code, attemptId: token?.attemptId ?? null, capabilityId: token?.capabilityId ?? null, source: token?.source ?? null, transcriptPath: t, transcriptExistsAtExit: t ? fs.existsSync(t) : null }); });
 }
 """
 
@@ -302,7 +306,14 @@ def main():
             if value:
                 return value
             screen = term.screen()
-            if not trusted and re.search(r"trust (?:the files|this folder)|Yes, I trust", screen, re.I):
+            if not trusted and re.search(r"I\s*trust\s*this\s*folder", screen, re.I):
+                # The cursor starts on "No, exit": move down to "Yes, I trust this folder".
+                time.sleep(1)
+                term.send("\x1b[B")
+                time.sleep(1)
+                spaced = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b" ", term.buffer[-600:]).decode("utf8", "replace")
+                if "❯ Yes" not in re.sub(r"\s+", " ", spaced):
+                    raise RuntimeError("trust dialog: cursor is not on Yes; refusing to confirm")
                 term.send("\r")
                 trusted = True
             if re.search(r"usage limit|rate limit|please log in|login required|reauthenticate", screen, re.I):
@@ -320,14 +331,19 @@ def main():
     def receipt_latency(start_exit):
         nonlocal watch
         if watch is None:
-            sid = start_exit["sessionId"]
-            munged = re.sub(r"[^A-Za-z0-9]", "-", root)
-            path = os.path.join(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")), "projects", munged, f"{sid}.jsonl")
+            path = start_exit.get("transcriptPath")
+            if not path:
+                raise RuntimeError("SessionStart exported no transcript path")
             watch = TranscriptWatch(path)
             watch.start()
             summary["transcriptPathSha"] = sha(path)
-        seen = wait(lambda: watch.seen.get(start_exit["attemptId"]), f"receipt line of {start_exit['source']}", 30)
-        return {"source": start_exit["source"], "attemptSha": sha(start_exit["attemptId"]), "capabilitySha": sha(start_exit["capabilityId"]), "hookExitCode": start_exit["code"],
+        try:
+            seen = wait(lambda: watch.seen.get(start_exit["attemptId"]), f"receipt line of {start_exit['source']}", 30)
+        except RuntimeError:
+            summary["receiptMissing"] = {"source": start_exit["source"], "transcriptExistsAtExit": start_exit.get("transcriptExistsAtExit"),
+                                         "transcriptExistsNow": os.path.exists(watch.path), "receiptLinesSeen": len(watch.seen)}
+            raise
+        return {"source": start_exit["source"], "transcriptExistsAtExit": start_exit.get("transcriptExistsAtExit"), "attemptSha": sha(start_exit["attemptId"]), "capabilitySha": sha(start_exit["capabilityId"]), "hookExitCode": start_exit["code"],
                 "latencyHookExitToReceiptMs": round(seen["seenAt"] - start_exit["at"], 1), "receiptType": seen["type"], "receiptExitCode": seen["exitCode"], "receiptDurationMs": seen["durationMs"], "receiptVersion": seen["version"]}
 
     def turn(command, label, timeout=180):

@@ -1,10 +1,13 @@
+// Wire v2 only (pre-D): see wire-v2-only.mjs; wire v3 uses macos-d-pty-probe.py.
 // Check expiry of this owned fixture's saved session admission.
 import fs from "node:fs";
+import { requireWireV2 } from "./wire-v2-only.mjs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createDecipheriv, createHash } from "node:crypto";
 
 const root = process.argv[2];
+requireWireV2(fs.readFileSync(path.join(root, "plugin/scripts/lib/session-admission.mjs"), "utf8"), "macos-companion-replay.mjs");
 if (process.env.FENCED_LOCK_NATIVE_ROOT !== root) throw new Error("owned replay root required");
 const cipherFile = process.argv[3];
 if (!cipherFile || path.dirname(cipherFile) !== root) throw new Error("encrypted owned capture required");

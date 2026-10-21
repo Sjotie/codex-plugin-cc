@@ -102,8 +102,12 @@ Reproduce deterministic controls through the machine test slot:
 ```sh
 node --test tests/state-lock-session-start.test.mjs
 node tests/fenced-lock/session-transport-mutations.mjs
-node tests/fenced-lock/macos-companion-live.mjs
+uv run python tests/fenced-lock/macos-d-pty-probe.py   # native macOS, wire v3
 ```
+
+The `macos-companion-*` harnesses described below measured the generation
+transport (wire v2). They refuse to run on wire v3 and run only against the
+pre-D product `FENCED_LOCK_PRODUCT_REF=258047fbc24cfb8539897875410282c65ede842b`.
 
 The native fixture copies the product scripts byte-for-byte and uses the
 unchanged raw production hook commands. Its bootstrap isolates data/config,

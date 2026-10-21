@@ -1,3 +1,4 @@
+// Wire v2 only (pre-D): see wire-v2-only.mjs; wire v3 uses macos-d-pty-probe.py.
 // Local synthetic controls only. Run through test-slot; never invokes Claude.
 // --baseline checks the missing denied-capture/row metadata in 5a0ea2e.
 import fs from "node:fs";
@@ -6,8 +7,10 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash, createDecipheriv, randomBytes } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { requireWireV2 } from "./wire-v2-only.mjs";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
+requireWireV2(fs.readFileSync(path.join(repo, "plugins/codex/scripts/lib/session-admission.mjs"), "utf8"), "macos-companion-observation-controls.mjs");
 const baseline = process.argv.includes("--baseline");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "t1916-observation-controls-"));
 const harness = path.join(root, "harness"); fs.mkdirSync(harness);

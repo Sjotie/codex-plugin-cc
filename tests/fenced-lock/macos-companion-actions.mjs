@@ -1,7 +1,9 @@
+// Wire v2 only (pre-D): see wire-v2-only.mjs; wire v3 uses macos-d-pty-probe.py.
 // Opt-in actual interactive /compact and /clear on the harness's owned session.
 // Captures native source/SID/End reason and ordinary old-admission expiry.
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { requireWireV2 } from "./wire-v2-only.mjs";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -10,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 assert.equal(process.platform, "darwin");
 assert.equal(process.stdin.isTTY, true, "run with exec_command tty:true; the controller sends the printed inputRequired commands through that PTY");
 const root = process.argv[2];
+requireWireV2(fs.readFileSync(path.join(root, "plugin/scripts/lib/session-admission.mjs"), "utf8"), "macos-companion-actions.mjs");
 const runId = Date.now().toString(36);
 const read = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } };
 const lines = (file) => { try { return fs.readFileSync(file, "utf8").split("\n").flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }); } catch { return []; } };

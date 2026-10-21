@@ -1,11 +1,14 @@
+// Wire v2 only (pre-D): see wire-v2-only.mjs; wire v3 uses macos-d-pty-probe.py.
 // Actual /codex:native-probe Bash body; default product APIs only.
 import fs from "node:fs";
+import { requireWireV2 } from "./wire-v2-only.mjs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash, createCipheriv, randomBytes } from "node:crypto";
 
 const [root, phase] = process.argv.slice(2);
+requireWireV2(fs.readFileSync(path.join(root, "plugin/scripts/lib/session-admission.mjs"), "utf8"), "macos-companion-probe.mjs");
 const config = JSON.parse(fs.readFileSync(path.join(root, "native-config.json"), "utf8"));
 const sha = (value) => createHash("sha256").update(String(value)).digest("hex");
 let environmentAdmission = null;

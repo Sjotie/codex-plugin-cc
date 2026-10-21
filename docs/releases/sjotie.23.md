@@ -93,10 +93,14 @@ Prefix test commands with the machine's `test-slot.ts run --`:
 ```sh
 node --test tests/state-lock-session-start.test.mjs tests/state-lock-unit.test.mjs tests/state-lock-macos.test.mjs tests/commands.test.mjs tests/bump-version.test.mjs
 node tests/fenced-lock/session-transport-mutations.mjs
-node tests/fenced-lock/macos-companion-live.mjs
-node tests/fenced-lock/macos-companion-actions.mjs <owned-native-summary-root>
+uv run python tests/fenced-lock/macos-d-pty-probe.py   # native macOS, wire v3 (design D)
 node scripts/bump-version.mjs --check 1.0.7-sjotie.23
 ```
+
+The older `macos-companion-*` harnesses belong to the generation transport
+(wire v2) and refuse to run on wire v3 (`tests/fenced-lock/wire-v2-only.mjs`).
+They remain the record of the pre-D evidence: run them only against
+`FENCED_LOCK_PRODUCT_REF=258047fbc24cfb8539897875410282c65ede842b`.
 
 The interactive helper requires a real TTY. Use an existing authenticated
 profile only for the test process; no login/default account changes. The

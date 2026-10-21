@@ -255,7 +255,9 @@ omgekeerd; een v2-envelop weigert in de nieuwe consumer. Getest in core
 Nog open: de native macOS-proef met `tests/fenced-lock/macos-d-pty-probe.py`
 (echte Claude 2.1.301-PTY, manual én auto compact, latency van hook-exit tot
 de receipt-regel, worker over compact). De oudere
-`macos-companion-*`-harnas hoort bij de generatie-wire (v2) en is niet
-geport; hij draait nog tegen die productversie met
-`FENCED_LOCK_PRODUCT_REF=258047fbc24cfb8539897875410282c65ede842b`. Voor D
-vervangt de nieuwe PTY-proef hem.
+`macos-companion-*`-harnas hoort bij de generatie-wire (v2). Hij is niet
+geport, want hij meet juist de verouderde generatie na compact, maar
+expliciet buiten werking gesteld voor wire v3 (`tests/fenced-lock/wire-v2-only.mjs`:
+exit 2 met verwijzing naar de PTY-proef). Hij draait alleen nog tegen de
+pre-D-productversie `FENCED_LOCK_PRODUCT_REF=258047fbc24cfb8539897875410282c65ede842b`.
+Voor D vervangt de nieuwe PTY-proef hem.

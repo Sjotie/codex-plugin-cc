@@ -1,3 +1,4 @@
+// Wire v2 only (pre-D): see wire-v2-only.mjs; wire v3 uses macos-d-pty-probe.py.
 // Opt-in native companion proof. Run through test-slot with an existing login.
 // Product hooks and their raw commands are byte-equal copies; the preload only
 // confines data, observes process-inspection calls, and injects named faults.
@@ -9,11 +10,14 @@ import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { OLD_PROTOCOLS } from "./old-trees.mjs";
+import { requireWireV2 } from "./wire-v2-only.mjs";
 
 assert.equal(process.platform, "darwin", "native macOS only");
 const repo = fileURLToPath(new URL("../../", import.meta.url));
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "fenced-lock-companion-"));
 const productRef = process.env.FENCED_LOCK_PRODUCT_REF;
+const admissionFile = "plugins/codex/scripts/lib/session-admission.mjs";
+requireWireV2(productRef ? execFileSync("git", ["show", `${productRef}:${admissionFile}`], { cwd: repo, encoding: "utf8" }) : fs.readFileSync(path.join(repo, admissionFile), "utf8"), "macos-companion-live.mjs");
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "fenced-lock-companion-"));
 const product = productRef ? path.join(root, "product") : repo;
 const plugin = path.join(root, "plugin");
 const bootstrap = fileURLToPath(new URL("./macos-companion-bootstrap.mjs", import.meta.url));

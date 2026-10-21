@@ -1,3 +1,5 @@
+// Wire v2 only (pre-D): see wire-v2-only.mjs; wire v3 uses macos-d-pty-probe.py.
+// Loaded only by the guarded entrypoints, so it does not exit itself.
 // Test-only preload. Keep the real product hook command and files unchanged.
 // It confines product Node processes to owned fixture data and observes calls.
 import fs from "node:fs";
