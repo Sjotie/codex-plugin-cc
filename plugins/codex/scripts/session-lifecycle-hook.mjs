@@ -14,7 +14,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, prepareSessionStateLock, resolveStateFile, STATE_LOCK_ADMISSION_ENV, updateJobRecord } from "./lib/state.mjs";
+import { loadState, prepareSessionStateLock, beginSessionStateLockStart, finishSessionStateLockStart, activateFixedHookAdmission, completeFixedSessionEndAdmission, resolveStateFile, STATE_LOCK_ADMISSION_ENV, updateJobRecord } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -93,8 +93,10 @@ function cleanupSessionJobs(cwd, sessionId) {
     let pid = job.pid ?? null;
     try {
       pid = endSessionJob(workspaceRoot, job.id);
-    } catch {
-      // An unreadable job file must not keep the worker alive or stop the cleanup.
+    } catch (error) {
+      // No persisted cancellation means no process signal or broker teardown.
+      // In particular a revoked/unreadable admission aborts this hook.
+      throw error;
     }
     try {
       terminateProcessTree(pid ?? Number.NaN);
@@ -127,13 +129,22 @@ function clearSessionAdmission() {
   }
 }
 
-function handleSessionStart(input) {
+function handleSessionStart(input, started) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
   if (process.platform === "darwin") {
-    const admission = prepareSessionStateLock(input.cwd, input.session_id);
+    const admission = prepareSessionStateLock(input.cwd, input.session_id, input, started);
+    appendEnvVar("CLAUDE_CODE_SESSION_ID", process.env.CLAUDE_CODE_SESSION_ID);
     appendEnvVar(STATE_LOCK_ADMISSION_ENV, JSON.stringify(admission));
+    finishSessionStateLockStart(admission);
+    // Claude records this exact stdout with the observed child exit code.
+    // Ready-state alone never authorizes a consumer before that receipt.
+    process.stdout.write(`${JSON.stringify({ continue: true, suppressOutput: true,
+      hookSpecificOutput: { hookEventName: "SessionStart",
+        additionalContext: `Codex Companion session context refreshed at ${new Date().toISOString()}.` },
+      codexStateLockAdmission: { generation: admission.generation, sessionId: admission.sessionId,
+        root: admission.root, source: admission.source } })}\n`);
   }
 }
 
@@ -173,18 +184,24 @@ async function handleSessionEnd(input) {
 async function main() {
   // The registered hook names its event in argv, so even malformed stdin
   // invalidates an earlier export before JSON parsing can fail.
-  if (process.argv[2] === "SessionStart") clearSessionAdmission();
+  let started = null;
+  if (process.argv[2] === "SessionStart") {
+    started = beginSessionStateLockStart();
+    clearSessionAdmission();
+  }
   const input = readHookInput();
   const eventName = process.argv[2] ?? input.hook_event_name ?? "";
 
   if (eventName === "SessionStart") {
-    if (process.argv[2] !== "SessionStart") clearSessionAdmission();
-    handleSessionStart(input);
+    if (process.argv[2] !== "SessionStart") throw new Error("SessionStart requires its fixed registered command");
+    handleSessionStart(input, started);
     return;
   }
 
   if (eventName === "SessionEnd") {
+    const admission = activateFixedHookAdmission(input, "SessionEnd");
     await handleSessionEnd(input);
+    completeFixedSessionEndAdmission(admission);
   }
 }
 

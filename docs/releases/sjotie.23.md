@@ -1,110 +1,109 @@
-# sjotie.23 candidate — review required
+# sjotie.23 candidate — native blocker remains
 
 **Tier H:** process identity, mutual exclusion and job artifact integrity.
-No plugin-main landing, publication, tag or installation update is authorized.
+The whole candidate is **not landable and not ready for final cross-family
+review**. Actual interactive compact has a fresh-Bash refusal; no alternate
+Bash admission route is supplied. No push, plugin-main landing, publication,
+tag, deployment or installation update is authorized.
 
-## Provenance and admission
+## Provenance and contract
 
-- Previous plugin candidate: `636f0c9e8c7709a6ac5faf0ae13633e0b03e8a85`.
-- Source: factory-core `95a1778c270d2435a390709bd0d64d494f572af4`.
-- Module SHA256: `c4668fbf161003e6a1d5ca39e90f0123ab87a88054f4cfb2246d542b88f68f28`.
+- Previous pushed plugin candidate: `636f0c9e8c7709a6ac5faf0ae13633e0b03e8a85`.
+- Vendored source: factory-core `3982b9947291996586bddf6fe06736c71ed63818`.
+- Module SHA256: `e0c4c59fb32f4329b4759e3849849b834a361fe543e0ba97d4b6f61ad9502842`.
 - Unchanged marker SHA256: `a6c51a60de872adb0f219ae08c64703e05262792b5080e329fafd6b7edbe8470`.
-- O2 `.22` source: `81333c0`; fixture state SHA256
-  `b52c238b5a9bda7dc4ab21129286df05b7f1513035c4e3fceaf211b0adbcf8c5`.
 
-The real SessionStart hook prepares the session workspace under A, publishes
-F before scanning, preserves unsealed S0 until its old identities are gone or
-positively prove the new protocol, and exports a certificate only after seal.
-It never adopts a legacy file or stops old writers automatically.
+SessionStart prepares the existing F under A and scans after F. Old S0 must
+be positively gone or protocol-proven before seal. Bash consumes only the
+exported certificate. The fixed Stop and SessionEnd paths recover that same
+certificate from A and revalidate the current provider completion receipt;
+a seal or ready row alone grants nothing. Every new SessionStart revokes the
+old generation before input parsing/env-file writes. SessionEnd persists
+cancellation before teardown and revokes only its original activation.
 
-macOS writers consume that certificate only: session, canonical root, F/A
-identity and sealed-record hash must match on every acquire. Missing evidence,
-hook error/crash, different root/session, replaced F/A and missing/changed
-records refuse writes. State directories are created only after admission.
-The certificate retains the existing cooperative-process trust model; it is
-not authentication against a malicious process able to forge lock files.
+The immutable per-SID locator binds canonical root, transcript and provider
+config to A's generation. Numeric exit zero, exact raw hook command, current
+generation/SID/root/source and the measured Claude 2.1.301 receipt shape are
+required. Every acquire rereads evidence; no receipt cache. Unknown, crash,
+changed/missing locator, F, A or record refuses. Existing-only SQLite opens
+never CREATE a replacement authority. See the [transport contract and evidence](sjotie.23-session-transport.md).
 
-The shared `MACOS_SCAN_PROVEN` remains **false**. The proven hook route is
-scoped in the plugin; Bash gets no process-scan capability, libproc addon,
-generic executor or unsandboxed fallback.
+The shared `MACOS_SCAN_PROVEN` remains false. Only fixed SessionStart's
+preparation call opts into the measured macOS scanner. No libproc addon,
+generic executor, unsandboxed retry or second admission authority exists.
 
-## Verification on this Mac
+## Verification table
 
-Darwin 25.5.0 arm64. All test runs use the shared test slot; waits were allowed
-to finish. No global slot settings changed.
+Darwin 25.5.0 arm64; Claude 2.1.301, Node 26.7.0. Tests use the machine test
+slot, including normal waits; no global settings changed.
 
-| Check | Result | Limit |
+| Check | Result | Boundary |
 |---|---|---|
-| Core | 48 tests / 130 assertions; nine kernel holder/contender pairs across Bun 1.4.0 and Node 22.22.3/26.7.0 | Admission scanner injected; separate native proof below |
-| Core red/green | Old `44338ee8`: 33 failures, two refusals already passing; all eleven guard mutants detected | Individual unknown-domain/inventory/S0 guards also first red |
-| Plugin red/green | Old `636f0c9e`: 13 new integration cases fail; malformed-input and pre-admission-directory cases individually red, then green | Deterministic process fixture; final counts recorded on #1916 |
-| Metadata/runtime | Module matches source hashes, manifests agree, existing SessionStart export test updated after observed red | No installed plugin changed |
-| Native M2 refusal | Actual product SessionStart finds living original O2 writer in S0 after fixture unlinks F; no certificate; actual sandboxed Bash refuses | Own temporary writer and state only |
-| Native M2 admission | After owned O2 exit, real hook seals the same F inode; real `/codex:native-probe` acquires and commits `stopReviewGate=true` | End-to-end on Node 26.7.0 |
-| Native tamper/root | Missing record, copied/replaced F and different root after valid hook certificate all refuse; state unchanged | Actual file mutations and F-inode checks |
-| Native M3 | Hook counts 107–112 root processes (one/two empty argv) and 56–57 other-user processes (readable); no parenthesized argv observed | Counts only; no unrelated argv stored |
-| Sandbox witness | All five Bash cases: in-process denied write gets EPERM and ps-call count is zero | No general process-visibility claim from Bash |
-| Timeout | An earlier real hook hit the existing 5 s limit at 5018 ms: seal present, no exported certificate, Bash refuses | Availability limitation retained, not called a flake; budget unchanged |
-| Focused regression | 91 tests: 74 pass / 17 explicit skips; Node 22 integration 15/15; existing SessionStart runtime 1/1 | Linux-only checks explicitly skipped; no full Linux suite claim |
-| Windows | Still explicitly unsupported | Actual Windows loading and W1–W6 unmeasured |
+| Core | 133 tests / 464 assertions; Bun 1.4.0 and Node 22.22.3/26.7.0; nine kernel holder/contender pairs | Unit process proof injected |
+| Core causal controls | 12 base + 14 session + 10 revocation + six existing-open controls detected; new tests first red | Exact source copies, nonzero tests/failures |
+| Plugin causal controls | Previous `129692e`: 23 pass / 47 fail of 70; all 25 guard mutants detected | Deterministic parent-completion fixture |
+| Plugin regression | 146 tests: 129 pass / 17 explicit platform skips; transport 70/70 also on Node 22; selected existing runtime 1/1; version check green | No full Linux runtime suite or native Node 22 journey claimed |
+| Core boundary | 2469 tracked files, no secrets/rises, baseline five unchanged | Static boundary scan |
+| Native startup/resume | Both pass: real sandboxed `/codex:native-probe` commits setup/job; enabled Stop completes review jobs 0→1→2; End cancels index/job and expires old certificate | Byte-equal product, exact raw production hook commands; local owned fake Codex for Stop body |
+| Sandbox / no rescan | Actual denied write EPERM; Stop/End inherit no proof exports; zero consumer ps/lsof | SessionStart alone scans |
+| Managed completion | Startup/resume exit zero grants; exit one and SIGKILL-after-stdout refuse in all three consumers | `hook_success` type alone is insufficient |
+| Actual compact | Same SID, new generation, current exit-zero receipt 333 ms; Stop 3→4; old capability refuses with unchanged state | Fresh Bash refuses despite current receipt: functional blocker, cause unproven; exact Bash envelope not recorded |
+| Actual clear | End reason clear for old SID; new SID/current receipt 142 ms; Bash acquires, Stop 4→5. Later readonly state: old SID pending/no admission, earlier queued job cancelled | Full replay incomplete after compact produced no capability capture/job; final `/exit` observation timed out; only owned child stopped/awaited, no retained PID |
+| Hook timeout | Final startup/resume 1156/271 ms under unchanged 5000 ms; interactive resume 571 ms | Earlier genuine 5018 ms timeout safely refused; availability limitation retained |
+| Earlier M1/M2/M3 | First route2 source `95a1778c` / `c4668fbf`: native marker, old owned O2 blocks; after exit same F seals; missing record/replaced F/other root refuse; root/other-user inventory sampled | Historical five-scenario proof pinned to that source; not relabeled final-source proof |
+| Windows | Explicitly unsupported | Native loading/W1–W6 unmeasured |
 
-The valid native baseline run against frozen `636f0c9e` is red: original hook
-lacks S0/certificate; sandboxed Bash attempts ps twice. An initial API quota
-failure before Bash and a fixture isolation error are excluded from product
-proof. Claude overrides plugin-data paths for inline plugins, so the harness
-binds the real hook to its owned fixture root and uses the normal env-file
-export to carry that root into Bash. No installed state is used.
+The fresh neutral additional-context timestamp is visible in measured model
+input; the generation token is absent. Raw completion metadata carries the
+token. Suppressed custom-only JSON and static-context probes failed to retain
+the current resume receipt. Their cause is unknown. There is no blind seal,
+cache or process fallback.
 
-Final native run `fenced-lock-route2-Y1ysUl`: all five scenarios pass; hook
-times 1554/656/1153/1067/1517 ms under the production 5000 ms budget. State
-SHA256 `e61b8dd8a918fe718e9fa9b3569d5ebc40b2b954b3d78d350385f4bb5d9e87fb`,
-hook `15713bcede8d8a05f78c79a3304257c84713787c0cc61939e6df2ea85589293a`.
+## Evidence files
 
-## Reproduce and inspect
+The retained session temp root is:
+`/private/var/tmp/0o63ecs/s/1e0c7e2c2af59990-mvi4opz9ce422e/`.
+These files are local evidence, not permanent release assets:
 
-Prefix each command with the machine's `test-slot.ts run --` wrapper:
+- `fenced-lock-companion-1la5OW/summary.json`: final startup/resume, hashes/timings.
+- `fenced-lock-companion-1la5OW/actions-summary.json`: genuine PTY compact/clear, red; cleanup.
+- `fenced-lock-companion-1la5OW/actions-state-after.json`: readonly clear footprint.
+- `fenced-lock-companion-1la5OW/actions-summary.unsupported-stdin.json`: earlier launcher-only socket-stdin failure, zero Claude actions.
+- `fenced-lock-companion-KLHg0i/summary.json`: causal previous-candidate companion failure.
+- `t1916-timestampreceipt.mialwt/summary.json`: four managed completion controls.
+- `t1916-final-plugin-nNxn1z/summary.json`: final focused/runtime/version/Node22 checks.
+- `session-transport-controls-UmdUUc/summary.json`: old baseline plus 25 plugin mutants.
+- `t1916-final-core-mutants-b5eaknob/summary.json`: final core admission/session/revocation controls.
+- `fenced-existing-mutants-3fD6xY/summary.json`: six no-CREATE controls.
+- `fenced-lock-route2-Y1ysUl/summary.json`: earlier five-scenario route2 proof.
+
+## Reproduce and undo
+
+Prefix test commands with the machine's `test-slot.ts run --`:
 
 ```sh
 node --test tests/state-lock-session-start.test.mjs tests/state-lock-unit.test.mjs tests/state-lock-macos.test.mjs tests/commands.test.mjs tests/bump-version.test.mjs
-node tests/fenced-lock/macos-live.mjs
-FENCED_LOCK_PRODUCT_REF=636f0c9e8c7709a6ac5faf0ae13633e0b03e8a85 node tests/fenced-lock/macos-live.mjs
+node tests/fenced-lock/session-transport-mutations.mjs
+node tests/fenced-lock/macos-companion-live.mjs
+node tests/fenced-lock/macos-companion-actions.mjs <owned-native-summary-root>
 node scripts/bump-version.mjs --check 1.0.7-sjotie.23
 ```
 
-An existing authenticated `CLAUDE_CONFIG_DIR` may be selected for the test
-process; do not log in or change the default account. The live harness retains
-`summary.json`, product source hashes and Claude tool transcripts in its fresh
-temp directory. It runs the actual production hook within the timeout read
-from product hooks.json, with real unfiltered ps/lsof. Bash uses sandbox
-`failIfUnavailable`, no unsandboxed commands and an in-process fs-denial
-control. The Bash ps interceptor throws EPERM if the consumer attempts a scan.
-Both admitted and refused paths must be observed. Only owned children are
-stopped and awaited; the old writer callback is bounded to ten minutes.
+The interactive helper requires a real TTY. Use an existing authenticated
+profile only for the test process; no login/default account changes. The
+fixture isolates owned state/config, uses actual sandbox `failIfUnavailable`
+and `allowUnsandboxedCommands=false`, and never writes product state from its
+bootstrap. Stop's local fake Codex proves the review body without an external
+Codex account. Only owned children may be stopped and awaited.
 
-## Review boundaries and undo
+Not proven: full native clear replay, functional Bash after compact, native
+Windows, network filesystems, Linux PID namespaces on this Mac or native Node
+22 Claude-hook/Bash end to end. Cooperative same-user processes are the trust
+model; this is not authentication against a malicious same-user file/argv
+forger. macOS legacy adopt/stop-old/seal/unfence requires a separately reviewed
+operator route. Unknown evidence remains a refusal.
 
-**Open companion gate:** actual Claude 2.1.301 gives SessionStart env-file
-exports to Bash, but not to Stop or SessionEnd. Therefore the present consumer
-refuses SessionEnd state cleanup and the enabled Stop-review task's state
-writes. This candidate is functionally incomplete and must not be landed or
-sent for the final cross-family review until safe certificate transport and
-invalidation are proven. A blind seal fallback is forbidden. The native
-positive transport control was the exported session ID (present in Bash,
-absent in both later hooks); no positive certificate inheritance is claimed.
-
-Cross-family review follows on the exact candidate branches before pushing.
-The shared source is a local reviewed candidate, not a claim of core landing.
-No Windows, network-filesystem or Linux-namespace validation is inferred from
-Mac results; Node 22 integration/kernel checks do not prove native Claude
-hook/Bash under Node 22. M1/P7/P8 baseline observations remain available in
-prior commits; M1 was rerun in focused checks.
-
-macOS consumers refuse mutating maintenance (`seal`, `adopt-legacy`,
-`stop-old`, `unfence`). Legacy recovery and rollback maintenance require a
-separately reviewed operator procedure; this patch provides no sandbox bypass.
-A hook timeout or absent hook can leave state unavailable until a later
-successful SessionStart. That behavior must be accepted in review.
-
-Undo this unpublished delta by reverting its scoped commits. Before a future
-live rollback, review drain and recovery on the relevant platform. Never
-remove the authority database or fence to bypass a refusal.
+Undo the unpublished delta by reverting its scoped commits. Before any future
+live rollback, review drain/recovery. Never remove A, F or locator metadata to
+bypass a refusal. Final cross-family review and any publication remain with
+the orchestrator after the functional blocker is resolved or scoped explicitly.

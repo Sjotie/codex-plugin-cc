@@ -35,9 +35,17 @@ session, state root, fence, authority database and seal record; missing or
 changed evidence refuses writes. The shared `MACOS_SCAN_PROVEN` stays `false`:
 only this hook route performs process proof. See the release checklist for
 native coverage; this candidate is not permission to publish or install it.
-The companion transport to Stop and SessionEnd is still under construction:
-Claude does not give those hooks the Bash environment exports. Their state
-writes currently refuse; this is a functional release blocker.
+On macOS this candidate requires **Claude Code 2.1.301**: other versions
+refuse until their hook receipt format is proven. Stop and SessionEnd recover
+only the current session certificate from the same authority, with a fresh
+check of Claude's successful SessionStart receipt. A seal alone grants nothing.
+Every new SessionStart for the same session ID invalidates its previous
+generation before preparation. SessionEnd revokes its original activation after
+persistent cancellation. Native startup/resume now works end to end.
+**Native release gate remains open:** after actual interactive compact, Stop
+uses the new generation, but fresh Bash safely refuses; its cause is unproven.
+The candidate is functionally incomplete; no alternate Bash admission is supplied. See
+the [transport evidence](docs/releases/sjotie.23-session-transport.md).
 
 ## Install
 
@@ -360,6 +368,11 @@ What `status` can report, and what to do:
 or `CLAUDE_PLUGIN_DATA`, replaced fence/database, or missing/changed seal record
 refuses admission. Let the old writers end, then start or resume a Claude
 session in the intended workspace so its hook can prepare that root again.
+The session's original root is fixed: changing workspace or plugin-data root
+requires a new Claude session, rather than rebinding the existing session ID.
+The per-session locator in the Claude config directory is runtime evidence;
+missing, corrupt or replaced evidence also refuses writes. Do not remove it
+to bypass a refusal.
 There is no unsandboxed retry. Standalone commands without the hook environment
 cannot write state. Do not delete the fence or database to work around this.
 The macOS consumer also refuses `seal`, `adopt-legacy`, `stop-old` and `unfence`;

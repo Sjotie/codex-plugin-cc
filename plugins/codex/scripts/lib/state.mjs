@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +7,8 @@ import { StateLockTimeout, StateLockUnavailable, domainVerdict, openFencedLock }
 import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
+import { STATE_LOCK_ADMISSION_ENV, resolveAdmissionStateDir, readSessionLocator, createSessionLocator, sessionChecks, validStartInput, envelopeFor, consumerSessionOptions, readSessionReceipt, bindTranscriptPath } from "./session-admission.mjs";
+export { STATE_LOCK_ADMISSION_ENV } from "./session-admission.mjs";
 
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -22,7 +23,6 @@ export const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting
 const LOCK_NAME = "state.lock";
 const LOCK_RETRY_DELAY_MS = 50;
 const LOCK_TIMEOUT_MS = 10000;
-export const STATE_LOCK_ADMISSION_ENV = "CODEX_COMPANION_LOCK_ADMISSION";
 // Only the SessionStart route performs macOS process proof. Bash and workers
 // consume its bound certificate; the shared MACOS_SCAN_PROVEN stays false.
 const MACOS_SESSION_START_SCAN_PROVEN = true;
@@ -42,20 +42,7 @@ function defaultState() {
 }
 
 export function resolveStateDir(cwd) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  let canonicalWorkspaceRoot = workspaceRoot;
-  try {
-    canonicalWorkspaceRoot = fs.realpathSync.native(workspaceRoot);
-  } catch {
-    canonicalWorkspaceRoot = workspaceRoot;
-  }
-
-  const slugSource = path.basename(workspaceRoot) || "workspace";
-  const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
-  const hash = createHash("sha256").update(canonicalWorkspaceRoot).digest("hex").slice(0, 16);
-  const pluginDataDir = process.env[PLUGIN_DATA_ENV];
-  const stateRoot = pluginDataDir ? path.join(pluginDataDir, "state") : FALLBACK_STATE_ROOT_DIR;
-  return path.join(stateRoot, `${slug}-${hash}`);
+  return resolveAdmissionStateDir(cwd);
 }
 
 export function resolveStateFile(cwd) {
@@ -114,45 +101,110 @@ export function openStateLock(cwd) {
 
 // For state-lock --all: a state directory found on disk, without a workspace.
 export function openStateLockAt(stateDir) {
-  return openFencedLock(path.join(stateDir, LOCK_NAME), consumerOptions(stateDir));
+  return openFencedLock(path.join(stateDir, LOCK_NAME), consumerOptions(stateDir, path.join(stateDir, LOCK_NAME)));
 }
 
-function consumerOptions(cwd) {
+function consumerOptions(cwd, fence = resolveLockPath(cwd)) {
   const options = stateLockOptions(cwd);
-  if (process.platform !== "darwin") return options;
-  let admission = null;
-  try {
-    const envelope = JSON.parse(process.env[STATE_LOCK_ADMISSION_ENV] ?? "null");
-    const session = process.env.CODEX_COMPANION_SESSION_ID;
-    const nativeSession = process.env.CLAUDE_CODE_SESSION_ID;
-    if (envelope?.version === 1 && typeof session === "string" && session !== "" &&
-        envelope.sessionId === session && (!nativeSession || nativeSession === session)) {
-      admission = envelope.admission ?? null;
-    }
-  } catch {
-    // Missing, malformed or another session's evidence never grants admission.
-  }
-  return { ...options, consumeAdmission: admission };
+  return process.platform === "darwin" ? { ...options, ...consumerSessionOptions(fence) } : options;
 }
 
-// Called by the fixed SessionStart hook for input.cwd only. No arbitrary
-// command, state-root override, signal, or unsandboxed retry is accepted.
-export function prepareSessionStateLock(cwd, sessionId) {
+function hookLock(locator) {
+  return openFencedLock(locator.fence, { ...stateLockOptions(locator.cwd), ...sessionChecks(locator) });
+}
+
+// Called before stdin parsing on every registered SessionStart. A known native
+// SID locates its original A even when the requested workspace/data root moved.
+export function beginSessionStateLockStart() {
   if (process.platform !== "darwin") return null;
-  if (!path.isAbsolute(cwd ?? "") || typeof sessionId !== "string" || !sessionId) {
-    throw new StateLockUnavailable("SessionStart needs an absolute cwd and session id; state writes refused");
+  const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
+  if (typeof sessionId !== "string" || !sessionId) throw new StateLockUnavailable("SessionStart native session id missing");
+  const locator = readSessionLocator(sessionId);
+  if (!locator) return null;
+  const result = hookLock(locator).beginSessionAdmission({ sessionId, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
+  if (!result.ok) throw new StateLockUnavailable(result.reason);
+  return { locator, generation: result.generation };
+}
+
+// Only the fixed SessionStart uses this proof route. Pending is committed
+// before the scan; the caller exports the returned envelope before finish.
+export function prepareSessionStateLock(cwd, sessionId, input = {}, started = null) {
+  if (process.platform !== "darwin") return null;
+  validStartInput({ ...input, cwd, session_id: sessionId });
+  let locator = started?.locator ?? readSessionLocator(sessionId);
+  if (!locator) locator = createSessionLocator(sessionId, resolveLockPath(cwd), input.transcript_path, cwd);
+  let generation = started?.generation;
+  if (!generation) {
+    const begun = hookLock(locator).beginSessionAdmission({ sessionId, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
+    if (!begun.ok) throw new StateLockUnavailable(begun.reason);
+    generation = begun.generation;
   }
-  const lock = openFencedLock(resolveLockPath(cwd), {
-    ...stateLockOptions(cwd),
-    // This proof bit applies only to this hook's canary + actual scan. It is
-    // never inherited by the consumer and does not change the shared default.
-    domain: () => domainVerdict({ macosScanProven: MACOS_SESSION_START_SCAN_PROVEN })
-  });
-  const result = lock.prepareAdmission({ deadlineMs: 1000 });
-  if (!result.ok) {
-    throw new StateLockUnavailable(`SessionStart could not seal the state lock: ${result.reason}; state writes refused`);
+  // Root/SID/transcript movement never rebinds an existing session. Its old
+  // generation was already revoked on the original authority above.
+  if (locator.root !== fs.realpathSync(resolveStateDir(cwd)) || locator.cwd !== fs.realpathSync(cwd) ||
+    locator.transcriptPath !== bindTranscriptPath(input.transcript_path)) throw new StateLockUnavailable("SessionStart session root or transcript changed; state writes refused");
+  const proofLock = openFencedLock(locator.fence, { ...stateLockOptions(cwd), ...sessionChecks(locator),
+    domain: () => domainVerdict({ macosScanProven: MACOS_SESSION_START_SCAN_PROVEN }) });
+  const result = proofLock.prepareAdmission({ deadlineMs: 1000 });
+  if (!result.ok) throw new StateLockUnavailable(`SessionStart could not seal the state lock: ${result.reason}; state writes refused`);
+  return envelopeFor(locator, generation, input.source, result.admission);
+}
+
+export function finishSessionStateLockStart(envelope) {
+  if (process.platform !== "darwin") return;
+  const locator = readSessionLocator(envelope.sessionId);
+  if (!locator || locator.bindingEpoch !== envelope.bindingEpoch) throw new StateLockUnavailable("SessionStart locator changed before publication");
+  const result = hookLock(locator).finishSessionAdmission({ sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch,
+    generation: envelope.generation, admission: envelope.admission, deadlineMs: 1000 });
+  if (!result.ok) throw new StateLockUnavailable(result.reason);
+}
+
+// Recovery is deliberately limited to these two registered fixed hooks. They
+// consume current ready-state + the provider receipt; they never scan or seal.
+const activeFixedEndAdmissions = new WeakSet();
+
+export function activateFixedHookAdmission(input, event) {
+  if (process.platform !== "darwin") return null;
+  process.env[STATE_LOCK_ADMISSION_ENV] = "";
+  if (!["Stop", "SessionEnd"].includes(event)) throw new StateLockUnavailable("Only fixed Stop and SessionEnd hooks may activate admission");
+  const entry = fileURLToPath(new URL(event === "Stop" ? "../stop-review-gate-hook.mjs" : "../session-lifecycle-hook.mjs", import.meta.url));
+  if (!process.argv[1] || fs.realpathSync(process.argv[1]) !== fs.realpathSync(entry) ||
+    (event === "SessionEnd" && process.argv[2] !== "SessionEnd")) throw new StateLockUnavailable("Admission activation requires its fixed hook entrypoint");
+  if (typeof input?.session_id !== "string" ||
+    input.session_id !== process.env.CLAUDE_CODE_SESSION_ID || !path.isAbsolute(input.cwd ?? "") ||
+    !path.isAbsolute(input.transcript_path ?? "")) throw new StateLockUnavailable("Fixed hook identity unknown; state writes refused");
+  const locator = readSessionLocator(input.session_id);
+  if (!locator || locator.root !== fs.realpathSync(resolveStateDir(input.cwd)) || locator.cwd !== fs.realpathSync(input.cwd) ||
+    locator.transcriptPath !== fs.realpathSync(input.transcript_path)) throw new StateLockUnavailable("Fixed hook session root or transcript mismatch");
+  const row = hookLock(locator).readSessionAdmission({ sessionId: input.session_id, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
+  if (!row) throw new StateLockUnavailable("Fixed hook has no proven current SessionStart receipt");
+  const token = readSessionReceipt(locator, row.generation);
+  const envelope = envelopeFor(locator, row.generation, token.source, row.admission);
+  process.env.CODEX_COMPANION_SESSION_ID = input.session_id;
+  process.env[STATE_LOCK_ADMISSION_ENV] = JSON.stringify(envelope);
+  if (event === "SessionEnd") activeFixedEndAdmissions.add(envelope);
+  return envelope;
+}
+
+// Complete the exact activation that performed cleanup. Never read or adopt
+// the latest generation here: a concurrent SessionStart owns its own proof.
+export function completeFixedSessionEndAdmission(envelope) {
+  if (process.platform !== "darwin") return;
+  const entry = fileURLToPath(new URL("../session-lifecycle-hook.mjs", import.meta.url));
+  if (!process.argv[1] || fs.realpathSync(process.argv[1]) !== fs.realpathSync(entry) || process.argv[2] !== "SessionEnd" ||
+    !envelope || !activeFixedEndAdmissions.has(envelope) || envelope.sessionId !== process.env.CLAUDE_CODE_SESSION_ID) {
+    throw new StateLockUnavailable("SessionEnd completion requires its original fixed-hook activation");
   }
-  return { version: 1, sessionId, admission: result.admission };
+  const locator = readSessionLocator(envelope.sessionId);
+  if (!locator || locator.bindingEpoch !== envelope.bindingEpoch || locator.root !== envelope.root ||
+    locator.configRoot !== envelope.configRoot || locator.transcriptPath !== envelope.transcriptPath) {
+    throw new StateLockUnavailable("SessionEnd binding changed before completion");
+  }
+  const result = hookLock(locator).revokeSessionAdmission({ sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch,
+    generation: envelope.generation, admission: envelope.admission, deadlineMs: 1000 });
+  if (!result.ok) throw new StateLockUnavailable(result.reason);
+  activeFixedEndAdmissions.delete(envelope);
+  process.env[STATE_LOCK_ADMISSION_ENV] = "";
 }
 
 // Every directory that can hold state directories: the plugin data dir of

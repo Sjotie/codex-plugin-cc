@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { getCodexAvailability } from "./lib/codex.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
-import { getConfig, listJobs } from "./lib/state.mjs";
+import { getConfig, listJobs, activateFixedHookAdmission } from "./lib/state.mjs";
 import { sortJobsNewestFirst } from "./lib/job-control.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
@@ -141,6 +141,7 @@ function runStopReview(cwd, input = {}) {
 
 function main() {
   const input = readHookInput();
+  activateFixedHookAdmission(input, "Stop");
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
