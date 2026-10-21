@@ -15,8 +15,8 @@ Run on the Mac, from the plugin checkout, with an existing Claude login:
 
     uv run python tests/fenced-lock/macos-d-pty-probe.py
 
-Options: --auto-window TOKENS (default 40000), --max-fills N (default 12),
---claude PATH. It keeps its fixture directory as evidence, writes
+Options: --auto-window TOKENS (default 20000), --max-fills N (default 60),
+--auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
 <fixture>/summary.json and prints its path; remove the directory when done.
 Exit status 0 only when every check passed. It stops only the Claude process
 it started itself. Each step waits for the turn's Stop hook before the next
@@ -233,8 +233,9 @@ class TranscriptWatch(threading.Thread):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
-    ap.add_argument("--auto-window", type=int, default=40000)
-    ap.add_argument("--max-fills", type=int, default=12)
+    ap.add_argument("--auto-window", type=int, default=20000)
+    ap.add_argument("--max-fills", type=int, default=60)
+    ap.add_argument("--auto-minutes", type=float, default=25)
     args = ap.parse_args()
 
     assert sys.platform == "darwin", "native macOS only"
@@ -275,9 +276,18 @@ def main():
     for name, line, what in (("d-probe", f"{node} {probe}", "the D admission probe"), ("d-worker", f"{node} {worker}", "the D background worker"), ("d-fill", f"cat {filler}", "the filler output")):
         open(os.path.join(commands, f"{name}.md"), "w").write(f"---\ndescription: {what}\nallowed-tools: Bash(node:*), Bash(cat:*)\n---\nRun exactly this Bash command once, then say only OK. Do not run other commands.\n\n```bash\n{line}\n```\n")
     settings = os.path.join(root, "settings.json")
-    json.dump({"sandbox": {"enabled": True, "failIfUnavailable": True, "autoAllowBashIfSandboxed": True, "allowUnsandboxedCommands": False}, "enabledPlugins": {}, "permissions": {"allow": ["Bash(node:*)", "Bash(cat:*)"]}}, open(settings, "w"))
+    # Bash sandbox off: Claude gives plugin hooks CLAUDE_PLUGIN_DATA under
+    # ~/.claude/plugins/data/<plugin>, outside the sandbox's write area, so a
+    # sandboxed Bash state write fails with EPERM on mkdir. That predates D
+    # (state-directory resolution and the hook's export are unchanged since
+    # 258047f; the old harness hid it by redirecting CLAUDE_PLUGIN_DATA in its
+    # preload) and is a separate #1916 todo. This probe measures D, not that.
+    json.dump({"sandbox": {"enabled": False}, "enabledPlugins": {}, "permissions": {"allow": ["Bash(node:*)", "Bash(cat:*)"]}}, open(settings, "w"))
 
-    env = {k: v for k, v in os.environ.items() if not (k.startswith("CODEX_COMPANION_") or k in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "NODE_OPTIONS"))}
+    # CLAUDE_CODE_CHILD_SESSION (set when this runs inside another Claude
+    # session) makes the interactive Claude write no transcript at all
+    # (bisected on the Mac over 51 variables), so no receipt could exist.
+    env = {k: v for k, v in os.environ.items() if not (k.startswith("CODEX_COMPANION_") or k in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "NODE_OPTIONS"))}
     env.update({"TERM": "xterm-256color", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "D_PROBE_ROOT": root, "CLAUDE_PLUGIN_DATA": os.path.join(root, "data"),
                 "NODE_OPTIONS": f"--import=file://{bootstrap}", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(args.auto_window)})
     argv = [args.claude, "--plugin-dir", plugin, "--setting-sources", "", "--settings", settings, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash"]
@@ -328,7 +338,7 @@ def main():
 
     watch = None
 
-    def receipt_latency(start_exit):
+    def receipt_latency(start_exit, latency=True):
         nonlocal watch
         if watch is None:
             path = start_exit.get("transcriptPath")
@@ -343,8 +353,11 @@ def main():
             summary["receiptMissing"] = {"source": start_exit["source"], "transcriptExistsAtExit": start_exit.get("transcriptExistsAtExit"),
                                          "transcriptExistsNow": os.path.exists(watch.path), "receiptLinesSeen": len(watch.seen)}
             raise
+        # Startup: Claude creates the transcript only with the first user turn,
+        # so the time to its receipt line is the time to that turn, no latency.
+        timing = {"latencyHookExitToReceiptMs": round(seen["seenAt"] - start_exit["at"], 1)} if latency else {"receiptRecordedWithFirstTurn": True}
         return {"source": start_exit["source"], "transcriptExistsAtExit": start_exit.get("transcriptExistsAtExit"), "attemptSha": sha(start_exit["attemptId"]), "capabilitySha": sha(start_exit["capabilityId"]), "hookExitCode": start_exit["code"],
-                "latencyHookExitToReceiptMs": round(seen["seenAt"] - start_exit["at"], 1), "receiptType": seen["type"], "receiptExitCode": seen["exitCode"], "receiptDurationMs": seen["durationMs"], "receiptVersion": seen["version"]}
+                **timing, "receiptType": seen["type"], "receiptExitCode": seen["exitCode"], "receiptDurationMs": seen["durationMs"], "receiptVersion": seen["version"]}
 
     def turn(command, label, timeout=180):
         """Send one slash command and wait for that turn's Stop hook."""
@@ -365,12 +378,23 @@ def main():
     try:
         t0 = time.time() * 1000
         start = wait(lambda: session_start("startup", t0), "startup SessionStart")
-        startup = receipt_latency(start)
-        summary["phases"].append({"phase": "startup", "sessionStart": startup})
+        # The first user turn creates the transcript; only then can the
+        # startup receipt line exist. So probe first, then look for R.
         p1 = run_probe("after startup")
+        startup = receipt_latency(start, latency=False)
+        summary["phases"].append({"phase": "startup", "sessionStart": startup})
 
-        turn("/d-worker", "start worker")
-        wait(lambda: os.path.exists(os.path.join(root, "worker-ready.json")), "worker ready")
+        # Claude's automatic permission check can refuse a command once;
+        # resend a refused worker start a single time.
+        for attempt in range(2):
+            turn("/d-worker", "start worker")
+            try:
+                wait(lambda: os.path.exists(os.path.join(root, "worker-ready.json")), "worker ready", 30)
+                break
+            except RuntimeError:
+                if attempt == 1:
+                    raise
+                summary["workerStartRetried"] = True
 
         t_manual = time.time() * 1000
         term.send("/compact\r")
@@ -381,13 +405,20 @@ def main():
         # Auto compact: grow the context with filler output until Claude
         # compacts by itself. Release the worker as soon as that compact's
         # hook starts, so its final publication overlaps the attempt.
+        # Keep filling until a compact SessionStart appears that we did not
+        # ask for, bounded by --max-fills and --auto-minutes.
         t_auto = time.time() * 1000
+        auto_deadline = time.time() + args.auto_minutes * 60
         released = False
         auto = None
+        fills = 0
         for fill in range(args.max_fills):
+            if time.time() > auto_deadline:
+                break
+            fills = fill + 1
             sent = time.time() * 1000
             term.send("/d-fill\r")
-            end = time.time() + 300
+            end = min(time.time() + 300, auto_deadline)
             while time.time() < end:
                 if not released and any(e["at"] > t_auto for e in events("hook-start", "SessionStart")):
                     open(os.path.join(root, "worker-release"), "w").close()
@@ -404,6 +435,7 @@ def main():
             if auto:
                 summary["phases"].append({"phase": "auto compact", "fills": fill + 1, "sessionStart": auto})
                 break
+        summary["autoCompactAttempt"] = {"fills": fills, "observed": auto is not None, "window": args.auto_window}
         if not released:
             open(os.path.join(root, "worker-release"), "w").close()
         worker_result = wait(lambda: os.path.exists(os.path.join(root, "worker-result.json")) and json.load(open(os.path.join(root, "worker-result.json"))), "worker result", 300)
@@ -429,7 +461,7 @@ def main():
             "sessionEndSucceeded": all(e.get("code") == 0 for e in events("hook-exit", "SessionEnd")),
             "receiptVersionProven": all(s.get("receiptVersion") == EXPECTED_VERSION for s in (startup, manual, auto) if s),
         }
-        summary["latencyMs"] = {s["source"] + ("" if i == 0 else f"-{i}"): s["latencyHookExitToReceiptMs"] for i, s in enumerate(x for x in (startup, manual, auto) if x)}
+        summary["latencyMs"] = {label: s["latencyHookExitToReceiptMs"] for label, s in (("manual compact", manual), ("auto compact", auto)) if s}
         summary["passed"] = all(summary["checks"].values())
     except Exception as error:  # noqa: BLE001 - every failure lands in the summary
         summary["passed"] = False
