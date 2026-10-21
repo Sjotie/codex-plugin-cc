@@ -1,94 +1,110 @@
-# sjotie.23 candidate — release blocked
+# sjotie.23 candidate — review required
 
 **Tier H:** process identity, mutual exclusion and job artifact integrity.
-This branch prepares version metadata and evidence. It is not a published
-release, a plugin-main landing, or permission to roll out the candidate.
+No plugin-main landing, publication, tag or installation update is authorized.
 
-## Provenance
+## Provenance and admission
 
-- Plugin base: `7e9677cc0ebcb294ef7e1fb1497c787034860a17`.
-- Released old protocols: O1 `c5fc9a5` (.21), O2 `81333c0` (.22).
-  Native fixtures verify the original O2 `state.mjs` SHA256
+- Previous plugin candidate: `636f0c9e8c7709a6ac5faf0ae13633e0b03e8a85`.
+- Source: factory-core `95a1778c270d2435a390709bd0d64d494f572af4`.
+- Module SHA256: `c4668fbf161003e6a1d5ca39e90f0123ab87a88054f4cfb2246d542b88f68f28`.
+- Unchanged marker SHA256: `a6c51a60de872adb0f219ae08c64703e05262792b5080e329fafd6b7edbe8470`.
+- O2 `.22` source: `81333c0`; fixture state SHA256
   `b52c238b5a9bda7dc4ab21129286df05b7f1513035c4e3fceaf211b0adbcf8c5`.
-- Landed source: factory-core merge
-  `2ae84f989d3f3c61b622103aa7e9a20b21100158`, containing `6160e7d06`.
-- Module SHA256: `a60dedc470fc7636a6b4cf117d94186cf32a084dcf8dc536aeae5fb82c9c0c91`.
-- Marker SHA256: `a6c51a60de872adb0f219ae08c64703e05262792b5080e329fafd6b7edbe8470`.
-  Both files match the landed source byte for byte; this delta changes neither.
 
-## Native Mac observations, 21 October 2026
+The real SessionStart hook prepares the session workspace under A, publishes
+F before scanning, preserves unsealed S0 until its old identities are gone or
+positively prove the new protocol, and exports a certificate only after seal.
+It never adopts a legacy file or stops old writers automatically.
 
-Darwin 25.5.0 arm64; Bun 1.4.0, Node 22.22.3 and Node 26.7.0.
-All runs use the machine-wide test-slot wrapper. Its memory/slot waits were
-allowed to finish; no global slot settings were changed.
+macOS writers consume that certificate only: session, canonical root, F/A
+identity and sealed-record hash must match on every acquire. Missing evidence,
+hook error/crash, different root/session, replaced F/A and missing/changed
+records refuse writes. State directories are created only after admission.
+The certificate retains the existing cooperative-process trust model; it is
+not authentication against a malicious process able to forge lock files.
 
-| Check | Observed result | Limit |
+The shared `MACOS_SCAN_PROVEN` remains **false**. The proven hook route is
+scoped in the plugin; Bash gets no process-scan capability, libproc addon,
+generic executor or unsandboxed fallback.
+
+## Verification on this Mac
+
+Darwin 25.5.0 arm64. All test runs use the shared test slot; waits were allowed
+to finish. No global slot settings changed.
+
+| Check | Result | Limit |
 |---|---|---|
-| Core P1/P2/P4/P5 | 13/13 tests, 55 assertions; all nine Bun/Node 22/Node 26 holder/contender pairs get BUSY, then acquire after the owned holder is SIGKILLed; same-process diagnostic preserves its lock | Scanner is injected in this kernel-lock suite |
-| P7 | Original O1/O2 against a directory fence: all four Node 22/26 runs time out, never enter their callback, and preserve the fence inode | Acquire path only; no full old-release race matrix |
-| P8 | Both Nodes: rename to empty path succeeds; over file ENOTDIR, over nonempty directory ENOTEMPTY; unlink directory EPERM, read directory EISDIR | Own fixture directories on the local filesystem |
-| M1 | Native marker is `new` before and after unlink; `lsof -Fn` retains the original pathname without a deleted suffix | Ordinary shell, own child |
-| M2 shell precondition | Original O2 code is paused inside `updateState`, its F is removed by the fixture, new fence records its PID/start in S0 and stays unsealed; after owned-child exit it seals and admits | Ordinary shell; the final admission uses a matcher restricted to that fixture writer, not the full machine scan |
-| M2 SessionStart | A real Claude Code SessionStart hook publishes the fence, records the living O2 child in S0, refuses acquire and leaves `sealedAt: null` | Test-only candidate `initial` verdict, actual canary/scanner; no product flag change |
-| M2 Bash | A real `/codex:native-probe` command uses Claude's Bash tool with sandbox enabled, failIfUnavailable and no unsandboxed fallback. `ps` fails with `spawnSync ps EPERM`; no S0 record or seal, acquire false | **FAIL: release gate not met** |
-| Sandbox witness | Writing the fixture's denied path succeeds from shell/hook, fails from Bash | Confirms that Bash actually ran inside the sandbox |
-| M3 shell/hook | Each observed 146 root processes (145 readable argv, one empty) and 73 other-user processes (73 readable); no parenthesized argv in this sample | Counts only; unrelated argv are never stored in the report |
-| M3 Bash | `ps` returns EPERM | **FAIL: argument-form classification cannot be proven through this route** |
-| Native regressions | Two new tests: 0/2 pass against a module with native scan/marker guards removed, then 2/2 pass on candidate; also 2/2 under Node 22 | Does not replace M2 live proof |
-| Focused plugin checks | 76 tests: 59 pass, 17 explicit skips, zero failures; unit, native, command and version tests | Linux namespace/native /proc cases and unavailable pinned Node binary skipped; no full 404-test macOS claim |
-| Version consistency | `.23` check fails on `.22` in all six fields, passes after the four manifests are bumped | No publish command executed |
-| Windows | Module already refuses on win32; README explicitly says jobs/config cannot be written, including Factory Claude sessions that load it | Actual Windows plugin loading and W1–W6 are **unmeasured** |
+| Core | 48 tests / 130 assertions; nine kernel holder/contender pairs across Bun 1.4.0 and Node 22.22.3/26.7.0 | Admission scanner injected; separate native proof below |
+| Core red/green | Old `44338ee8`: 33 failures, two refusals already passing; all eleven guard mutants detected | Individual unknown-domain/inventory/S0 guards also first red |
+| Plugin red/green | Old `636f0c9e`: 13 new integration cases fail; malformed-input and pre-admission-directory cases individually red, then green | Deterministic process fixture; final counts recorded on #1916 |
+| Metadata/runtime | Module matches source hashes, manifests agree, existing SessionStart export test updated after observed red | No installed plugin changed |
+| Native M2 refusal | Actual product SessionStart finds living original O2 writer in S0 after fixture unlinks F; no certificate; actual sandboxed Bash refuses | Own temporary writer and state only |
+| Native M2 admission | After owned O2 exit, real hook seals the same F inode; real `/codex:native-probe` acquires and commits `stopReviewGate=true` | End-to-end on Node 26.7.0 |
+| Native tamper/root | Missing record, copied/replaced F and different root after valid hook certificate all refuse; state unchanged | Actual file mutations and F-inode checks |
+| Native M3 | Hook counts 107–112 root processes (one/two empty argv) and 56–57 other-user processes (readable); no parenthesized argv observed | Counts only; no unrelated argv stored |
+| Sandbox witness | All five Bash cases: in-process denied write gets EPERM and ps-call count is zero | No general process-visibility claim from Bash |
+| Timeout | An earlier real hook hit the existing 5 s limit at 5018 ms: seal present, no exported certificate, Bash refuses | Availability limitation retained, not called a flake; budget unchanged |
+| Focused regression | 91 tests: 74 pass / 17 explicit skips; Node 22 integration 15/15; existing SessionStart runtime 1/1 | Linux-only checks explicitly skipped; no full Linux suite claim |
+| Windows | Still explicitly unsupported | Actual Windows loading and W1–W6 unmeasured |
 
-The M2/M3 result keeps `MACOS_SCAN_PROVEN=false`. It demonstrates a safe
-refusal, not working automatic admission on sandboxed macOS. Do not turn the
-flag on based on the successful shell or SessionStart observations. A release
-needs a reviewed way to obtain process evidence on the Bash route, then the
-remaining native matrix. No sandbox setting was relaxed to get a green result.
+The valid native baseline run against frozen `636f0c9e` is red: original hook
+lacks S0/certificate; sandboxed Bash attempts ps twice. An initial API quota
+failure before Bash and a fixture isolation error are excluded from product
+proof. Claude overrides plugin-data paths for inline plugins, so the harness
+binds the real hook to its owned fixture root and uses the normal env-file
+export to carry that root into Bash. No installed state is used.
 
-## Reproduce
+Final native run `fenced-lock-route2-Y1ysUl`: all five scenarios pass; hook
+times 1554/656/1153/1067/1517 ms under the production 5000 ms budget. State
+SHA256 `e61b8dd8a918fe718e9fa9b3569d5ebc40b2b954b3d78d350385f4bb5d9e87fb`,
+hook `15713bcede8d8a05f78c79a3304257c84713787c0cc61939e6df2ea85589293a`.
 
-Use the machine's test-slot command before each invocation below. Select an
-existing authenticated Claude profile with `CLAUDE_CONFIG_DIR` when needed.
-The harness does not inspect or export credentials; the real Claude CLI uses
-its existing stored login. No login flow is started.
+## Reproduce and inspect
+
+Prefix each command with the machine's `test-slot.ts run --` wrapper:
 
 ```sh
-node --test tests/state-lock-macos.test.mjs
+node --test tests/state-lock-session-start.test.mjs tests/state-lock-unit.test.mjs tests/state-lock-macos.test.mjs tests/commands.test.mjs tests/bump-version.test.mjs
 node tests/fenced-lock/macos-live.mjs
-FENCED_LOCK_NODES=<node22-binary> node tests/fenced-lock/macos-filesystem.mjs
+FENCED_LOCK_PRODUCT_REF=636f0c9e8c7709a6ac5faf0ae13633e0b03e8a85 node tests/fenced-lock/macos-live.mjs
 node scripts/bump-version.mjs --check 1.0.7-sjotie.23
 ```
 
-`macos-live.mjs` creates a fresh temp directory, archives original O2 source
-from git, verifies its state hash, starts only its own old-writer children,
-and loads a fixture plugin into an actual Claude CLI. User/project settings
-and MCP servers are excluded. It captures shell, SessionStart and `/codex`
-Bash observations. It exits nonzero unless both visibility and the sandbox
-denial witness are proven. It keeps `summary.json` and the Claude tool-call
-transcript in that temp directory, and stops/awaits only its own children.
-It sends TERM to its own Claude child after 120 seconds and KILL after 125
-seconds if needed. It does not enumerate or signal Claude grandchildren;
-the fixture's own old-writer callbacks have a 180-second lifetime bound.
-`macos-filesystem.mjs` prints P7/P8 measurements under every supplied Node,
-checks both original state hashes, and retains its fixture directory.
+An existing authenticated `CLAUDE_CONFIG_DIR` may be selected for the test
+process; do not log in or change the default account. The live harness retains
+`summary.json`, product source hashes and Claude tool transcripts in its fresh
+temp directory. It runs the actual production hook within the timeout read
+from product hooks.json, with real unfiltered ps/lsof. Bash uses sandbox
+`failIfUnavailable`, no unsandboxed commands and an in-process fs-denial
+control. The Bash ps interceptor throws EPERM if the consumer attempts a scan.
+Both admitted and refused paths must be observed. Only owned children are
+stopped and awaited; the old writer callback is bounded to ten minutes.
 
-The EPERM unit fixture uses signal 0 against PID 1, never a stop signal. The
-first native attempt at the pre-existing test sent SIGTERM and was refused
-with EPERM; PID 1 was confirmed alive. The test was corrected before the final
-focused run. Synthetic Linux stop-old fixtures also now record the simulated
-Linux procfs identity on macOS, instead of accidentally testing a rescan.
+## Review boundaries and undo
 
-## Remaining gates and undo
+**Open companion gate:** actual Claude 2.1.301 gives SessionStart env-file
+exports to Bash, but not to Stop or SessionEnd. Therefore the present consumer
+refuses SessionEnd state cleanup and the enabled Stop-review task's state
+writes. This candidate is functionally incomplete and must not be landed or
+sent for the final cross-family review until safe certificate transport and
+invalidation are proven. A blind seal fallback is forbidden. The native
+positive transport control was the exported session ID (present in Bash,
+absent in both later hooks); no positive certificate inheritance is claimed.
 
-- Resolve M2/M3 Bash visibility, retaining fail-closed behavior, then run the
-  complete applicable native matrix. The Linux 404-test/61-mutation evidence
-  belongs to the previous reviewed base and was not rerun as Mac evidence.
-- Cross-family delta review before pushing this candidate branch; orchestrator
-  decides the subsequent plugin-main landing. No force push, tag, publish,
-  installed-plugin update, deployment or live state adoption in this work.
-- Determine actual Windows loading before making a measured Windows-impact
-  claim. The explicit unsupported boundary is retained meanwhile.
-- Undo this delta by reverting its commits. For a future deployed fenced-lock
-  rollout, follow README's drain/newCount-zero/unfence procedure with the new
-  code before reverting to old writers. Never delete the authority database
-  or fence while writers are running.
+Cross-family review follows on the exact candidate branches before pushing.
+The shared source is a local reviewed candidate, not a claim of core landing.
+No Windows, network-filesystem or Linux-namespace validation is inferred from
+Mac results; Node 22 integration/kernel checks do not prove native Claude
+hook/Bash under Node 22. M1/P7/P8 baseline observations remain available in
+prior commits; M1 was rerun in focused checks.
+
+macOS consumers refuse mutating maintenance (`seal`, `adopt-legacy`,
+`stop-old`, `unfence`). Legacy recovery and rollback maintenance require a
+separately reviewed operator procedure; this patch provides no sandbox bypass.
+A hook timeout or absent hook can leave state unavailable until a later
+successful SessionStart. That behavior must be accepted in review.
+
+Undo this unpublished delta by reverting its scoped commits. Before a future
+live rollback, review drain and recovery on the relevant platform. Never
+remove the authority database or fence to bypass a refusal.

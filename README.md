@@ -27,10 +27,17 @@ they already have.
 The `1.0.7-sjotie.23` changes on this branch are a release candidate. See the
 [release checklist](docs/releases/sjotie.23.md) for the measured platform
 coverage and the remaining release gates.
-The macOS release gate is still closed: on the measured Claude Code sandbox,
-the Bash tool cannot run `ps`, so it cannot prove that old writers are gone.
-`MACOS_SCAN_PROVEN` remains `false`; a new unsealed state directory will not
-admit writes automatically. Do not remove its fence to bypass that refusal.
+On macOS, the `SessionStart` hook prepares only the session's workspace. It
+publishes the fence under the SQLite authority, scans for old writers, and
+exports permission only after the fence is safely sealed. Bash and background
+workers consume that permission without running `ps`. It is bound to the
+session, state root, fence, authority database and seal record; missing or
+changed evidence refuses writes. The shared `MACOS_SCAN_PROVEN` stays `false`:
+only this hook route performs process proof. See the release checklist for
+native coverage; this candidate is not permission to publish or install it.
+The companion transport to Stop and SessionEnd is still under construction:
+Claude does not give those hooks the Bash environment exports. Their state
+writes currently refuse; this is a functional release blocker.
 
 ## Install
 
@@ -348,6 +355,18 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" state-lock status --all
 ```
 
 What `status` can report, and what to do:
+
+**macOS:** a missing certificate, failed/interrupted hook, different workspace
+or `CLAUDE_PLUGIN_DATA`, replaced fence/database, or missing/changed seal record
+refuses admission. Let the old writers end, then start or resume a Claude
+session in the intended workspace so its hook can prepare that root again.
+There is no unsandboxed retry. Standalone commands without the hook environment
+cannot write state. Do not delete the fence or database to work around this.
+The macOS consumer also refuses `seal`, `adopt-legacy`, `stop-old` and `unfence`;
+its certificate does not grant authority to change the admission protocol.
+Legacy-file recovery and rollback maintenance on macOS require a separately
+reviewed operator procedure; the automatic hook does not adopt legacy files or
+stop processes. The maintenance instructions below apply to Linux.
 
 - **An old `state.lock` file** (left by plugin 1.0.7-sjotie.22 or older). It is
   never removed automatically. Stop or update the old plugin processes, check

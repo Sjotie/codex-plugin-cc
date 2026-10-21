@@ -14,7 +14,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, updateJobRecord } from "./lib/state.mjs";
+import { loadState, prepareSessionStateLock, resolveStateFile, STATE_LOCK_ADMISSION_ENV, updateJobRecord } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -33,8 +33,8 @@ function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
 }
 
-function appendEnvVar(name, value) {
-  if (!process.env.CLAUDE_ENV_FILE || value == null || value === "") {
+function appendEnvVar(name, value, { allowEmpty = false } = {}) {
+  if (!process.env.CLAUDE_ENV_FILE || value == null || (!allowEmpty && value === "")) {
     return;
   }
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
@@ -118,10 +118,23 @@ function hasActiveJobFromAnotherSession(cwd, sessionId) {
   );
 }
 
+function clearSessionAdmission() {
+  // Clear a previous attempt before any proof work. If preparation throws or
+  // crashes, sourcing this file grants no permission, even on resume.
+  if (process.platform === "darwin") {
+    if (!process.env.CLAUDE_ENV_FILE) throw new Error("SessionStart has no environment file; state writes refused");
+    appendEnvVar(STATE_LOCK_ADMISSION_ENV, "", { allowEmpty: true });
+  }
+}
+
 function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
+  if (process.platform === "darwin") {
+    const admission = prepareSessionStateLock(input.cwd, input.session_id);
+    appendEnvVar(STATE_LOCK_ADMISSION_ENV, JSON.stringify(admission));
+  }
 }
 
 async function handleSessionEnd(input) {
@@ -158,10 +171,14 @@ async function handleSessionEnd(input) {
 }
 
 async function main() {
+  // The registered hook names its event in argv, so even malformed stdin
+  // invalidates an earlier export before JSON parsing can fail.
+  if (process.argv[2] === "SessionStart") clearSessionAdmission();
   const input = readHookInput();
   const eventName = process.argv[2] ?? input.hook_event_name ?? "";
 
   if (eventName === "SessionStart") {
+    if (process.argv[2] !== "SessionStart") clearSessionAdmission();
     handleSessionStart(input);
     return;
   }

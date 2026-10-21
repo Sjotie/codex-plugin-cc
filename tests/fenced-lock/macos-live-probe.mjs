@@ -1,66 +1,51 @@
-// Invoked by macos-live.mjs in a shell, a real SessionStart hook, and a
-// /codex command's Bash tool. Only temporary fixture state is changed.
+// Runs only as the real /codex:native-probe Bash command. No custom domain.
 import fs from "node:fs";
-import assert from "node:assert/strict";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 
-const [lib, root, route] = process.argv.slice(2);
-const { openFencedLock, domainVerdict } = await import(pathToFileURL(path.join(lib, "fenced-lock.mjs")));
-const { matchPluginArgv } = await import(pathToFileURL(path.join(lib, "state.mjs")));
-const target = JSON.parse(fs.readFileSync(path.join(root, "targets.json"), "utf8"))[route];
-const relative = path.relative(fs.realpathSync(root), fs.realpathSync(path.dirname(target.fence)));
-assert.ok(!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`), "fixture fence must stay inside its temporary root");
-assert.equal(path.basename(target.fence), "state.lock");
-// Exercise the proposed initial verdict with the real canary and scanner.
-// This does not enable MACOS_SCAN_PROVEN in the product.
-const lock = openFencedLock(target.fence, {
-  argvMatch: matchPluginArgv,
-  domain: () => domainVerdict({ macosScanProven: true })
-});
-let error = null;
-let acquired = false;
-try {
-  const h = lock.tryAcquire();
-  acquired = Boolean(h);
-  if (h) lock.release(h);
-} catch (e) {
-  error = { code: e.code, message: e.message };
+const [lib, root, mode] = process.argv.slice(2);
+let psCalls = 0;
+for (const method of ["spawnSync", "execFileSync", "execSync", "spawn", "execFile", "exec"]) {
+  const original = childProcess[method];
+  childProcess[method] = function (file, ...args) {
+    if (typeof file === "string" && /(^|[\/\s])ps(?:\s|$)/.test(file)) {
+      psCalls++;
+      throw Object.assign(new Error("ps is unavailable inside this consumer proof"), { code: "EPERM" });
+    }
+    return original.call(this, file, ...args);
+  };
 }
-let record = null;
-try { record = JSON.parse(fs.readFileSync(path.join(target.fence, "fence.json"), "utf8")); } catch {}
-
-// M3: retain counts of ps's argument forms, never unrelated command lines.
-const ps = (cols) => execFileSync("ps", ["-axww", "-o", cols], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-let observation;
+syncBuiltinESMExports();
+if (mode === "different-root") process.env.CLAUDE_PLUGIN_DATA = path.join(root, "different-data");
+const { openStateLock, updateState, loadState, resolveStateFile } = await import(pathToFileURL(path.join(lib, "state.mjs")));
+let sandboxWitness = "write-allowed", witnessError = null;
+try { fs.writeFileSync(path.join(root, "outside-denied", `witness-${mode}`), "must be denied"); }
+catch (error) { witnessError = error.code; sandboxWitness = ["EACCES", "EPERM"].includes(error.code) ? "write-denied" : "unexpected-error"; }
+let acquired = false, updated = false, error = null;
+const stateFile = resolveStateFile(root);
+const before = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null;
 try {
-  const args = new Map(ps("pid=,args=").split("\n").flatMap((line) => {
-    const m = /^\s*(\d+)\s?(.*)$/.exec(line);
-    return m ? [[Number(m[1]), m[2].trim()]] : [];
-  }));
-  const bucket = () => ({ total: 0, readable: 0, empty: 0, parenthesized: 0 });
-  observation = { root: bucket(), other: bucket() };
-  for (const line of ps("pid=,uid=,comm=").split("\n")) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
-    if (!m || Number(m[2]) === process.getuid()) continue;
-    const b = Number(m[2]) === 0 ? observation.root : observation.other;
-    const a = args.get(Number(m[1])) ?? "";
-    b.total++;
-    b[a === "" ? "empty" : /^\(.*\)$/.test(a) ? "parenthesized" : "readable"]++;
+  const lock = openStateLock(root);
+  const handle = lock.tryAcquire();
+  acquired = Boolean(handle);
+  if (handle) lock.release(handle);
+  if (mode === "admitted" && acquired) {
+    updateState(root, (state) => { state.config.stopReviewGate = true; });
+    updated = loadState(root).config.stopReviewGate === true;
   }
-} catch (e) {
-  observation = { error: e.code ?? e.status, message: e.message.split("\n")[0] };
-}
-let sandboxWitness;
-try {
-  execFileSync("touch", [path.join(root, "outside-denied", "witness")], { stdio: "ignore" });
-  sandboxWitness = "write-allowed";
-} catch { sandboxWitness = "write-denied"; }
+} catch (caught) { error = { code: caught.code ?? null, message: caught.message }; }
+const after = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null;
+const expectedAdmission = mode === "admitted";
 const out = {
-  route, acquired, targetInS0: Boolean(record?.S0?.some((p) => p.pid === target.pid)),
-  sealedAt: record?.sealedAt ?? null, verdict: record?.verdict ?? null,
-  error, observation, sandboxWitness
+  mode, acquired, updated, psCalls, error, sandboxWitness, witnessError,
+  sessionPresent: Boolean(process.env.CODEX_COMPANION_SESSION_ID),
+  certificatePresent: Boolean(process.env.CODEX_COMPANION_LOCK_ADMISSION),
+  stateUnchanged: before === after,
+  passed: !error && psCalls === 0 && sandboxWitness === "write-denied" &&
+    (expectedAdmission ? acquired && updated : !acquired && before === after)
 };
-fs.writeFileSync(path.join(root, `${route}.json`), JSON.stringify(out, null, 2));
+fs.writeFileSync(path.join(root, `${mode}.bash.json`), JSON.stringify(out, null, 2));
 console.log(JSON.stringify(out));
+process.exitCode = out.passed ? 0 : 1;

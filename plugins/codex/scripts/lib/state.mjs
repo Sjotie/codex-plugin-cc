@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { StateLockTimeout, StateLockUnavailable, openFencedLock } from "./fenced-lock.mjs";
+import { StateLockTimeout, StateLockUnavailable, domainVerdict, openFencedLock } from "./fenced-lock.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -22,6 +22,10 @@ export const UNREPORTED_PROCESS_EXIT_MESSAGE = "Process exited without reporting
 const LOCK_NAME = "state.lock";
 const LOCK_RETRY_DELAY_MS = 50;
 const LOCK_TIMEOUT_MS = 10000;
+export const STATE_LOCK_ADMISSION_ENV = "CODEX_COMPANION_LOCK_ADMISSION";
+// Only the SessionStart route performs macOS process proof. Bash and workers
+// consume its bound certificate; the shared MACOS_SCAN_PROVEN stays false.
+const MACOS_SESSION_START_SCAN_PROVEN = true;
 
 function nowIso() {
   return new Date().toISOString();
@@ -105,12 +109,50 @@ export function resolveLockPath(cwd) {
 }
 
 export function openStateLock(cwd) {
-  return openFencedLock(resolveLockPath(cwd), stateLockOptions(cwd));
+  return openFencedLock(resolveLockPath(cwd), consumerOptions(cwd));
 }
 
 // For state-lock --all: a state directory found on disk, without a workspace.
 export function openStateLockAt(stateDir) {
-  return openFencedLock(path.join(stateDir, LOCK_NAME), stateLockOptions(stateDir));
+  return openFencedLock(path.join(stateDir, LOCK_NAME), consumerOptions(stateDir));
+}
+
+function consumerOptions(cwd) {
+  const options = stateLockOptions(cwd);
+  if (process.platform !== "darwin") return options;
+  let admission = null;
+  try {
+    const envelope = JSON.parse(process.env[STATE_LOCK_ADMISSION_ENV] ?? "null");
+    const session = process.env.CODEX_COMPANION_SESSION_ID;
+    const nativeSession = process.env.CLAUDE_CODE_SESSION_ID;
+    if (envelope?.version === 1 && typeof session === "string" && session !== "" &&
+        envelope.sessionId === session && (!nativeSession || nativeSession === session)) {
+      admission = envelope.admission ?? null;
+    }
+  } catch {
+    // Missing, malformed or another session's evidence never grants admission.
+  }
+  return { ...options, consumeAdmission: admission };
+}
+
+// Called by the fixed SessionStart hook for input.cwd only. No arbitrary
+// command, state-root override, signal, or unsandboxed retry is accepted.
+export function prepareSessionStateLock(cwd, sessionId) {
+  if (process.platform !== "darwin") return null;
+  if (!path.isAbsolute(cwd ?? "") || typeof sessionId !== "string" || !sessionId) {
+    throw new StateLockUnavailable("SessionStart needs an absolute cwd and session id; state writes refused");
+  }
+  const lock = openFencedLock(resolveLockPath(cwd), {
+    ...stateLockOptions(cwd),
+    // This proof bit applies only to this hook's canary + actual scan. It is
+    // never inherited by the consumer and does not change the shared default.
+    domain: () => domainVerdict({ macosScanProven: MACOS_SESSION_START_SCAN_PROVEN })
+  });
+  const result = lock.prepareAdmission({ deadlineMs: 1000 });
+  if (!result.ok) {
+    throw new StateLockUnavailable(`SessionStart could not seal the state lock: ${result.reason}; state writes refused`);
+  }
+  return { version: 1, sessionId, admission: result.admission };
 }
 
 // Every directory that can hold state directories: the plugin data dir of
@@ -156,10 +198,10 @@ export function artifactReport(stateDir) {
 }
 
 function withStateLock(cwd, fn) {
-  ensureStateDir(cwd);
   const lock = openStateLock(cwd);
   const handle = lock.acquire();
   try {
+    ensureStateDir(cwd);
     return fn({ lock, handle });
   } finally {
     lock.release(handle);

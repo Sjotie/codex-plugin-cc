@@ -1154,8 +1154,20 @@ test("session start hook exports the Claude session id, transcript path, and plu
   });
 
   assert.equal(result.status, 0, result.stderr);
+  let exports = fs.readFileSync(envFile, "utf8");
+  if (process.platform === "darwin") {
+    const lines = exports.trimEnd().split("\n");
+    assert.equal(lines.shift(), "export CODEX_COMPANION_LOCK_ADMISSION=''");
+    const admissionLine = lines.pop();
+    assert.match(admissionLine, /^export CODEX_COMPANION_LOCK_ADMISSION='\{/);
+    const envelope = JSON.parse(admissionLine.slice("export CODEX_COMPANION_LOCK_ADMISSION='".length, -1));
+    assert.equal(envelope.sessionId, "sess-current");
+    assert.equal(envelope.version, 1);
+    assert.match(envelope.admission.recordHash, /^[a-f0-9]{64}$/);
+    exports = `${lines.join("\n")}\n`;
+  }
   assert.equal(
-    fs.readFileSync(envFile, "utf8"),
+    exports,
     `export CODEX_COMPANION_SESSION_ID='sess-current'\nexport CODEX_COMPANION_TRANSCRIPT_PATH='${transcriptPath}'\nexport CLAUDE_PLUGIN_DATA='${pluginDataDir}'\n`
   );
 });
