@@ -403,7 +403,8 @@ test("transfer delegates the current Claude session directly to native import", 
       ...buildEnv(binDir),
       HOME: home,
       CODEX_HOME: path.join(home, ".codex"),
-      CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath
+      CODEX_COMPANION_TRANSCRIPT_PATH: sourcePath,
+      CLAUDE_CONFIG_DIR: ""
     }
   });
 
@@ -447,7 +448,8 @@ test("transfer reports an actionable upgrade error when native import is unsuppo
     env: {
       ...buildEnv(binDir),
       HOME: home,
-      CODEX_HOME: path.join(home, ".codex")
+      CODEX_HOME: path.join(home, ".codex"),
+      CLAUDE_CONFIG_DIR: ""
     }
   });
 
@@ -477,7 +479,8 @@ test("transfer fails visibly when native import completes without a ledger recor
     env: {
       ...buildEnv(binDir),
       HOME: home,
-      CODEX_HOME: path.join(home, ".codex")
+      CODEX_HOME: path.join(home, ".codex"),
+      CLAUDE_CONFIG_DIR: ""
     }
   });
 
@@ -502,12 +505,43 @@ test("transfer rejects sources outside the Claude projects directory", () => {
 
   const result = run("node", [SCRIPT, "transfer", "--source", sourcePath], {
     cwd: repo,
-    env: { ...buildEnv(binDir), HOME: home }
+    env: { ...buildEnv(binDir), HOME: home, CLAUDE_CONFIG_DIR: "" }
   });
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /only from .*\.claude.*projects/);
 });
+
+for (const where of ["CLAUDE_CONFIG_DIR", "~/.claude while CLAUDE_CONFIG_DIR is set"]) {
+  test(`transfer reads the projects directory of CLAUDE_CONFIG_DIR (${where})`, () => {
+    const home = makeTempDir();
+    const repo = path.join(home, "repo");
+    const binDir = makeTempDir();
+    const configDir = path.join(home, "account-config");
+    const base = where === "CLAUDE_CONFIG_DIR" ? configDir : path.join(home, ".claude");
+    const projectDir = path.join(base, "projects", "-repo");
+    const sourcePath = path.join(projectDir, "sess-config-dir.jsonl");
+    fs.mkdirSync(repo, { recursive: true });
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(path.join(configDir, "projects"), { recursive: true });
+    installFakeCodex(binDir);
+    initGitRepo(repo);
+    fs.writeFileSync(sourcePath, `${JSON.stringify({ type: "user", cwd: repo, message: { role: "user", content: "From the account config." } })}\n`, "utf8");
+
+    const result = run("node", [SCRIPT, "transfer", "--source", sourcePath, "--json"], {
+      cwd: repo,
+      env: { ...buildEnv(binDir), HOME: home, CODEX_HOME: path.join(home, ".codex"), CLAUDE_CONFIG_DIR: configDir }
+    });
+
+    if (where === "CLAUDE_CONFIG_DIR") {
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).sourcePath, fs.realpathSync(sourcePath));
+    } else {
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /only from .*account-config.*projects/);
+    }
+  });
+}
 
 test("task reports the actual Codex auth error when the run is rejected", () => {
   const repo = makeTempDir();
