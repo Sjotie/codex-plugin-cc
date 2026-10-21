@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const PROTOCOL_MARKER = "fenced-lock.protocol-1";
 // macOS gets the verdict "initial" only after the landing proof M2 (design §9)
@@ -103,7 +103,8 @@ async function loadSqlite() {
   try {
     if (typeof globalThis.Bun !== "undefined") {
       const { Database } = await import("bun:sqlite");
-      return { kind: "bun", open: (file) => new Database(file) };
+      return { kind: "bun", open: (file) => new Database(file),
+        openExisting: (file) => new Database(file, { readwrite: true, create: false }) };
     }
     // Node 22 warns that SQLite is experimental: filter exactly that warning (P9).
     const emitWarning = process.emitWarning;
@@ -115,7 +116,14 @@ async function loadSqlite() {
     };
     try {
       const { DatabaseSync } = await import("node:sqlite");
-      return { kind: "node", open: (file) => new DatabaseSync(file) };
+      return { kind: "node", open: (file) => new DatabaseSync(file),
+        openExisting: (file) => {
+          // Node enables SQLITE_OPEN_URI. mode=rw restricts its default
+          // read/write/create flags without opening or closing another fd.
+          const uri = pathToFileURL(file);
+          uri.searchParams.set("mode", "rw");
+          return new DatabaseSync(uri.href);
+        } };
     } finally {
       process.emitWarning = emitWarning;
     }
@@ -772,7 +780,8 @@ export function openFencedLock(fencePath, options = {}) {
   const o = withDefaults(options);
   // An explicitly absent/broken certificate is a refusal, never a request
   // to fall back to the process-scanning path.
-  const consumerOnly = Object.hasOwn(options, "consumeAdmission");
+  const sessionConsumerOnly = Object.hasOwn(options, "consumeSessionAdmission");
+  const consumerOnly = Object.hasOwn(options, "consumeAdmission") || sessionConsumerOnly;
   const F = path.resolve(fencePath);
   const A = `${F}.db`;
   const dir = path.dirname(F);
@@ -802,11 +811,11 @@ export function openFencedLock(fencePath, options = {}) {
   }
 
   // One attempt at the authority. null = BUSY, "retry" = A was replaced from outside.
-  function lockAuthority() {
+  function lockAuthority(existingOnly = false) {
     const pre = statId(A);
     let db;
     try {
-      db = sqlite.open(A);
+      db = existingOnly ? sqlite.openExisting(A) : sqlite.open(A);
     } catch (error) {
       throw unavailable(error, "opening");
     }
@@ -854,12 +863,12 @@ export function openFencedLock(fencePath, options = {}) {
   }
 
   // Take only the authority (for maintenance commands), within a deadline.
-  function authorityOnly(deadlineMs) {
+  function authorityOnly(deadlineMs, existingOnly = false) {
     ensureAvailable();
-    fs.mkdirSync(dir, { recursive: true });
+    if (!existingOnly) fs.mkdirSync(dir, { recursive: true });
     const deadline = performance.now() + deadlineMs;
     for (;;) {
-      const h = lockAuthority();
+      const h = lockAuthority(existingOnly);
       if (h && h !== "retry") return h;
       if (performance.now() >= deadline) return null;
       sleepSync(o.retryMs);
@@ -1214,34 +1223,48 @@ export function openFencedLock(fencePath, options = {}) {
     return r?.admissionBinding?.authority === h.a && r.admissionBinding.fenceId === h.fence;
   }
 
+  function admissionShape(c) {
+    if (!c || c.version !== 1 || typeof c.fence !== "string" ||
+      typeof c.authority !== "string" || typeof c.fenceId !== "string" ||
+      typeof c.recordHash !== "string" || !/^[a-f0-9]{64}$/.test(c.recordHash)) {
+      throw new Error("admission certificate missing or malformed");
+    }
+    if (c.fence !== canonicalFence()) throw new Error("admission belongs to another state root");
+  }
+
+  // Reused by consumers and session publication/read. None of these paths
+  // may repair a record, publish F, judge a process or issue a new seal.
+  function validateExistingAdmission(h, c) {
+    admissionShape(c);
+    const f = lstatOrNull(F);
+    const a = lstatOrNull(A);
+    if (!f?.isDirectory() || fileId(f) !== c.fenceId) throw new Error("admission fence missing or replaced");
+    if (!a?.isFile() || fileId(a) !== c.authority || h.a !== c.authority) throw new Error("admission authority missing or replaced");
+    h.fence = c.fenceId;
+    assertOwned(h);
+    const rs = lstatOrNull(recordPath);
+    if (!rs?.isFile()) throw new Error("admission record missing or not a regular file");
+    const bytes = fs.readFileSync(recordPath);
+    const r = JSON.parse(bytes.toString("utf8"));
+    if (!admissionRecord(r)) throw new Error("admission record missing, malformed or unsealed");
+    if (!boundTo(r, h)) throw new Error("admission record belongs to another fence or authority");
+    if (sha256(bytes) !== c.recordHash) throw new Error("admission record changed");
+    assertOwned(h);
+  }
+
   function consumeAttempt() {
     let h = null;
     try {
       const c = o.consumeAdmission;
-      if (!c || c.version !== 1 || typeof c.fence !== "string" ||
-        typeof c.authority !== "string" || typeof c.fenceId !== "string" ||
-        typeof c.recordHash !== "string" || !/^[a-f0-9]{64}$/.test(c.recordHash)) {
-        return { reason: "admission certificate missing or malformed" };
-      }
-      if (c.fence !== canonicalFence()) return { reason: "admission belongs to another state root" };
-      const f = lstatOrNull(F);
+      if (sessionConsumerOnly && !Object.hasOwn(options, "consumeAdmission")) throw new Error("session consumer requires its own base admission");
+      admissionShape(c);
       const a = lstatOrNull(A);
-      if (!f?.isDirectory() || fileId(f) !== c.fenceId) return { reason: "admission fence missing or replaced" };
       if (!a?.isFile() || fileId(a) !== c.authority) return { reason: "admission authority missing or replaced" };
-      h = lockAuthority();
+      h = lockAuthority(true);
       if (h === null) return { reason: busyReason() };
       if (h === "retry") { h = null; return { reason: "admission authority replaced" }; }
-      h.fence = c.fenceId;
-      assertOwned(h);
-      if (h.a !== c.authority) throw new Error("admission authority changed");
-      const rs = lstatOrNull(recordPath);
-      if (!rs?.isFile()) throw new Error("admission record missing or not a regular file");
-      const bytes = fs.readFileSync(recordPath);
-      const r = JSON.parse(bytes.toString("utf8"));
-      if (!admissionRecord(r)) throw new Error("admission record missing, malformed or unsealed");
-      if (!boundTo(r, h)) throw new Error("admission record belongs to another fence or authority");
-      if (sha256(bytes) !== c.recordHash) throw new Error("admission record changed");
-      assertOwned(h);
+      validateExistingAdmission(h, c);
+      if (sessionConsumerOnly) validateSessionConsumer(h, o.consumeSessionAdmission, c);
       writeOwner(h);
       return { handle: h };
     } catch (error) {
@@ -1313,6 +1336,143 @@ export function openFencedLock(fencePath, options = {}) {
     } catch (error) {
       return { ok: false, reason: `admission preparation failed (${error.code ?? error.message})` };
     }
+  }
+
+  // ---- session transport generations, stored in the existing authority ---
+
+  const SESSION_TABLE = "fenced_lock_session_admission_v1";
+
+  function sessionTuple(x, withGeneration = false) {
+    return Boolean(x && typeof x.sessionId === "string" && x.sessionId.length > 0 &&
+      typeof x.bindingEpoch === "string" && x.bindingEpoch.length > 0 &&
+      (!withGeneration || (typeof x.generation === "string" && /^[a-f0-9]{64}$/.test(x.generation))));
+  }
+
+  function sessionContext(x, admission) {
+    return Object.freeze({ sessionId: x.sessionId, bindingEpoch: x.bindingEpoch,
+      ...(x.generation ? { generation: x.generation } : {}), ...(admission ? { admission: { ...admission } } : {}) });
+  }
+
+  function bindingChecked(x, admission) {
+    if (typeof o.sessionBindingCheck !== "function" || o.sessionBindingCheck(sessionContext(x, admission)) !== true) {
+      throw new Error("session binding unknown or changed");
+    }
+  }
+
+  function receiptChecked(x, admission) {
+    if (typeof o.sessionReceiptCheck !== "function" || o.sessionReceiptCheck(sessionContext(x, admission)) !== true) {
+      throw new Error("session parent receipt missing or unproven");
+    }
+  }
+
+  function sessionRow(h, x) {
+    const raw = h.db.prepare(`SELECT payload FROM ${SESSION_TABLE} WHERE session_id = ?`).get(x.sessionId);
+    if (!raw) return null;
+    const row = JSON.parse(raw.payload);
+    if (!sessionTuple(row, true) || row.version !== 1 || row.sessionId !== x.sessionId ||
+      row.bindingEpoch !== x.bindingEpoch || row.authority !== h.a || row.fence !== canonicalFence() ||
+      !["pending", "ready"].includes(row.state)) throw new Error("session admission row malformed or foreign");
+    return row;
+  }
+
+  function saveSessionRow(h, row) {
+    h.db.prepare(`INSERT INTO ${SESSION_TABLE} (session_id, payload) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET payload = excluded.payload`)
+      .run(row.sessionId, JSON.stringify(row));
+  }
+
+  function sameAdmission(a, b) {
+    return Boolean(a && b && ["version", "fence", "authority", "fenceId", "recordHash"].every((key) => a[key] === b[key]));
+  }
+
+  function validateSessionConsumer(h, x, admission) {
+    if (!sessionTuple(x, true)) throw new Error("session admission tuple missing or malformed");
+    const row = sessionRow(h, x);
+    if (!row || row.state !== "ready" || row.generation !== x.generation || !sameAdmission(row.admission, admission)) {
+      throw new Error("session generation pending, revoked or foreign");
+    }
+    bindingChecked(x, admission);
+    receiptChecked(x, admission);
+    assertOwned(h);
+  }
+
+  // Unlike generic unlock, publication cannot swallow a COMMIT error. A
+  // failed action/commit rolls back; ready is reported only after COMMIT.
+  function sessionOperation({ deadlineMs = o.deadlineMs, existingOnly = false } = {}, action) {
+    let h = null;
+    try {
+      ensureAvailable();
+      const expected = existingOnly ? lstatOrNull(A) : null;
+      if (existingOnly && !expected?.isFile()) throw new Error("session authority missing");
+      h = authorityOnly(deadlineMs, existingOnly);
+      if (!h) throw new Error(busyReason());
+      if ((existingOnly && h.a !== fileId(expected)) || statId(A) !== h.a) throw new Error("session authority replaced");
+      const result = action(h);
+      if (statId(A) !== h.a) throw new Error("session authority replaced");
+      h.db.exec("COMMIT");
+      h.released = true;
+      closeQuietly(h.db);
+      HELD.delete(h);
+      return result;
+    } catch (error) {
+      if (h && !h.released) {
+        try { h.db.exec("ROLLBACK"); } catch { /* close releases it */ }
+        h.released = true;
+        closeQuietly(h.db);
+        HELD.delete(h);
+      }
+      return { ok: false, reason: `session admission refused (${error.code ?? error.message})` };
+    }
+  }
+
+  function beginSessionAdmission({ sessionId, bindingEpoch, deadlineMs = o.deadlineMs } = {}) {
+    const x = { sessionId, bindingEpoch };
+    if (!sessionTuple(x)) return { ok: false, reason: "session binding missing or malformed" };
+    return sessionOperation({ deadlineMs }, (h) => {
+      bindingChecked(x);
+      h.db.exec(`CREATE TABLE IF NOT EXISTS ${SESSION_TABLE} (session_id TEXT PRIMARY KEY, payload TEXT NOT NULL)`);
+      const generation = hex(32);
+      saveSessionRow(h, { version: 1, ...x, generation, state: "pending", authority: h.a, fence: canonicalFence() });
+      return { ok: true, generation };
+    });
+  }
+
+  function finishSessionAdmission({ sessionId, bindingEpoch, generation, admission, deadlineMs = o.deadlineMs } = {}) {
+    const x = { sessionId, bindingEpoch, generation };
+    if (!sessionTuple(x, true)) return { ok: false, reason: "session generation missing or malformed" };
+    return sessionOperation({ deadlineMs, existingOnly: true }, (h) => {
+      bindingChecked(x, admission);
+      validateExistingAdmission(h, admission);
+      const row = sessionRow(h, x);
+      if (!row || row.state !== "pending" || row.generation !== generation) throw new Error("session generation no longer pending");
+      saveSessionRow(h, { ...row, state: "ready", admission });
+      assertOwned(h);
+      return { ok: true };
+    });
+  }
+
+  function revokeSessionAdmission({ sessionId, bindingEpoch, generation, admission, deadlineMs = o.deadlineMs } = {}) {
+    const x = { sessionId, bindingEpoch, generation };
+    if (!sessionTuple(x, true)) return { ok: false, reason: "session generation missing or malformed" };
+    return sessionOperation({ deadlineMs, existingOnly: true }, (h) => {
+      validateExistingAdmission(h, admission);
+      validateSessionConsumer(h, x, admission);
+      saveSessionRow(h, { version: 1, sessionId, bindingEpoch, generation: hex(32), state: "pending", authority: h.a, fence: canonicalFence() });
+      assertOwned(h);
+      return { ok: true };
+    });
+  }
+
+  function readSessionAdmission({ sessionId, bindingEpoch, deadlineMs = o.deadlineMs } = {}) {
+    const x = { sessionId, bindingEpoch };
+    if (!sessionTuple(x)) return null;
+    const result = sessionOperation({ deadlineMs, existingOnly: true }, (h) => {
+      const row = sessionRow(h, x);
+      if (!row || row.state !== "ready") throw new Error("session generation not ready");
+      validateExistingAdmission(h, row.admission);
+      validateSessionConsumer(h, row, row.admission);
+      return { ok: true, row };
+    });
+    return result.ok ? result.row : null;
   }
 
   function mutation(fn) {
@@ -1806,6 +1966,10 @@ export function openFencedLock(fencePath, options = {}) {
     assertOwned,
     status,
     prepareAdmission: mutation(prepareAdmission),
+    beginSessionAdmission: mutation(beginSessionAdmission),
+    finishSessionAdmission: mutation(finishSessionAdmission),
+    revokeSessionAdmission: mutation(revokeSessionAdmission),
+    readSessionAdmission,
     adoptLegacy: mutation(adoptLegacy),
     seal: mutation(seal),
     stopOld: mutation(stopOld),
