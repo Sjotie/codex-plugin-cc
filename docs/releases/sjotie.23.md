@@ -25,6 +25,8 @@ allowed to finish; no global slot settings were changed.
 | Check | Observed result | Limit |
 |---|---|---|
 | Core P1/P2/P4/P5 | 13/13 tests, 55 assertions; all nine Bun/Node 22/Node 26 holder/contender pairs get BUSY, then acquire after the owned holder is SIGKILLed; same-process diagnostic preserves its lock | Scanner is injected in this kernel-lock suite |
+| P7 | Original O1/O2 against a directory fence: all four Node 22/26 runs time out, never enter their callback, and preserve the fence inode | Acquire path only; no full old-release race matrix |
+| P8 | Both Nodes: rename to empty path succeeds; over file ENOTDIR, over nonempty directory ENOTEMPTY; unlink directory EPERM, read directory EISDIR | Own fixture directories on the local filesystem |
 | M1 | Native marker is `new` before and after unlink; `lsof -Fn` retains the original pathname without a deleted suffix | Ordinary shell, own child |
 | M2 shell precondition | Original O2 code is paused inside `updateState`, its F is removed by the fixture, new fence records its PID/start in S0 and stays unsealed; after owned-child exit it seals and admits | Ordinary shell, not the Claude routes |
 | M2 SessionStart | A real Claude Code SessionStart hook publishes the fence, records the living O2 child in S0, refuses acquire and leaves `sealedAt: null` | Test-only candidate `initial` verdict, actual canary/scanner; no product flag change |
