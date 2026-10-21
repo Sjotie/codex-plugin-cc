@@ -28,7 +28,7 @@ allowed to finish; no global slot settings were changed.
 | P7 | Original O1/O2 against a directory fence: all four Node 22/26 runs time out, never enter their callback, and preserve the fence inode | Acquire path only; no full old-release race matrix |
 | P8 | Both Nodes: rename to empty path succeeds; over file ENOTDIR, over nonempty directory ENOTEMPTY; unlink directory EPERM, read directory EISDIR | Own fixture directories on the local filesystem |
 | M1 | Native marker is `new` before and after unlink; `lsof -Fn` retains the original pathname without a deleted suffix | Ordinary shell, own child |
-| M2 shell precondition | Original O2 code is paused inside `updateState`, its F is removed by the fixture, new fence records its PID/start in S0 and stays unsealed; after owned-child exit it seals and admits | Ordinary shell, not the Claude routes |
+| M2 shell precondition | Original O2 code is paused inside `updateState`, its F is removed by the fixture, new fence records its PID/start in S0 and stays unsealed; after owned-child exit it seals and admits | Ordinary shell; the final admission uses a matcher restricted to that fixture writer, not the full machine scan |
 | M2 SessionStart | A real Claude Code SessionStart hook publishes the fence, records the living O2 child in S0, refuses acquire and leaves `sealedAt: null` | Test-only candidate `initial` verdict, actual canary/scanner; no product flag change |
 | M2 Bash | A real `/codex:native-probe` command uses Claude's Bash tool with sandbox enabled, failIfUnavailable and no unsandboxed fallback. `ps` fails with `spawnSync ps EPERM`; no S0 record or seal, acquire false | **FAIL: release gate not met** |
 | Sandbox witness | Writing the fixture's denied path succeeds from shell/hook, fails from Bash | Confirms that Bash actually ran inside the sandbox |
@@ -48,12 +48,14 @@ remaining native matrix. No sandbox setting was relaxed to get a green result.
 ## Reproduce
 
 Use the machine's test-slot command before each invocation below. Select an
-existing authenticated Claude profile with `CLAUDE_CONFIG_DIR` when needed;
-the harness never logs in, reads a credential file or prints credentials.
+existing authenticated Claude profile with `CLAUDE_CONFIG_DIR` when needed.
+The harness does not inspect or export credentials; the real Claude CLI uses
+its existing stored login. No login flow is started.
 
 ```sh
 node --test tests/state-lock-macos.test.mjs
 node tests/fenced-lock/macos-live.mjs
+FENCED_LOCK_NODES=<node22-binary> node tests/fenced-lock/macos-filesystem.mjs
 node scripts/bump-version.mjs --check 1.0.7-sjotie.23
 ```
 
@@ -64,6 +66,11 @@ and MCP servers are excluded. It captures shell, SessionStart and `/codex`
 Bash observations. It exits nonzero unless both visibility and the sandbox
 denial witness are proven. It keeps `summary.json` and the Claude tool-call
 transcript in that temp directory, and stops/awaits only its own children.
+It sends TERM to its own Claude child after 120 seconds and KILL after 125
+seconds if needed. It does not enumerate or signal Claude grandchildren;
+the fixture's own old-writer callbacks have a 180-second lifetime bound.
+`macos-filesystem.mjs` prints P7/P8 measurements under every supplied Node,
+checks both original state hashes, and retains its fixture directory.
 
 The EPERM unit fixture uses signal 0 against PID 1, never a stop signal. The
 first native attempt at the pre-existing test sent SIGTERM and was refused

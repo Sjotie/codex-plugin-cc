@@ -84,8 +84,10 @@ try {
     "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash", "--output-format", "stream-json", "--verbose", "--include-hook-events", "--max-turns", "3"];
   const run = start("claude", args, { cwd: root, env, stdio: ["ignore", stdout, stderr] });
   const timer = setTimeout(() => run.child.kill("SIGTERM"), 120_000);
+  const killTimer = setTimeout(() => run.child.kill("SIGKILL"), 125_000);
   const claudeExit = await run.exit;
   clearTimeout(timer);
+  clearTimeout(killTimer);
   fs.closeSync(stdout);
   fs.closeSync(stderr);
   const results = Object.fromEntries(["shell", "hook", "bash"].map((route) => {

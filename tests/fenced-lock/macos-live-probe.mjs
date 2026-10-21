@@ -1,6 +1,7 @@
 // Invoked by macos-live.mjs in a shell, a real SessionStart hook, and a
 // /codex command's Bash tool. Only temporary fixture state is changed.
 import fs from "node:fs";
+import assert from "node:assert/strict";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -9,6 +10,9 @@ const [lib, root, route] = process.argv.slice(2);
 const { openFencedLock, domainVerdict } = await import(pathToFileURL(path.join(lib, "fenced-lock.mjs")));
 const { matchPluginArgv } = await import(pathToFileURL(path.join(lib, "state.mjs")));
 const target = JSON.parse(fs.readFileSync(path.join(root, "targets.json"), "utf8"))[route];
+const relative = path.relative(fs.realpathSync(root), fs.realpathSync(path.dirname(target.fence)));
+assert.ok(!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`), "fixture fence must stay inside its temporary root");
+assert.equal(path.basename(target.fence), "state.lock");
 // Exercise the proposed initial verdict with the real canary and scanner.
 // This does not enable MACOS_SCAN_PROVEN in the product.
 const lock = openFencedLock(target.fence, {
