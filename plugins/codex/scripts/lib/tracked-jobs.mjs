@@ -11,6 +11,26 @@ import {
 } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
+// How long the final result publication waits while the session admission is
+// in a transient state (a SessionStart attempt pending, or its receipt not
+// yet recorded), e.g. across a compact. Only that last publication waits.
+export const FINAL_PUBLISH_ADMISSION_WAIT_ENV = "CODEX_COMPANION_FINAL_PUBLISH_WAIT_MS";
+const DEFAULT_FINAL_PUBLISH_ADMISSION_WAIT_MS = 180_000;
+
+function finalPublishLockOptions() {
+  const parsed = Number(process.env[FINAL_PUBLISH_ADMISSION_WAIT_ENV]);
+  return { admissionWaitMs: Number.isFinite(parsed) && parsed >= 0 ? Math.min(parsed, 900_000) : DEFAULT_FINAL_PUBLISH_ADMISSION_WAIT_MS };
+}
+
+// The result is already in the job log; say so when the index cannot take it.
+function publishFinal(logFile, publish) {
+  try {
+    return publish();
+  } catch (error) {
+    appendLogLine(logFile, `The result above was not published to the job record: ${error instanceof Error ? error.message : String(error)}`);
+    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { finalPublicationFailed: true });
+  }
+}
 
 export function nowIso() {
   return new Date().toISOString();
@@ -280,7 +300,9 @@ export async function runTrackedJob(job, runner, options = {}) {
     }
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
-    const completedRecord = updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+    // Log first: a publication refused by the state lock must not lose the result.
+    appendLogBlock(logFile, "Final output", execution.rendered);
+    const completedRecord = publishFinal(logFile, () => updateJobRecord(job.workspaceRoot, job.id, (existing) => {
       if (existing?.status === "cancelled") {
         return null;
       }
@@ -300,15 +322,20 @@ export async function runTrackedJob(job, runner, options = {}) {
         failure: execution.failure ?? null,
         errorMessage: execution.failure ? (execution.failure.message ?? null) : null
       };
-    });
+    }, null, finalPublishLockOptions()));
     if (completedRecord?.status === "cancelled") {
       settleProcessExitReporter();
       return stopTrackedJobIfCancelled(job, logFile);
     }
     settleProcessExitReporter();
-    appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
     return execution;
   } catch (error) {
+    // The result could not be published: do not wait a second time to
+    // publish a failure over it. The log keeps the result.
+    if (error?.finalPublicationFailed) {
+      settleProcessExitReporter();
+      throw error;
+    }
     const cancelledDuringRun = stopTrackedJobIfCancelled(job, logFile);
     if (cancelledDuringRun) {
       settleProcessExitReporter();
@@ -316,7 +343,8 @@ export async function runTrackedJob(job, runner, options = {}) {
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const completedAt = nowIso();
-    const failedRecord = updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+    appendLogLine(logFile, `Failed: ${errorMessage}`);
+    const failedRecord = publishFinal(logFile, () => updateJobRecord(job.workspaceRoot, job.id, (existing) => {
       if (existing?.status === "cancelled") {
         return null;
       }
@@ -330,7 +358,7 @@ export async function runTrackedJob(job, runner, options = {}) {
         completedAt,
         logFile: options.logFile ?? job.logFile ?? existing?.logFile ?? null
       };
-    });
+    }, null, finalPublishLockOptions()));
     if (failedRecord?.status === "cancelled") {
       settleProcessExitReporter();
       return stopTrackedJobIfCancelled(job, logFile);

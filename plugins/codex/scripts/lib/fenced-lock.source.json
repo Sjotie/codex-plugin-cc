@@ -2,9 +2,9 @@
   "note": "fenced-lock.mjs and fenced-lock.protocol-1 are byte-equal copies; change them in the source first (#1916)",
   "sourceRepo": "Tiemensma-Development/factory-core",
   "sourcePath": "shared/fenced-lock",
-  "sourceCommit": "3982b9947291996586bddf6fe06736c71ed63818",
+  "sourceCommit": "40ac94f7b57b31239d4a5e1ca2dabacdbb05c453",
   "sha256": {
-    "fenced-lock.mjs": "e0c4c59fb32f4329b4759e3849849b834a361fe543e0ba97d4b6f61ad9502842",
+    "fenced-lock.mjs": "ec41f99c72c71a6a91631670781108f63a578ed20bff7d0d311db579b4e50630",
     "fenced-lock.protocol-1": "a6c51a60de872adb0f219ae08c64703e05262792b5080e329fafd6b7edbe8470"
   }
 }

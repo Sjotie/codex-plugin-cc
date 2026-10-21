@@ -35,20 +35,30 @@ session, state root, fence, authority database and seal record; missing or
 changed evidence refuses writes. The shared `MACOS_SCAN_PROVEN` stays `false`:
 only this hook route performs process proof. See the release checklist for
 native coverage; this candidate is not permission to publish or install it.
-On macOS this candidate requires **Claude Code 2.1.301**: other versions
-refuse until their hook receipt format is proven. Stop and SessionEnd recover
-only the current session certificate from the same authority, with a fresh
-check of Claude's successful SessionStart receipt. A seal alone grants nothing.
-Every new SessionStart for the same session ID invalidates its previous
-generation before preparation. SessionEnd revokes its original activation after
-persistent cancellation. Native startup/resume now works end to end.
-**Native release gate remains open:** after actual interactive compact, Stop
-uses the new generation, but Bash retains its old envelope and safely refuses
-on the generation check. The provider delivery/cache step remains unknown.
-The candidate is functionally incomplete; no alternate Bash admission is supplied.
-The [compact diagnosis and options](docs/releases/sjotie.23-compact-diagnosis.md)
-records the measured cause and the blocked post-clear replay. See
-the [transport evidence](docs/releases/sjotie.23-session-transport.md).
+On macOS this candidate accepts only the Claude Code versions listed with
+their proof in `plugins/codex/scripts/lib/provider-receipts.json` (now
+**2.1.301 on darwin/arm64**): another version, platform or process
+architecture refuses with `provider version unproven`. Stop and SessionEnd
+recover only the current session capability from the same authority, with a
+fresh check of Claude's successful SessionStart receipt. A seal alone grants
+nothing.
+
+Every SessionStart first starts a new attempt, which stops the session's
+capability at once. A successful **compact** keeps that capability: Bash and
+workers that still hold the envelope from before compact work again once the
+compact attempt is ready and Claude has recorded its receipt. Startup,
+resume and clear issue a new capability, which ends the old one for good;
+SessionEnd revokes it after persistent cancellation. A Stop or SessionEnd
+activation stays bound to the attempt it started under. A worker's final
+result goes to its job log first and the final publication waits up to three
+minutes (`CODEX_COMPANION_FINAL_PUBLISH_WAIT_MS`) while a SessionStart attempt
+is still pending; any other refusal stops it at once. The design and its
+limits are in [design D](docs/releases/sjotie.23-compact-d-design.md); the
+earlier [compact diagnosis](docs/releases/sjotie.23-compact-diagnosis.md)
+records why the generation design failed after compact. **Native release gate
+remains open:** D is built and unit-tested on Linux; the native macOS PTY
+proof (`tests/fenced-lock/macos-d-pty-probe.py`) has not run yet. See the
+[transport evidence](docs/releases/sjotie.23-session-transport.md).
 
 ## Install
 

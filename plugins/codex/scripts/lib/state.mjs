@@ -115,52 +115,60 @@ function hookLock(locator) {
 
 // Called before stdin parsing on every registered SessionStart. A known native
 // SID locates its original A even when the requested workspace/data root moved.
+// The pending attempt T stops the current capability C at once; C survives
+// only if this attempt turns out to be a compact that can prove its ready
+// predecessor (see the attempt contract in fenced-lock.mjs).
 export function beginSessionStateLockStart() {
   if (process.platform !== "darwin") return null;
   const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
   if (typeof sessionId !== "string" || !sessionId) throw new StateLockUnavailable("SessionStart native session id missing");
   const locator = readSessionLocator(sessionId);
   if (!locator) return null;
-  const result = hookLock(locator).beginSessionAdmission({ sessionId, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
+  const result = hookLock(locator).beginSessionAttempt({ sessionId, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
   if (!result.ok) throw new StateLockUnavailable(result.reason);
-  return { locator, generation: result.generation };
+  return { locator, attemptId: result.attemptId };
 }
 
-// Only the fixed SessionStart uses this proof route. Pending is committed
-// before the scan; the caller exports the returned envelope before finish.
-export function prepareSessionStateLock(cwd, sessionId, input = {}, started = null) {
+// Only the fixed SessionStart uses this route. Startup, resume and clear prove
+// and seal (prepareAdmission) and receive a new C; compact takes no new proof
+// and keeps the candidate C, validated as it is now. Returns the envelope to
+// export and the token for stdout, which Claude records as the receipt.
+export function completeSessionStateLockStart(cwd, sessionId, input = {}, started = null) {
   if (process.platform !== "darwin") return null;
   validStartInput({ ...input, cwd, session_id: sessionId });
   let locator = started?.locator ?? readSessionLocator(sessionId);
   if (!locator) locator = createSessionLocator(sessionId, resolveLockPath(cwd), input.transcript_path, cwd);
-  let generation = started?.generation;
-  if (!generation) {
-    const begun = hookLock(locator).beginSessionAdmission({ sessionId, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
+  let attemptId = started?.attemptId;
+  if (!attemptId) {
+    const begun = hookLock(locator).beginSessionAttempt({ sessionId, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
     if (!begun.ok) throw new StateLockUnavailable(begun.reason);
-    generation = begun.generation;
+    attemptId = begun.attemptId;
   }
   // Root/SID/transcript movement never rebinds an existing session. Its old
-  // generation was already revoked on the original authority above.
+  // capability was already stopped on the original authority above.
   if (locator.root !== fs.realpathSync(resolveStateDir(cwd)) || locator.cwd !== fs.realpathSync(cwd) ||
     locator.transcriptPath !== bindTranscriptPath(input.transcript_path)) throw new StateLockUnavailable("SessionStart session root or transcript changed; state writes refused");
-  const proofLock = openFencedLock(locator.fence, { ...stateLockOptions(cwd), ...sessionChecks(locator),
-    domain: () => domainVerdict({ macosScanProven: MACOS_SESSION_START_SCAN_PROVEN }) });
-  const result = proofLock.prepareAdmission({ deadlineMs: 1000 });
-  if (!result.ok) throw new StateLockUnavailable(`SessionStart could not seal the state lock: ${result.reason}; state writes refused`);
-  return envelopeFor(locator, generation, input.source, result.admission);
-}
-
-export function finishSessionStateLockStart(envelope) {
-  if (process.platform !== "darwin") return;
-  const locator = readSessionLocator(envelope.sessionId);
-  if (!locator || locator.bindingEpoch !== envelope.bindingEpoch) throw new StateLockUnavailable("SessionStart locator changed before publication");
-  const result = hookLock(locator).finishSessionAdmission({ sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch,
-    generation: envelope.generation, admission: envelope.admission, deadlineMs: 1000 });
-  if (!result.ok) throw new StateLockUnavailable(result.reason);
+  let admission;
+  if (input.source !== "compact") {
+    const proofLock = openFencedLock(locator.fence, { ...stateLockOptions(cwd), ...sessionChecks(locator),
+      domain: () => domainVerdict({ macosScanProven: MACOS_SESSION_START_SCAN_PROVEN }) });
+    const result = proofLock.prepareAdmission({ deadlineMs: 1000 });
+    if (!result.ok) throw new StateLockUnavailable(`SessionStart could not seal the state lock: ${result.reason}; state writes refused`);
+    admission = result.admission;
+  }
+  const finished = hookLock(locator).finishSessionAttempt({ sessionId, bindingEpoch: locator.bindingEpoch, attemptId,
+    source: input.source, ...(admission ? { admission } : {}), deadlineMs: 1000 });
+  if (!finished.ok) throw new StateLockUnavailable(`SessionStart attempt not published: ${finished.reason}; state writes refused`);
+  return {
+    envelope: envelopeFor(locator, finished.capability),
+    token: { capabilityId: finished.capability.id, attemptId, sessionId, root: locator.root, source: input.source }
+  };
 }
 
 // Recovery is deliberately limited to these two registered fixed hooks. They
 // consume current ready-state + the provider receipt; they never scan or seal.
+// The activation binds C and the current attempt T: a later attempt, also a
+// compact that keeps C, makes this activation refuse.
 const activeFixedEndAdmissions = new WeakSet();
 
 export function activateFixedHookAdmission(input, event) {
@@ -176,10 +184,10 @@ export function activateFixedHookAdmission(input, event) {
   const locator = readSessionLocator(input.session_id);
   if (!locator || locator.root !== fs.realpathSync(resolveStateDir(input.cwd)) || locator.cwd !== fs.realpathSync(input.cwd) ||
     locator.transcriptPath !== fs.realpathSync(input.transcript_path)) throw new StateLockUnavailable("Fixed hook session root or transcript mismatch");
-  const row = hookLock(locator).readSessionAdmission({ sessionId: input.session_id, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
-  if (!row) throw new StateLockUnavailable("Fixed hook has no proven current SessionStart receipt");
-  const token = readSessionReceipt(locator, row.generation);
-  const envelope = envelopeFor(locator, row.generation, token.source, row.admission);
+  const current = hookLock(locator).readSessionCapability({ sessionId: input.session_id, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
+  if (!current) throw new StateLockUnavailable("Fixed hook has no proven current SessionStart receipt");
+  readSessionReceipt(locator, { capabilityId: current.capability.id, attemptId: current.attempt.id, source: current.attempt.source });
+  const envelope = { ...envelopeFor(locator, current.capability), attemptId: current.attempt.id };
   process.env.CODEX_COMPANION_SESSION_ID = input.session_id;
   process.env[STATE_LOCK_ADMISSION_ENV] = JSON.stringify(envelope);
   if (event === "SessionEnd") activeFixedEndAdmissions.add(envelope);
@@ -187,7 +195,7 @@ export function activateFixedHookAdmission(input, event) {
 }
 
 // Complete the exact activation that performed cleanup. Never read or adopt
-// the latest generation here: a concurrent SessionStart owns its own proof.
+// the latest attempt here: a concurrent SessionStart owns its own proof.
 export function completeFixedSessionEndAdmission(envelope) {
   if (process.platform !== "darwin") return;
   const entry = fileURLToPath(new URL("../session-lifecycle-hook.mjs", import.meta.url));
@@ -200,8 +208,8 @@ export function completeFixedSessionEndAdmission(envelope) {
     locator.configRoot !== envelope.configRoot || locator.transcriptPath !== envelope.transcriptPath) {
     throw new StateLockUnavailable("SessionEnd binding changed before completion");
   }
-  const result = hookLock(locator).revokeSessionAdmission({ sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch,
-    generation: envelope.generation, admission: envelope.admission, deadlineMs: 1000 });
+  const result = hookLock(locator).revokeSessionCapability({ sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch,
+    capabilityId: envelope.capabilityId, attemptId: envelope.attemptId, admission: envelope.admission, deadlineMs: 1000 });
   if (!result.ok) throw new StateLockUnavailable(result.reason);
   activeFixedEndAdmissions.delete(envelope);
   process.env[STATE_LOCK_ADMISSION_ENV] = "";
@@ -249,9 +257,11 @@ export function artifactReport(stateDir) {
   return { indexed: indexed.length, orphans, unreadable };
 }
 
-function withStateLock(cwd, fn) {
+// admissionWaitMs: see acquire in fenced-lock.mjs; only the final worker
+// publication passes it.
+function withStateLock(cwd, fn, { admissionWaitMs = 0 } = {}) {
   const lock = openStateLock(cwd);
-  const handle = lock.acquire();
+  const handle = lock.acquire({ admissionWaitMs });
   try {
     ensureStateDir(cwd);
     return fn({ lock, handle });
@@ -520,7 +530,7 @@ export function upsertJob(cwd, jobPatch) {
 
 // indexExtra: fields set on the index entry only, after the record (for the
 // index copy of a restored job, which clears completedAt and cancelledAt).
-export function updateJobRecord(cwd, jobId, mutate, indexExtra = null) {
+export function updateJobRecord(cwd, jobId, mutate, indexExtra = null, lockOptions = {}) {
   return withStateLock(cwd, (ctx) => {
     const jobFile = resolveJobFile(cwd, jobId);
     let existing = null;
@@ -559,7 +569,7 @@ export function updateJobRecord(cwd, jobId, mutate, indexExtra = null) {
     }
     saveStateLocked(cwd, state, ctx);
     return nextJob;
-  });
+  }, lockOptions);
 }
 
 export function assignJobWorkerPid(cwd, jobId, pid) {

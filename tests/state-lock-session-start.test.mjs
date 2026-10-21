@@ -10,13 +10,16 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const repo = process.env.FENCED_LOCK_SESSION_PRODUCT_ROOT ?? fileURLToPath(new URL("../", import.meta.url));
-const hook = path.join(repo, "plugins/codex/scripts/session-lifecycle-hook.mjs");
-const state = pathToFileURL(path.join(repo, "plugins/codex/scripts/lib/state.mjs")).href;
+const defaultRepo = process.env.FENCED_LOCK_SESSION_PRODUCT_ROOT ?? fileURLToPath(new URL("../", import.meta.url));
 const CERT = "CODEX_COMPANION_LOCK_ADMISSION";
 const options = { skip: process.platform === "win32" && "Windows unsupported" };
+// Sanitized 2.1.301 record shapes; their hash is in provider-receipts.json.
+const RECORDS = JSON.parse(fs.readFileSync(new URL("./fixtures/provider-receipts/claude-code-2.1.301.json", import.meta.url), "utf8"));
+const fill = (shape, values) => JSON.parse(JSON.stringify(shape), (key, value) => typeof value === "string" && /^<[a-zA-Z]+>$/.test(value) ? values[value.slice(1, -1)] : typeof value === "string" ? value.replace(/<source>/, values.source) : value);
 
-function fixture(t) {
+function fixture(t, repo = defaultRepo) {
+  const hook = path.join(repo, "plugins/codex/scripts/session-lifecycle-hook.mjs");
+  const state = pathToFileURL(path.join(repo, "plugins/codex/scripts/lib/state.mjs")).href;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "hook-admission-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, "workspace");
@@ -31,6 +34,7 @@ function fixture(t) {
   fs.writeFileSync(preload, `
     import fs from 'node:fs'; import cp from 'node:child_process'; import net from 'node:net'; import {syncBuiltinESMExports} from 'node:module';
     Object.defineProperty(process,'platform',{value:'darwin'});
+    Object.defineProperty(process,'arch',{value:process.env.ADMISSION_FIXTURE_ARCH??'arm64'});
     globalThis.admissionPsCalls=0;
     cp.execFileSync=function(bin,args,...rest){
       if(bin!=='ps' && bin!=='lsof') throw Object.assign(new Error('fixture spawn denied'),{code:'EPERM'});
@@ -65,7 +69,9 @@ function fixture(t) {
       if(JSON.parse(fs.readFileSync(process.env.ADMISSION_FIXTURE,'utf8')).crashStdout && String(data).includes('codexStateLockAdmission'))process.kill(process.pid,'SIGKILL');
       return r;};
     const read=fs.readFileSync;let receiptReads=0;
-    fs.readFileSync=function(file,...rest){const c=JSON.parse(read.call(this,process.env.ADMISSION_FIXTURE,'utf8'));
+    fs.readFileSync=function(file,...rest){
+      if(file===0&&process.env.ADMISSION_STDIN_HOLD)while(!fs.existsSync(process.env.ADMISSION_STDIN_HOLD))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+      const c=JSON.parse(read.call(this,process.env.ADMISSION_FIXTURE,'utf8'));
       if(c.denyAfterReceipt && String(file)===c.transcript && ++receiptReads>2)throw Object.assign(new Error('receipt became unreadable'),{code:'EPERM'});
       return read.call(this,file,...rest);};
     const initial=JSON.parse(read(process.env.ADMISSION_FIXTURE,'utf8'));
@@ -79,10 +85,11 @@ function fixture(t) {
   env.CLAUDE_CODE_SESSION_ID = "session-current";
   delete env.CODEX_COMPANION_SESSION_ID;
   const hookInput = (extra = {}) => ({ cwd: workspace, session_id: "session-current", transcript_path: transcript, source: "startup", ...extra });
-  const receipt = (result, extra = {}) => ({type:"attachment",version:"2.1.301",sessionId:"session-current",cwd:workspace,isSidechain:false,
-    attachment:{type:"hook_success",hookEvent:"SessionStart",hookName:`SessionStart:${extra.source ?? "startup"}`,exitCode:result.status ?? 1,
-      command:'node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionStart',stdout:result.stdout,...extra.attachment},...extra.record});
-  const appendReceipt = (result, extra = {}) => fs.appendFileSync(transcript, JSON.stringify(receipt(result, extra))+"\n");
+  const receipt = (result, extra = {}) => {
+    const r = fill(RECORDS.hookSuccess, { sessionId: extra.sessionId ?? "session-current", cwd: workspace, source: extra.source ?? "startup", exitCode: result.status ?? 1, stdout: result.stdout });
+    return { ...r, attachment: { ...r.attachment, ...extra.attachment }, ...extra.record };
+  };
+  const appendReceipt = (result, extra = {}) => fs.appendFileSync(extra.transcriptFile ?? transcript, JSON.stringify(receipt(result, extra))+"\n");
   const runHook = (spec = {}, input = JSON.stringify(hookInput()), receiptOptions = {}) => {
     fs.writeFileSync(config, JSON.stringify(spec));
     const result = spawnSync(process.execPath, ["--import", preload, hook, "SessionStart"], {
@@ -91,6 +98,28 @@ function fixture(t) {
     let source = "startup"; try {source=JSON.parse(input).source;} catch {}
     if (!receiptOptions.omit) appendReceipt(result, {source, ...receiptOptions});
     return result;
+  };
+  // The real hook, started now and fed its stdin later: it begins its attempt
+  // before reading stdin, so the attempt stays pending until feed().
+  let holds = 0;
+  const cleared = () => fs.readFileSync(env.CLAUDE_ENV_FILE, "utf8").split("\n").filter((l) => l === `export ${CERT}=''`).length;
+  const startHook = async (input = hookInput(), spec = {}, extraEnv = {}) => {
+    fs.writeFileSync(config, JSON.stringify(spec));
+    const before = cleared();
+    // The input is on stdin at once, as from Claude; the preload holds the
+    // hook's stdin read until the hold file exists.
+    const holdFile = path.join(root, `stdin-hold-${++holds}`);
+    const child = spawn(process.execPath, ["--import", preload, hook, "SessionStart"], { cwd: workspace, env: { ...env, ...extraEnv, ADMISSION_STDIN_HOLD: holdFile }, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin.end(JSON.stringify(input));
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (d) => { stdout += d; }); child.stderr.on("data", (d) => { stderr += d; });
+    const exited = new Promise((resolve) => child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr })));
+    t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; });
+    // The hook clears the export only after its attempt is committed.
+    for (let i = 0; i < 500 && cleared() === before && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(cleared(), before + 1, "hook did not begin its attempt");
+    return { feed: async (receiptOptions = {}) => { fs.writeFileSync(holdFile, ""); const result = await exited;
+      if (!receiptOptions.omit) appendReceipt(result, { source: input.source, sessionId: input.session_id, ...receiptOptions }); return result; } };
   };
   const consume = (extra = {}, write = false) => {
     fs.writeFileSync(config, JSON.stringify({ consumer: true }));
@@ -124,7 +153,7 @@ function fixture(t) {
   const complete = (mode) => {
     fs.writeFileSync(config,JSON.stringify({consumer:true}));
     const code=`process.argv[1]=${JSON.stringify(hook)};process.argv[2]='SessionEnd';const m=await import(${JSON.stringify(state)});let completed=false,error=null;
-      try{const a=${mode==="forged"?`JSON.parse(process.env.${CERT})`:`m.activateFixedHookAdmission(${JSON.stringify(hookInput())},'SessionEnd')`};
+      try{const a=${mode==="forged"?`{...JSON.parse(process.env.${CERT}),attemptId:JSON.parse(JSON.parse((await import('node:fs')).readFileSync(${JSON.stringify(transcript)},'utf8').trim().split('\\n').at(-1)).attachment.stdout).codexStateLockAdmission.attemptId}`:`m.activateFixedHookAdmission(${JSON.stringify(hookInput())},'SessionEnd')`};
       ${mode==="wrong path"?`process.argv[1]=${JSON.stringify(workspace)};`:""}m.completeFixedSessionEndAdmission(a);completed=true;}catch(e){error=e.message;}console.log(JSON.stringify({completed,error}));`;
     const r=spawnSync("/bin/bash",["-c",'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4"',"fixture",envFile,process.execPath,preload,code],{cwd:workspace,env,encoding:"utf8"});
     assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);
@@ -142,7 +171,52 @@ function fixture(t) {
     const ready=await lines.next();assert.equal(ready.value,"activated",stderr);
     return {finish:async()=>{child.stdin.end("complete\n");const r=await lines.next();await exited;return JSON.parse(r.value);}};
   };
-  return { root, workspace, envFile, transcript, runHook, consume, activate, complete, pausedEnd, runFixed, hookInput, receipt, appendReceipt, env };
+  // A Stop or SessionEnd activation held open: it activates now and tries
+  // its state write only when told to.
+  const pausedActivation = async (event) => {
+    fs.writeFileSync(config,JSON.stringify({consumer:true}));
+    const caller=event==="Stop"?path.join(repo,"plugins/codex/scripts/stop-review-gate-hook.mjs"):hook;
+    const code=`process.argv[1]=${JSON.stringify(caller)};process.argv[2]=${JSON.stringify(event==="SessionEnd"?"SessionEnd":undefined)};const cwd=${JSON.stringify(workspace)};const m=await import(${JSON.stringify(state)});
+      m.activateFixedHookAdmission(${JSON.stringify(hookInput())},${JSON.stringify(event)});console.log('activated');
+      process.stdin.once('data',()=>{let acquired=false,error=null;try{const l=m.openStateLock(cwd);const h=l.tryAcquire();acquired=!!h;if(h)l.release(h);}catch(e){error=e.message;}console.log(JSON.stringify({acquired,error}));process.stdin.destroy();});`;
+    const child=spawn(process.execPath,["--import",preload,"--input-type=module","-e",code],{cwd:workspace,env,stdio:["pipe","pipe","pipe"]});
+    const exited=new Promise(resolve=>child.once("close",resolve));
+    t.after(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill("SIGKILL");await exited;});
+    let stderr="";child.stderr.on("data",d=>{stderr+=d;});
+    const lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
+    const ready=await lines.next();assert.equal(ready.value,"activated",stderr);
+    return {write:async()=>{child.stdin.end("go\n");const r=await lines.next();await exited;return JSON.parse(r.value);}};
+  };
+  // A worker process started from Bash: it inherits the envelope exported at
+  // that moment and publishes a job result through runTrackedJob.
+  const startWorker = (job, { waitMs = null, holdFile } = {}) => {
+    fs.writeFileSync(config, JSON.stringify({ consumer: true }));
+    const tracked = pathToFileURL(path.join(repo, "plugins/codex/scripts/lib/tracked-jobs.mjs")).href;
+    const code = `const t=await import(${JSON.stringify(tracked)});const fs=await import('node:fs');const job=JSON.parse(process.argv[1]);let published=false,error=null;
+      try{await t.runTrackedJob(job,async()=>{while(!fs.existsSync(${JSON.stringify(holdFile)}))await new Promise(r=>setTimeout(r,20));return {exitStatus:0,threadId:'thread-1',turnId:'turn-1',payload:{ok:true},rendered:'worker result survives compact',summary:'done'};});published=true;}
+      catch(e){error={code:e.code,message:e.message};}console.log(JSON.stringify({published,error}));`;
+    const extra = waitMs === null ? {} : { CODEX_COMPANION_FINAL_PUBLISH_WAIT_MS: String(waitMs) };
+    const child = spawn("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "worker", envFile, process.execPath, preload, code, JSON.stringify(job)], { cwd: workspace, env: { ...env, ...extra }, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (d) => { stdout += d; }); child.stderr.on("data", (d) => { stderr += d; });
+    const exited = new Promise((resolve) => child.once("close", (status) => resolve({ status, stdout, stderr })));
+    t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; });
+    return exited;
+  };
+  // Refusal class of one acquire that opted into the admission wait: a
+  // definitive refusal throws ESTATELOCKREFUSED at once, a transient one
+  // times out (ESTATELOCKTIMEOUT) after the 1 ms bound.
+  // sourced: the env file this Bash call sources (default the live one).
+  const classify = (extra = {}, sourced = envFile) => {
+    fs.writeFileSync(config, JSON.stringify({ consumer: true }));
+    const code = `const m=await import(${JSON.stringify(state)});const l=m.openStateLock(process.argv[1]);let out;
+      try{const h=l.acquire({deadlineMs:0,admissionWaitMs:1});l.release(h);out='acquired';}catch(e){out=e.code==='ESTATELOCKREFUSED'?'definitive':e.code==='ESTATELOCKTIMEOUT'?'transient':e.code;}console.log(out);`;
+    const r = spawnSync("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "fixture", sourced, process.execPath, preload, code, workspace], { cwd: workspace, env: { ...env, ...extra }, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const readEnvelope = () => { const line = fs.readFileSync(envFile, "utf8").trim().split("\n").filter((l) => l.startsWith(`export ${CERT}='{`)).at(-1); return line ? JSON.parse(line.slice(`export ${CERT}='`.length, -1)) : null; };
+  return { root, workspace, envFile, transcript, runHook, startHook, consume, classify, activate, pausedActivation, startWorker, readEnvelope, complete, pausedEnd, runFixed, hookInput, receipt, appendReceipt, env, repo };
 }
 
 function prepared(t) {
@@ -274,7 +348,7 @@ test("transport: an older End completion cannot revoke a newer successful Sessio
   const f=prepared(t),oldEnd=await f.pausedEnd();
   assert.equal(f.runHook({},JSON.stringify(f.hookInput({source:"resume"}))).status,0);
   const result=await oldEnd.finish();assert.equal(result.completed,false,JSON.stringify(result));
-  assert.equal(f.consume().acquired,true,"the newer generation must survive stale End completion");
+  assert.equal(f.consume().acquired,true,"the newer capability must survive stale End completion");
 });
 
 test("transport: SessionEnd aborts teardown when proof becomes unreadable after activation",options,t=>{
@@ -294,10 +368,10 @@ test("transport: provider may create transcript after SessionStart, only its lat
   f.appendReceipt(r);assert.equal(f.consume().acquired,true);
 });
 
-test("transport: env-file failure already revokes the old generation before parent receipt",options,t=>{
+test("transport: env-file failure already stops the old capability before parent receipt",options,t=>{
   const f=prepared(t);f.env.CLAUDE_ENV_FILE=f.root;
   const r=f.runHook({},undefined,{omit:true});assert.equal(r.status,1);
-  assert.equal(f.consume().acquired,false,"old certificate must be pending even before the provider records this failure");
+  assert.equal(f.consume().acquired,false,"old capability must be stopped even before the provider records this failure");
 });
 
 test("transport: an arbitrary hook cannot activate the certificate",options,t=>{
@@ -354,19 +428,20 @@ for(const event of ["Stop","SessionEnd"]){
   });
 }
 
-for(const source of ["startup","resume","compact","clear"]){
-  test(`transport: ${source} SessionStart revokes the previous Bash generation`,options,t=>{
+// D (#1916): only a non-compact SessionStart replaces C; compact keeps it below.
+for(const source of ["startup","resume","clear"]){
+  test(`transport: ${source} SessionStart revokes the previous Bash capability`,options,t=>{
     const f=prepared(t),old=fs.readFileSync(f.envFile,"utf8");
     const result=f.runHook({},JSON.stringify(f.hookInput({source})));
     assert.equal(result.status,0,result.stderr);
     assert.equal(f.consume().acquired,true);
     fs.writeFileSync(f.envFile,old);
     assert.equal(f.consume().acquired,false,"old exported certificate must stay revoked");
-    assert.equal(f.activate("Stop").acquired,true,"fixed hooks recover only current generation");
+    assert.equal(f.activate("Stop").acquired,true,"fixed hooks recover only the current capability");
   });
 }
 
-for(const fault of ["no receipt","nonzero success receipt","string zero","wrong version","wrong command","wrong session","wrong cwd","sidechain","wrong source","old token","partial receipt","malformed receipt","latest failure"]){
+for(const fault of ["no receipt","nonzero success receipt","string zero","wrong version","wrong command","wrong session","wrong cwd","sidechain","wrong source","old token","other capability","partial receipt","malformed receipt","latest failure"]){
   test(`transport: ${fault} cannot authorize a sealed record`,options,t=>{
     const f=fixture(t),r=f.runHook({},undefined,{omit:true});
     assert.equal(r.status,0,r.stderr);
@@ -379,7 +454,8 @@ for(const fault of ["no receipt","nonzero success receipt","string zero","wrong 
     if(fault==="wrong cwd")data.cwd=f.root;
     if(fault==="sidechain")data.isSidechain=true;
     if(fault==="wrong source")data.attachment.hookName="SessionStart:resume";
-    if(fault==="old token"){const value=JSON.parse(data.attachment.stdout||"{}");value.codexStateLockAdmission={...value.codexStateLockAdmission,generation:"0".repeat(64)};data.attachment.stdout=JSON.stringify(value);}
+    if(fault==="old token"){const value=JSON.parse(data.attachment.stdout||"{}");value.codexStateLockAdmission={...value.codexStateLockAdmission,attemptId:"0".repeat(64)};data.attachment.stdout=JSON.stringify(value);}
+    if(fault==="other capability"){const value=JSON.parse(data.attachment.stdout||"{}");value.codexStateLockAdmission={...value.codexStateLockAdmission,capabilityId:"0".repeat(64)};data.attachment.stdout=JSON.stringify(value);}
     if(fault==="partial receipt")fs.writeFileSync(f.transcript,JSON.stringify(data).slice(0,-1));
     else if(fault==="malformed receipt")fs.writeFileSync(f.transcript,"{invalid}\n");
     else if(fault!=="no receipt")fs.writeFileSync(f.transcript,JSON.stringify(data)+"\n");
@@ -400,7 +476,7 @@ for(const fault of ["malformed input","scan failure","crash","crash after stdout
   });
 }
 
-test("transport: changed root on a new SessionStart cannot preserve the old generation",options,t=>{
+test("transport: changed root on a new SessionStart cannot preserve the old capability",options,t=>{
   const f=prepared(t),old=fs.readFileSync(f.envFile,"utf8");
   const other=path.join(f.root,"other-workspace");fs.mkdirSync(other);
   const r=f.runHook({},JSON.stringify(f.hookInput({cwd:other})));
@@ -453,3 +529,302 @@ for(const fault of ["missing","replaced copy","corrupt","foreign root","changed 
     assert.equal(fs.existsSync(file)?fs.readFileSync(file,"utf8"):null,before);
   });
 }
+
+// ---- D (#1916): capability C over compact, attempt T, receipt R ----
+// Claude gives SessionStart the same input for a manual (/compact) and an
+// automatic compact: source "compact". The harness separates them by what is
+// in flight: manual between two Bash calls, automatic while a worker waits
+// to publish. The native PTY proof covers the real triggers.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const envMap = (text) => Object.fromEntries(text.split("\n").filter((l) => l.startsWith("export ")).map((l) => { const m = /^export ([A-Z_]+)='(.*)'$/.exec(l); return [m[1], m[2].replace(/'"'"'/g, "'")]; }));
+async function until(predicate, ms = 5000) { const end = Date.now() + ms; while (!predicate()) { if (Date.now() > end) throw new Error("condition not reached"); await sleep(20); } }
+
+test("D: manual compact keeps C for the Bash envelope from before compact", options, (t) => {
+  const f = prepared(t), old = fs.readFileSync(f.envFile, "utf8"), before = f.readEnvelope();
+  const r = f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" })));
+  assert.equal(r.status, 0, r.stderr);
+  const token = JSON.parse(r.stdout).codexStateLockAdmission;
+  assert.deepEqual(Object.keys(token).sort(), ["attemptId", "capabilityId", "root", "sessionId", "source"]);
+  assert.equal(token.capabilityId, before.capabilityId);
+  assert.equal(token.source, "compact");
+  assert.deepEqual(f.readEnvelope(), before, "compact exports the same C envelope");
+  assert.equal(Object.hasOwn(before, "source"), false, "LOW-6: no source in the envelope");
+  fs.writeFileSync(f.envFile, old);
+  assert.equal(f.consume({}, true).acquired, true, "the envelope cached before compact still writes state");
+  assert.equal(f.classify(), "acquired");
+});
+
+test("D: compact refuses while its attempt is pending, then admits after its own receipt", options, async (t) => {
+  // A Bash call keeps the envelope it had before compact (Claude caches it).
+  const f = prepared(t), held = path.join(f.root, "held.env");
+  fs.writeFileSync(held, fs.readFileSync(f.envFile, "utf8"));
+  const hook = await f.startHook(f.hookInput({ source: "compact" }));
+  assert.equal(f.classify({}, held), "transient", "pending compact is a transient refusal");
+  const r = await hook.feed({ omit: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(f.classify({}, held), "transient", "ready without this attempt's receipt is transient");
+  f.appendReceipt(r, { source: "compact" });
+  assert.equal(f.classify({}, held), "acquired");
+});
+
+for (const [name, setup] of [
+  ["no earlier admission", (f) => { const r = f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))); return r; }],
+  ["a crashed earlier attempt", (f) => { const crash = f.runHook({ crashExport: true }); assert.equal(crash.signal, "SIGKILL"); return f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))); }],
+  ["a failed predecessor receipt", (f) => { f.appendReceipt({ status: 1, stdout: "" }); return f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))); }],
+  ["an unproven provider version", (f) => { const lines = fs.readFileSync(f.transcript, "utf8").trim().split("\n"); const last = JSON.parse(lines.pop()); last.version = "2.1.302"; fs.writeFileSync(f.transcript, [...lines, JSON.stringify(last)].join("\n") + "\n"); return f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))); }]
+]) {
+  test(`D: compact after ${name} is refused and does not carry C forward`, options, (t) => {
+    const f = name === "no earlier admission" ? fixture(t) : prepared(t), old = fs.readFileSync(f.envFile, "utf8");
+    const r = setup(f);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    fs.writeFileSync(f.envFile, old);
+    assert.equal(f.consume().acquired, false);
+    assert.equal(f.activate("Stop").acquired, false);
+    const resumed = f.runHook({}, JSON.stringify(f.hookInput({ source: "resume" })));
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(f.consume().acquired, true, "resume is the recovery route, with a new C");
+    fs.writeFileSync(f.envFile, old);
+    assert.equal(f.consume().acquired, false, "the old C stays revoked after the recovery resume");
+    assert.equal(f.classify(), "definitive");
+  });
+}
+
+for (const source of ["startup", "resume", "clear"]) {
+  test(`D: ${source} after compact replaces the preserved C definitively`, options, (t) => {
+    const f = prepared(t);
+    assert.equal(f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))).status, 0);
+    const old = fs.readFileSync(f.envFile, "utf8"), oldC = f.readEnvelope().capabilityId;
+    assert.equal(f.runHook({}, JSON.stringify(f.hookInput({ source }))).status, 0);
+    assert.notEqual(f.readEnvelope().capabilityId, oldC);
+    assert.equal(f.consume().acquired, true);
+    fs.writeFileSync(f.envFile, old);
+    assert.equal(f.classify(), "definitive");
+  });
+}
+
+test("D: receipt of the current attempt that failed is definitive, an unattributed failure is transient", options, (t) => {
+  const f = prepared(t);
+  const r = f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" })), { omit: true });
+  assert.equal(r.status, 0, r.stderr);
+  f.appendReceipt({ status: 1, stdout: "" }, { source: "compact" });
+  assert.equal(f.classify(), "transient", "a failure without a token cannot be attributed to this attempt");
+  f.appendReceipt({ status: 1, stdout: r.stdout }, { source: "compact" });
+  assert.equal(f.classify(), "definitive", "a failure carrying this attempt's token ends it");
+});
+
+test("D: Stop activated before compact is bound to T1 and refuses after compact; a new activation works", options, async (t) => {
+  const f = prepared(t);
+  const stop = await f.pausedActivation("Stop");
+  assert.equal(f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))).status, 0);
+  assert.equal((await stop.write()).acquired, false, "activation of T1 cannot write after T2");
+  assert.equal(f.activate("Stop").acquired, true);
+  assert.equal(f.consume().acquired, true, "Bash with C still works");
+});
+
+test("D: SessionEnd activated before compact cannot revoke after compact kept C", options, async (t) => {
+  const f = prepared(t), end = await f.pausedEnd();
+  assert.equal(f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))).status, 0);
+  const result = await end.finish();
+  assert.equal(result.completed, false, JSON.stringify(result));
+  assert.equal(f.consume().acquired, true);
+});
+
+test("D: Stop overlapping a pending compact refuses during and after it", options, async (t) => {
+  const f = prepared(t), stop = await f.pausedActivation("Stop");
+  const hook = await f.startHook(f.hookInput({ source: "compact" }));
+  const during = await stop.write();
+  assert.equal(during.acquired, false);
+  assert.equal((await hook.feed()).status, 0);
+  assert.equal(f.activate("Stop").acquired, true);
+});
+
+for (const second of ["resume", "compact"]) {
+  test(`D: two hook processes on the same SID (compact, then ${second}): the earlier attempt cannot finish`, options, async (t) => {
+    const f = prepared(t), old = fs.readFileSync(f.envFile, "utf8"), oldC = f.readEnvelope().capabilityId;
+    const a = await f.startHook(f.hookInput({ source: "compact" }));
+    const b = await f.startHook(f.hookInput({ source: second }));
+    const ra = await a.feed();
+    assert.equal(ra.status, 1, "T2 lost its CAS to T3");
+    assert.match(ra.stderr, /no longer pending/);
+    const rb = await b.feed();
+    if (second === "resume") {
+      assert.equal(rb.status, 0, rb.stderr);
+      assert.notEqual(f.readEnvelope().capabilityId, oldC);
+      assert.equal(f.consume().acquired, true);
+    } else {
+      assert.equal(rb.status, 1, "T3 saw T2 pending: no proven predecessor");
+      assert.match(rb.stderr, /no proven ready predecessor/);
+    }
+    fs.writeFileSync(f.envFile, old);
+    assert.equal(f.classify(), "definitive");
+  });
+}
+
+test("D: arch mismatch refuses consumers and a compact; the same session on arm64 is unaffected", options, (t) => {
+  const f = prepared(t);
+  assert.equal(f.consume({ ADMISSION_FIXTURE_ARCH: "x64" }).acquired, false);
+  assert.equal(f.classify({ ADMISSION_FIXTURE_ARCH: "x64" }), "definitive");
+  assert.equal(f.activate("Stop", { ADMISSION_FIXTURE_ARCH: "x64" }).acquired, false);
+  assert.equal(f.consume().acquired, true);
+  const r = f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" })), { omit: true });
+  assert.equal(r.status, 0, "arm64 compact proves its arm64 predecessor");
+});
+
+test("D: compact under a mismatched arch cannot prove its predecessor", options, (t) => {
+  const f = prepared(t), old = fs.readFileSync(f.envFile, "utf8");
+  f.env.ADMISSION_FIXTURE_ARCH = "x64";
+  const r = f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" })));
+  delete f.env.ADMISSION_FIXTURE_ARCH;
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /no longer pending|unproven|predecessor|refused/);
+  fs.writeFileSync(f.envFile, old);
+  assert.equal(f.consume().acquired, false);
+});
+
+for (const variant of ["missing", "corrupt", "duplicate", "range", "other adapter", "other platform"]) {
+  test(`D: provider manifest ${variant} refuses every receipt`, options, (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "manifest-variant-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    fs.cpSync(path.join(defaultRepo, "plugins"), path.join(root, "plugins"), { recursive: true });
+    const file = path.join(root, "plugins/codex/scripts/lib/provider-receipts.json");
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (variant === "missing") fs.unlinkSync(file);
+    else if (variant === "corrupt") fs.writeFileSync(file, "{");
+    else {
+      if (variant === "duplicate") data.entries.push({ ...data.entries[0], binarySha256: "0".repeat(64) });
+      if (variant === "range") data.entries[0].version = "2.1.x";
+      if (variant === "other adapter") data.entries[0].receiptAdapter = "something-else";
+      if (variant === "other platform") data.entries[0].platform = "linux";
+      fs.writeFileSync(file, JSON.stringify(data));
+    }
+    const f = fixture(t, root);
+    assert.equal(f.runHook().status, 0, "SessionStart itself needs no receipt");
+    assert.equal(f.consume().acquired, false);
+    assert.equal(f.activate("Stop").acquired, false);
+  });
+}
+
+test("D: the manifest names fixtures and evidence whose hashes match", options, () => {
+  const data = JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex/scripts/lib/provider-receipts.json"), "utf8"));
+  for (const e of data.entries) {
+    assert.equal(createHash("sha256").update(fs.readFileSync(path.join(defaultRepo, e.fixtures))).digest("hex"), e.fixturesSha256);
+    assert.equal(createHash("sha256").update(fs.readFileSync(path.join(defaultRepo, e.evidenceSummary))).digest("hex"), e.evidenceSummarySha256);
+  }
+});
+
+// The queued job the consume helper seeds, as a worker would receive it.
+function seedJob(f) {
+  const seeded = f.consume({}, "seed-job");
+  assert.equal(seeded.acquired, true);
+  const jobs = path.join(path.dirname(seeded.fence), "jobs");
+  return { id: "fixture-queued", sessionId: "session-current", status: "queued", phase: "queued", pid: null, jobClass: "task", title: "fixture worker",
+    workspaceRoot: f.workspace, logFile: path.join(jobs, "fixture-queued.log"), file: path.join(jobs, "fixture-queued.json"), stateFile: path.join(path.dirname(jobs), "state.json") };
+}
+
+async function workerOverCompact(t, { waitMs, longPendingMs, finishWith = "compact" }) {
+  const f = prepared(t), job = seedJob(f), hold = path.join(f.root, "runner-may-finish");
+  fs.writeFileSync(job.logFile, "");
+  const worker = f.startWorker(job, { waitMs, holdFile: hold });
+  await until(() => JSON.parse(fs.readFileSync(job.file, "utf8")).status === "running");
+  const hook = await f.startHook(f.hookInput({ source: finishWith }));
+  fs.writeFileSync(hold, "");
+  await sleep(longPendingMs);
+  const fed = Date.now();
+  const r = await hook.feed();
+  assert.equal(r.status, 0, r.stderr);
+  const out = await worker;
+  return { f, job, out: JSON.parse(out.stdout.trim().split("\n").at(-1) || "{}"), raw: out, afterFeedMs: Date.now() - fed };
+}
+
+test("D: auto compact while a worker publishes: the worker waits and keeps its result", options, async (t) => {
+  // Longer than the 10 s ordinary lock deadline: only the final publication's wait covers it.
+  const { f, job, out, raw } = await workerOverCompact(t, { waitMs: 60_000, longPendingMs: 11_000 });
+  assert.equal(out.published, true, raw.stdout + raw.stderr);
+  const stored = JSON.parse(fs.readFileSync(job.file, "utf8"));
+  assert.equal(stored.status, "completed");
+  assert.equal(stored.rendered, "worker result survives compact");
+  assert.equal(JSON.parse(fs.readFileSync(job.stateFile, "utf8")).jobs.find((j) => j.id === job.id).status, "completed");
+  assert.match(fs.readFileSync(job.logFile, "utf8"), /Final output\nworker result survives compact/);
+});
+
+test("D: without the final-publication wait the same compact refuses the result, which the log keeps", options, async (t) => {
+  const { f, job, out, raw } = await workerOverCompact(t, { waitMs: 0, longPendingMs: 11_000 });
+  assert.equal(out.published, false, raw.stdout + raw.stderr);
+  assert.equal(out.error.code, "ESTATELOCKTIMEOUT");
+  assert.equal(JSON.parse(fs.readFileSync(job.file, "utf8")).status, "running");
+  const log = fs.readFileSync(job.logFile, "utf8");
+  assert.match(log, /Final output\nworker result survives compact/);
+  assert.match(log, /was not published to the job record/);
+});
+
+test("D: a worker waiting over a resume stops at once when its C is replaced", options, async (t) => {
+  const { f, job, out, raw, afterFeedMs } = await workerOverCompact(t, { waitMs: 120_000, longPendingMs: 300, finishWith: "resume" });
+  assert.equal(out.published, false, raw.stdout + raw.stderr);
+  assert.equal(out.error.code, "ESTATELOCKREFUSED");
+  assert.ok(afterFeedMs < 10_000, `stopped ${afterFeedMs} ms after the resume, not at the bound`);
+  assert.equal(JSON.parse(fs.readFileSync(job.file, "utf8")).status, "running");
+  assert.match(fs.readFileSync(job.logFile, "utf8"), /worker result survives compact/);
+});
+
+// Clear: the old SID ends (SessionEnd), a new SID starts. A replay child of
+// the harness carries exactly the captured environment, no sourcing.
+test("D: clear replay — the old capture works before clear and is refused after it, state unchanged", options, (t) => {
+  const f = prepared(t), oldCapture = envMap(fs.readFileSync(f.envFile, "utf8"));
+  const replay = (vars, write = false) => {
+    const env = { ...f.env, ...vars };
+    const code = `const m=await import(${JSON.stringify(pathToFileURL(path.join(f.repo, "plugins/codex/scripts/lib/state.mjs")).href)});const cwd=process.argv[1];let acquired=false,error=null;
+      try{const l=m.openStateLock(cwd);const h=l.tryAcquire();acquired=!!h;if(h)l.release(h);if(${write})m.updateState(cwd,s=>{s.config.replayed=true;});}catch(e){error=e.code;}console.log(JSON.stringify({acquired,error}));`;
+    const r = spawnSync(process.execPath, ["--import", path.join(f.root, "fixture.mjs"), "--input-type=module", "-e", code, f.workspace], { cwd: f.workspace, env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  assert.equal(replay(oldCapture).acquired, true, "positive control before clear");
+  assert.equal(f.runFixed("SessionEnd").status, 0);
+  const stateFile = path.join(path.dirname(f.consume().fence), "state.json");
+  const stateBefore = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null;
+  const replayed = replay(oldCapture, true);
+  assert.equal(replayed.acquired, false);
+  assert.equal(replayed.error, "ESTATELOCKTIMEOUT");
+  assert.equal(fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null, stateBefore, "refused replay changed nothing");
+  // New SID after clear, with its own transcript.
+  const transcript2 = path.join(f.root, "transcript-next.jsonl");
+  fs.writeFileSync(transcript2, "");
+  f.env.CLAUDE_CODE_SESSION_ID = "session-next";
+  const r = f.runHook({}, JSON.stringify(f.hookInput({ source: "clear", session_id: "session-next", transcript_path: transcript2 })), { sessionId: "session-next", transcriptFile: transcript2 });
+  assert.equal(r.status, 0, r.stderr);
+  const newCapture = envMap(fs.readFileSync(f.envFile, "utf8"));
+  assert.equal(newCapture.CODEX_COMPANION_SESSION_ID, "session-next");
+  assert.equal(replay(oldCapture).acquired, false, "old SID with old ENV");
+  assert.equal(replay({ ...oldCapture, CODEX_COMPANION_LOCK_ADMISSION: newCapture.CODEX_COMPANION_LOCK_ADMISSION }).acquired, false, "old SID worker with the new envelope");
+  assert.equal(replay({ ...newCapture, CLAUDE_CODE_SESSION_ID: "session-current" }).acquired, false, "new ENV under the old native SID");
+  assert.equal(replay(newCapture).acquired, true, "new SID with its own proven start");
+  assert.equal(fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null, stateBefore);
+});
+
+test("D: journey startup → manual compact → auto compact with worker → resume → clear", options, async (t) => {
+  const f = prepared(t), startup = fs.readFileSync(f.envFile, "utf8"), c1 = f.readEnvelope().capabilityId;
+  assert.equal(f.runHook({}, JSON.stringify(f.hookInput({ source: "compact" }))).status, 0);
+  assert.equal(f.readEnvelope().capabilityId, c1, "manual compact keeps C");
+  const job = seedJob(f), hold = path.join(f.root, "hold");
+  fs.writeFileSync(job.logFile, "");
+  const worker = f.startWorker(job, { holdFile: hold });
+  await until(() => JSON.parse(fs.readFileSync(job.file, "utf8")).status === "running");
+  const auto = await f.startHook(f.hookInput({ source: "compact" }));
+  fs.writeFileSync(hold, "");
+  await sleep(500);
+  assert.equal((await auto.feed()).status, 0);
+  assert.equal(JSON.parse((await worker).stdout.trim()).published, true);
+  assert.equal(f.readEnvelope().capabilityId, c1, "auto compact keeps C");
+  fs.writeFileSync(f.envFile, startup);
+  assert.equal(f.consume().acquired, true, "the startup envelope survived two compacts");
+  assert.equal(f.runHook({}, JSON.stringify(f.hookInput({ source: "resume" }))).status, 0);
+  const c2 = f.readEnvelope().capabilityId;
+  assert.notEqual(c2, c1);
+  assert.equal(f.consume().acquired, true);
+  const resumed = fs.readFileSync(f.envFile, "utf8");
+  fs.writeFileSync(f.envFile, startup);
+  assert.equal(f.consume().acquired, false, "resume replaced C");
+  fs.writeFileSync(f.envFile, resumed);
+  assert.equal(f.runFixed("SessionEnd").status, 0);
+  assert.equal(f.consume().acquired, false, "clear's SessionEnd revoked C2");
+});

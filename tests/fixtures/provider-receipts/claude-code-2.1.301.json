@@ -1,0 +1,32 @@
+{
+  "note": "Sanitized shapes of the Claude Code 2.1.301 SessionStart transcript records that the receipt adapter session-start-hook-success-v1 reads (#1916). Placeholders in <angle brackets> are filled by the test harness; no captured ids, paths or tokens.",
+  "hookSuccess": {
+    "type": "attachment",
+    "version": "2.1.301",
+    "sessionId": "<sessionId>",
+    "cwd": "<cwd>",
+    "isSidechain": false,
+    "attachment": {
+      "type": "hook_success",
+      "hookEvent": "SessionStart",
+      "hookName": "SessionStart:<source>",
+      "exitCode": "<exitCode>",
+      "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs\" SessionStart",
+      "stdout": "<stdout>"
+    }
+  },
+  "additionalContext": {
+    "type": "attachment",
+    "version": "2.1.301",
+    "sessionId": "<sessionId>",
+    "cwd": "<cwd>",
+    "isSidechain": false,
+    "attachment": {
+      "type": "hook_additional_context",
+      "hookName": "SessionStart",
+      "hookEvent": "SessionStart",
+      "content": ["<content>"],
+      "toolUseID": "<toolUseID>"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "codex-companion-provider-receipts-v1",
+  "note": "Provider versions whose SessionStart receipt is proven, as reviewed data (#1916). An entry is evidence metadata: the authority row, the base certificate and the live receipt still decide. Add a version only with its own proof (startup/resume/manual+auto compact, Stop/End/clear, completion exit-one/crash/partial, all required fields, no proof in model input). No ranges or wildcards.",
+  "entries": [
+    {
+      "provider": "claude-code",
+      "version": "2.1.301",
+      "platform": "darwin",
+      "arch": "arm64",
+      "receiptAdapter": "session-start-hook-success-v1",
+      "binarySha256": "1f04c69e1c24e4d0a716a863af0aad8fc64d49a499334c29701f073700276b99",
+      "evidenceCommit": "5a0ea2e099a9b3e275ae72604d83722da8273fb2",
+      "evidenceSummary": "docs/releases/sjotie.23-compact-evidence.json",
+      "evidenceSummarySha256": "c18fe4ff065b3f5cab65af153a29f3791951009fa3ee8b97bf36d8d528b53493",
+      "fixtures": "tests/fixtures/provider-receipts/claude-code-2.1.301.json",
+      "fixturesSha256": "1a79c56ffffb6a16559c0b4ee547b36bd7e9451cbfd34425989958bf9fc9d999"
+    }
+  ]
+}

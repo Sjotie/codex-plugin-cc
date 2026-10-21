@@ -1,14 +1,15 @@
 # D: capability behouden over compact — #1916
 
-**Ontwerp voor Claude-review; niet gebouwd of toegelaten.** De basis is plugin
+**Gebouwd en unit-getest op Linux (21-10-2026), native macOS-proef open.**
+Het ontwerp hieronder kreeg een cross-family GO (Claude Opus) met
+bouwvoorwaarden; hoe die zijn ingevuld staat in [Bouw](#bouw-21-10-2026)
+onderaan. De basis van het ontwerp was plugin
 `dae440e6565468fa6dfb3110eefecc583e993ee5`, core
 `32948eebf590dc8b09e4581df4376d20f60c15fe`, met productmodule
 `3982b9947291996586bddf6fe06736c71ed63818`. De
 [oorzaakmeting](sjotie.23-compact-diagnosis.md) en
 [bewijs-JSON](sjotie.23-compact-evidence.json) blijven het gemeten bewijs.
-Dit document stelt een contractwijziging voor; de nieuwe D-proeven zijn niet uitgevoerd.
-Alleen deze docs mogen naar de kandidaatbranch. Geen landing, installatie-update,
-tag, publicatie of upstream-send. Bouw wacht op ontwerpbesluit én Claude-review.
+Geen landing, installatie-update, tag, publicatie of upstream-send.
 
 ## Herkomst van de eerdere eis
 
@@ -230,3 +231,31 @@ de bestaande deadline; schema-/wire-halfcombinaties; en de bewijsgrens van
 clear als aflevering ontbreekt. Tot GO en bouwbesluit blijft de kandidaat
 functioneel NO-GO voor compact. Een upstream-issue wordt uitsluitend concept
 in docs; extern plaatsen vereist afzonderlijk akkoord van Sjoerd.
+
+## Bouw (21-10-2026)
+
+Gebouwd door Claude Opus na de ontwerpreview, op Omarchy (Linux). De
+bouwvoorwaarden en waar ze landden:
+
+| Voorwaarde | Uitwerking |
+|---|---|
+| MEDIUM-1 geen verloren workerresultaat | `runTrackedJob` schrijft de final output (of de foutregel) naar het eigen joblog vóór de locked publish. Core `acquire({admissionWaitMs})` onderscheidt tijdelijk (actuele T pending met deze C als kandidaat, of de receipt van de actuele T bestaat nog niet) van definitief (al het andere). Alleen de laatste workerpublicatie (completed of failed) geeft `admissionWaitMs` mee: standaard 180 s, `CODEX_COMPANION_FINAL_PUBLISH_WAIT_MS` (max 900 s). Elke poging valideert alles opnieuw onder A; definitief stopt direct met `ESTATELOCKREFUSED`. Een geweigerde resultaatpublicatie leidt niet tot een tweede wachttijd voor een failed-record; het log meldt dat het resultaat niet gepubliceerd is. |
+| MEDIUM-2 alleen de poging-API | `beginSessionAdmission`/`finishSessionAdmission`/`readSessionAdmission`/`revokeSessionAdmission` zijn weg; de hook gebruikt `beginSessionAttempt`/`finishSessionAttempt`, de vaste hooks `readSessionCapability`/`revokeSessionCapability`. Elke oude garantie heeft een eigen test op de nieuwe API (core `session-admission.test.ts`, `session-revoke.test.ts`). Het contract (core README) zegt dat intrekking bij begin voorlopig is en pas bij een niet-compact-finish definitief. Afwijking van de ontwerptekst hierboven: de oude coretests bleven níet ongewijzigd, ze zijn geport. |
+| Activatie | Stop en SessionEnd binden C én de actuele T-id (`attemptId` in de activatie-envelop); een latere poging, ook een compact met dezelfde C, laat de activatie weigeren. Closing bij clear valt buiten deze bouw (#2631). |
+| LOW-4 | Begin bewaart alleen `{attemptId: T1, state: "ready", capability: C}`; de receiptcheck van de voorganger draait in finish onder A. Meting `tests/fenced-lock/receipt-bench.mjs` (Node 26, i5-12500, 7 runs): 0,1 MB 0,15 ms; 1 MB 1,05 ms; 10 MB 10,9 ms; 50 MB 68 ms; 100 MB 135 ms mediaan (p95 152 ms). Lineair, ongeveer 1,4 ms per MB, ruim binnen de hookdeadline van 1 s; dezelfde check draait al bij elke consumer-acquire. |
+| LOW-5 | Compact roept geen `prepareAdmission` aan; finish(compact) valideert `C.admission` met `validateExistingAdmission` en weigert een meegegeven admission. |
+| LOW-7 | `plugins/codex/scripts/lib/provider-receipts.json`: versie, platform, `process.arch`, receipt-adapter, binary-hash, bewijscommit, samenvatting en fixtures met hun hashes. Beide oude `r.version === "2.1.301"`-plekken gebruiken het manifest. Ontbrekend, corrupt, dubbel of een bereik weigert; een arch-mismatch weigert. |
+| LOW-6 (eigen keuze) | De bron is uit de envelop gehaald (wireversie 3). Reden: de capability-id bindt de uitgifte al uniek; `issuedSource` blijft onder A in de rij. De receipt-bron wordt vergeleken met de bron van de actuele T. Zo bestaat er geen tweelaagse bronvergelijking meer. |
+| Docs | De C-id is onvoorspelbaar maar geen geheim: hij werkt alleen samen met de A-rij, het kerncertificaat, de locatorbinding en de receipt van de actuele poging. Het dreigingsmodel (coöperatieve processen van dezelfde gebruiker) verandert niet. |
+
+Half-combinaties: een rij van versie 2 is voor de generatiemodule malformed en
+omgekeerd; een v2-envelop weigert in de nieuwe consumer. Getest in core
+(`half-combination`) en via de pre-D-baseline in de mutatiecontroles.
+
+Nog open: de native macOS-proef met `tests/fenced-lock/macos-d-pty-probe.py`
+(echte Claude 2.1.301-PTY, manual én auto compact, latency van hook-exit tot
+de receipt-regel, worker over compact). De oudere
+`macos-companion-*`-harnas hoort bij de generatie-wire (v2) en is niet
+geport; hij draait nog tegen die productversie met
+`FENCED_LOCK_PRODUCT_REF=258047fbc24cfb8539897875410282c65ede842b`. Voor D
+vervangt de nieuwe PTY-proef hem.

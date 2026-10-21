@@ -68,6 +68,18 @@ export class StateLockTimeout extends Error {
   }
 }
 
+// A session consumer refused for a reason that waiting cannot change (another
+// capability, revoked, binding/authority/fence changed). Thrown at once by an
+// acquire that opted into admissionWaitMs; a subclass so existing timeout
+// handling still applies.
+export class StateLockRefused extends StateLockTimeout {
+  constructor(message, reason) {
+    super(message, reason);
+    this.name = "StateLockRefused";
+    this.code = "ESTATELOCKREFUSED";
+  }
+}
+
 export class FencedLockError extends Error {
   constructor(code, message, details = {}) {
     super(`${code}: ${message}`);
@@ -1163,16 +1175,31 @@ export function openFencedLock(fencePath, options = {}) {
     }
   }
 
-  function acquire({ deadlineMs = o.deadlineMs } = {}) {
+  // admissionWaitMs (session consumers only): past deadlineMs, keep retrying
+  // up to this bound while the last admission refusal was transient (the
+  // current attempt is pending, or its receipt does not exist yet); BUSY keeps
+  // the earlier classification. A definitive refusal then stops at once. Each
+  // retry is a complete consumeAttempt under A; nothing is cached.
+  function acquire({ deadlineMs = o.deadlineMs, admissionWaitMs = 0 } = {}) {
     ensureAvailable();
     if (!consumerOnly) fs.mkdirSync(dir, { recursive: true });
-    const deadline = performance.now() + deadlineMs;
+    const start = performance.now();
+    const deadline = start + deadlineMs;
+    const admissionDeadline = start + Math.max(deadlineMs, admissionWaitMs);
+    const waitsForAdmission = sessionConsumerOnly && admissionWaitMs > 0;
     let reason = "";
+    let admissionTransient = false;
     for (;;) {
       const result = attempt();
       if (result.handle) return result.handle;
       reason = result.reason;
-      if (performance.now() >= deadline) {
+      if (result.refusal === "definitive" && waitsForAdmission) {
+        throw new StateLockRefused(`State lock refused: ${F} (${reason})`, reason);
+      }
+      if (result.refusal === "transient") admissionTransient = true;
+      else if (result.refusal === "definitive") admissionTransient = false;
+      const now = performance.now();
+      if (now >= deadline && !(waitsForAdmission && admissionTransient && now < admissionDeadline)) {
         throw new StateLockTimeout(`Timed out waiting for state lock: ${F} (${reason})${o.timeoutHint ? `; ${o.timeoutHint}` : ""}`, reason);
       }
       sleepSync(o.retryMs);
@@ -1252,6 +1279,9 @@ export function openFencedLock(fencePath, options = {}) {
     assertOwned(h);
   }
 
+  // refusal: "transient" only for a session attempt that may still become
+  // usable for this capability; every other refusal is "definitive". BUSY
+  // carries no refusal class. The class only decides how long acquire waits.
   function consumeAttempt() {
     let h = null;
     try {
@@ -1259,17 +1289,17 @@ export function openFencedLock(fencePath, options = {}) {
       if (sessionConsumerOnly && !Object.hasOwn(options, "consumeAdmission")) throw new Error("session consumer requires its own base admission");
       admissionShape(c);
       const a = lstatOrNull(A);
-      if (!a?.isFile() || fileId(a) !== c.authority) return { reason: "admission authority missing or replaced" };
+      if (!a?.isFile() || fileId(a) !== c.authority) return { reason: "admission authority missing or replaced", refusal: "definitive" };
       h = lockAuthority(true);
       if (h === null) return { reason: busyReason() };
-      if (h === "retry") { h = null; return { reason: "admission authority replaced" }; }
+      if (h === "retry") { h = null; return { reason: "admission authority replaced", refusal: "definitive" }; }
       validateExistingAdmission(h, c);
       if (sessionConsumerOnly) validateSessionConsumer(h, o.consumeSessionAdmission, c);
       writeOwner(h);
       return { handle: h };
     } catch (error) {
       if (h) unlock(h);
-      return { reason: `admission refused (${error.code ?? error.message})` };
+      return { reason: `admission refused (${error.code ?? error.message})`, refusal: error?.transient === true ? "transient" : "definitive" };
     }
   }
 
@@ -1338,19 +1368,47 @@ export function openFencedLock(fencePath, options = {}) {
     }
   }
 
-  // ---- session transport generations, stored in the existing authority ---
+  // ---- session capability C and attempt T, stored in the existing authority --
+  //
+  // One JSON row per session in the existing authority A (no second lock):
+  //   capability C  {id, issuedSource, admission}: a fresh unpredictable id
+  //                 bound to SID, binding epoch and the base certificate. Only
+  //                 a non-compact finish issues one.
+  //   attempt T     {id, state pending|ready|revoked, source, capabilityId}:
+  //                 the CAS token of one SessionStart run and of fixed-hook
+  //                 activations. Every begin replaces T atomically.
+  //   candidate     {attemptId, state: "ready", capability}: written by begin
+  //                 only when the previous T was ready. No consumer accepts it.
+  // Revocation at begin is provisional: C leaves the active slot. A finish
+  // with source "compact" restores exactly the candidate C, after it proves
+  // the predecessor's receipt and the unchanged base certificate under A. Any
+  // other finish issues a new C, which makes the old C definitively revoked;
+  // so does SessionEnd (revoke) and every begin that finds no ready T.
+  // Rows of the earlier version 1 (generations) are malformed here, and this
+  // version 2 row is malformed for a version 1 module: both refuse.
 
   const SESSION_TABLE = "fenced_lock_session_admission_v1";
+  const SESSION_ROW_VERSION = 2;
+  const HEX64 = /^[a-f0-9]{64}$/;
+  const SOURCE_NAME = /^[a-z]{1,32}$/;
+  const PRESERVING_SOURCE = "compact";
 
-  function sessionTuple(x, withGeneration = false) {
-    return Boolean(x && typeof x.sessionId === "string" && x.sessionId.length > 0 &&
-      typeof x.bindingEpoch === "string" && x.bindingEpoch.length > 0 &&
-      (!withGeneration || (typeof x.generation === "string" && /^[a-f0-9]{64}$/.test(x.generation))));
+  function transient(message) {
+    return Object.assign(new Error(message), { transient: true });
   }
 
-  function sessionContext(x, admission) {
+  function sessionTuple(x, withCapability = false) {
+    return Boolean(x && typeof x.sessionId === "string" && x.sessionId.length > 0 &&
+      typeof x.bindingEpoch === "string" && x.bindingEpoch.length > 0 &&
+      (!withCapability || (typeof x.capabilityId === "string" && HEX64.test(x.capabilityId) &&
+        (x.attemptId === undefined || (typeof x.attemptId === "string" && HEX64.test(x.attemptId))))));
+  }
+
+  function sessionContext(x, admission, attempt = null) {
     return Object.freeze({ sessionId: x.sessionId, bindingEpoch: x.bindingEpoch,
-      ...(x.generation ? { generation: x.generation } : {}), ...(admission ? { admission: { ...admission } } : {}) });
+      ...(x.capabilityId ? { capabilityId: x.capabilityId } : {}),
+      ...(attempt ? { attemptId: attempt.id, source: attempt.source } : {}),
+      ...(admission ? { admission: { ...admission } } : {}) });
   }
 
   function bindingChecked(x, admission) {
@@ -1359,23 +1417,46 @@ export function openFencedLock(fencePath, options = {}) {
     }
   }
 
-  function receiptChecked(x, admission) {
-    if (typeof o.sessionReceiptCheck !== "function" || o.sessionReceiptCheck(sessionContext(x, admission)) !== true) {
-      throw new Error("session parent receipt missing or unproven");
+  // The callback answers true (this attempt's receipt is proven), "pending"
+  // (this attempt has no receipt yet) or anything else (refused).
+  function receiptChecked(x, admission, attempt, { pendingIsTransient = true } = {}) {
+    const verdict = typeof o.sessionReceiptCheck === "function" ? o.sessionReceiptCheck(sessionContext(x, admission, attempt)) : false;
+    if (verdict === true) return;
+    if (verdict === "pending" && pendingIsTransient) throw transient("session attempt receipt not recorded yet");
+    throw new Error("session parent receipt missing or unproven");
+  }
+
+  function capabilityShape(c) {
+    return Boolean(c && typeof c.id === "string" && HEX64.test(c.id) && typeof c.issuedSource === "string" &&
+      SOURCE_NAME.test(c.issuedSource) && c.issuedSource !== PRESERVING_SOURCE && c.admission && typeof c.admission === "object");
+  }
+
+  function rowShape(row) {
+    const t = row?.attempt;
+    if (!t || typeof t.id !== "string" || !HEX64.test(t.id)) return false;
+    if (t.state === "pending" || t.state === "revoked") {
+      return row.capability === null && t.source === null && t.capabilityId === null &&
+        (t.state === "revoked" ? row.candidate === null :
+          row.candidate === null || (row.candidate && typeof row.candidate.attemptId === "string" && HEX64.test(row.candidate.attemptId) &&
+            row.candidate.state === "ready" && capabilityShape(row.candidate.capability)));
     }
+    return t.state === "ready" && row.candidate === null && capabilityShape(row.capability) &&
+      typeof t.source === "string" && SOURCE_NAME.test(t.source) && t.capabilityId === row.capability.id;
   }
 
   function sessionRow(h, x) {
     const raw = h.db.prepare(`SELECT payload FROM ${SESSION_TABLE} WHERE session_id = ?`).get(x.sessionId);
     if (!raw) return null;
     const row = JSON.parse(raw.payload);
-    if (!sessionTuple(row, true) || row.version !== 1 || row.sessionId !== x.sessionId ||
-      row.bindingEpoch !== x.bindingEpoch || row.authority !== h.a || row.fence !== canonicalFence() ||
-      !["pending", "ready"].includes(row.state)) throw new Error("session admission row malformed or foreign");
+    if (!row || row.version !== SESSION_ROW_VERSION || row.sessionId !== x.sessionId || row.bindingEpoch !== x.bindingEpoch ||
+      row.authority !== h.a || row.fence !== canonicalFence() || !rowShape(row)) throw new Error("session admission row malformed or foreign");
     return row;
   }
 
-  function saveSessionRow(h, row) {
+  function saveSessionRow(h, x, fields) {
+    const row = { version: SESSION_ROW_VERSION, sessionId: x.sessionId, bindingEpoch: x.bindingEpoch,
+      authority: h.a, fence: canonicalFence(), ...fields };
+    if (!rowShape(row)) throw new Error("session admission row would be malformed");
     h.db.prepare(`INSERT INTO ${SESSION_TABLE} (session_id, payload) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET payload = excluded.payload`)
       .run(row.sessionId, JSON.stringify(row));
   }
@@ -1384,15 +1465,27 @@ export function openFencedLock(fencePath, options = {}) {
     return Boolean(a && b && ["version", "fence", "authority", "fenceId", "recordHash"].every((key) => a[key] === b[key]));
   }
 
+  // x = {sessionId, bindingEpoch, capabilityId, attemptId?}. attemptId is
+  // present only for a fixed-hook activation, which stays bound to the
+  // attempt it activated under. Transient only while this C can still return.
   function validateSessionConsumer(h, x, admission) {
     if (!sessionTuple(x, true)) throw new Error("session admission tuple missing or malformed");
     const row = sessionRow(h, x);
-    if (!row || row.state !== "ready" || row.generation !== x.generation || !sameAdmission(row.admission, admission)) {
-      throw new Error("session generation pending, revoked or foreign");
-    }
+    if (!row) throw new Error("session capability unknown");
     bindingChecked(x, admission);
-    receiptChecked(x, admission);
+    const t = row.attempt;
+    if (t.state === "pending") {
+      const c = row.candidate?.capability;
+      if (x.attemptId === undefined && c?.id === x.capabilityId && sameAdmission(c.admission, admission)) throw transient("session attempt pending");
+      throw new Error("session capability revoked or foreign");
+    }
+    if (t.state !== "ready" || row.capability.id !== x.capabilityId || !sameAdmission(row.capability.admission, admission)) {
+      throw new Error("session capability revoked or foreign");
+    }
+    if (x.attemptId !== undefined && x.attemptId !== t.id) throw new Error("session activation belongs to an earlier attempt");
+    receiptChecked(x, admission, t);
     assertOwned(h);
+    return row;
   }
 
   // Unlike generic unlock, publication cannot swallow a COMMIT error. A
@@ -1424,55 +1517,85 @@ export function openFencedLock(fencePath, options = {}) {
     }
   }
 
-  function beginSessionAdmission({ sessionId, bindingEpoch, deadlineMs = o.deadlineMs } = {}) {
+  // Before the caller parses its input: commit a fresh pending T. The old C
+  // stops working now; only a ready predecessor is kept, as candidate.
+  // Unreadable or foreign rows keep no candidate, but are still replaced.
+  function beginSessionAttempt({ sessionId, bindingEpoch, deadlineMs = o.deadlineMs } = {}) {
     const x = { sessionId, bindingEpoch };
     if (!sessionTuple(x)) return { ok: false, reason: "session binding missing or malformed" };
     return sessionOperation({ deadlineMs }, (h) => {
       bindingChecked(x);
       h.db.exec(`CREATE TABLE IF NOT EXISTS ${SESSION_TABLE} (session_id TEXT PRIMARY KEY, payload TEXT NOT NULL)`);
-      const generation = hex(32);
-      saveSessionRow(h, { version: 1, ...x, generation, state: "pending", authority: h.a, fence: canonicalFence() });
-      return { ok: true, generation };
+      let candidate = null;
+      try {
+        const previous = sessionRow(h, x);
+        if (previous?.attempt.state === "ready") candidate = { attemptId: previous.attempt.id, state: "ready", capability: previous.capability };
+      } catch {
+        candidate = null;
+      }
+      const attemptId = hex(32);
+      saveSessionRow(h, x, { capability: null, attempt: { id: attemptId, state: "pending", source: null, capabilityId: null }, candidate });
+      return { ok: true, attemptId };
     });
   }
 
-  function finishSessionAdmission({ sessionId, bindingEpoch, generation, admission, deadlineMs = o.deadlineMs } = {}) {
-    const x = { sessionId, bindingEpoch, generation };
-    if (!sessionTuple(x, true)) return { ok: false, reason: "session generation missing or malformed" };
+  // Exactly the pending attempt becomes ready (CAS on attemptId). Compact keeps
+  // the candidate C: the same base certificate, validated as it is now under A
+  // (no new preparation or seal), and the predecessor's own receipt still the
+  // latest. Any other source issues a new C for a freshly validated admission.
+  function finishSessionAttempt({ sessionId, bindingEpoch, attemptId, source, admission, deadlineMs = o.deadlineMs } = {}) {
+    const x = { sessionId, bindingEpoch };
+    if (!sessionTuple(x) || typeof attemptId !== "string" || !HEX64.test(attemptId)) return { ok: false, reason: "session attempt missing or malformed" };
+    if (typeof source !== "string" || !SOURCE_NAME.test(source)) return { ok: false, reason: "session attempt source missing or malformed" };
     return sessionOperation({ deadlineMs, existingOnly: true }, (h) => {
-      bindingChecked(x, admission);
-      validateExistingAdmission(h, admission);
       const row = sessionRow(h, x);
-      if (!row || row.state !== "pending" || row.generation !== generation) throw new Error("session generation no longer pending");
-      saveSessionRow(h, { ...row, state: "ready", admission });
+      if (!row || row.attempt.state !== "pending" || row.attempt.id !== attemptId) throw new Error("session attempt no longer pending");
+      let capability;
+      if (source === PRESERVING_SOURCE) {
+        if (admission !== undefined) throw new Error("compact keeps the existing capability and takes no new admission");
+        const candidate = row.candidate;
+        if (!candidate) throw new Error("compact has no proven ready predecessor");
+        capability = candidate.capability;
+        bindingChecked({ ...x, capabilityId: capability.id }, capability.admission);
+        validateExistingAdmission(h, capability.admission);
+        receiptChecked({ ...x, capabilityId: capability.id }, capability.admission, { id: candidate.attemptId, source: null }, { pendingIsTransient: false });
+      } else {
+        bindingChecked(x, admission);
+        validateExistingAdmission(h, admission);
+        capability = { id: hex(32), issuedSource: source, admission };
+      }
+      saveSessionRow(h, x, { capability, attempt: { id: attemptId, state: "ready", source, capabilityId: capability.id }, candidate: null });
       assertOwned(h);
-      return { ok: true };
+      return { ok: true, capability, attempt: { id: attemptId, source }, preserved: source === PRESERVING_SOURCE };
     });
   }
 
-  function revokeSessionAdmission({ sessionId, bindingEpoch, generation, admission, deadlineMs = o.deadlineMs } = {}) {
-    const x = { sessionId, bindingEpoch, generation };
-    if (!sessionTuple(x, true)) return { ok: false, reason: "session generation missing or malformed" };
+  // SessionEnd: definitive revocation, only by the activation of the current
+  // attempt of this C (a delayed End cannot cross a newer attempt).
+  function revokeSessionCapability({ sessionId, bindingEpoch, capabilityId, attemptId, admission, deadlineMs = o.deadlineMs } = {}) {
+    const x = { sessionId, bindingEpoch, capabilityId, attemptId };
+    if (!sessionTuple(x, true) || attemptId === undefined) return { ok: false, reason: "session activation missing or malformed" };
     return sessionOperation({ deadlineMs, existingOnly: true }, (h) => {
       validateExistingAdmission(h, admission);
       validateSessionConsumer(h, x, admission);
-      saveSessionRow(h, { version: 1, sessionId, bindingEpoch, generation: hex(32), state: "pending", authority: h.a, fence: canonicalFence() });
+      saveSessionRow(h, x, { capability: null, attempt: { id: hex(32), state: "revoked", source: null, capabilityId: null }, candidate: null });
       assertOwned(h);
       return { ok: true };
     });
   }
 
-  function readSessionAdmission({ sessionId, bindingEpoch, deadlineMs = o.deadlineMs } = {}) {
+  // For fixed-hook activation: the current ready C and T, with proof.
+  function readSessionCapability({ sessionId, bindingEpoch, deadlineMs = o.deadlineMs } = {}) {
     const x = { sessionId, bindingEpoch };
     if (!sessionTuple(x)) return null;
     const result = sessionOperation({ deadlineMs, existingOnly: true }, (h) => {
       const row = sessionRow(h, x);
-      if (!row || row.state !== "ready") throw new Error("session generation not ready");
-      validateExistingAdmission(h, row.admission);
-      validateSessionConsumer(h, row, row.admission);
-      return { ok: true, row };
+      if (!row || row.attempt.state !== "ready") throw new Error("session attempt not ready");
+      validateExistingAdmission(h, row.capability.admission);
+      validateSessionConsumer(h, { ...x, capabilityId: row.capability.id, attemptId: row.attempt.id }, row.capability.admission);
+      return { ok: true, capability: row.capability, attempt: { id: row.attempt.id, source: row.attempt.source } };
     });
-    return result.ok ? result.row : null;
+    return result.ok ? { capability: result.capability, attempt: result.attempt } : null;
   }
 
   function mutation(fn) {
@@ -1966,10 +2089,10 @@ export function openFencedLock(fencePath, options = {}) {
     assertOwned,
     status,
     prepareAdmission: mutation(prepareAdmission),
-    beginSessionAdmission: mutation(beginSessionAdmission),
-    finishSessionAdmission: mutation(finishSessionAdmission),
-    revokeSessionAdmission: mutation(revokeSessionAdmission),
-    readSessionAdmission,
+    beginSessionAttempt: mutation(beginSessionAttempt),
+    finishSessionAttempt: mutation(finishSessionAttempt),
+    revokeSessionCapability: mutation(revokeSessionCapability),
+    readSessionCapability,
     adoptLegacy: mutation(adoptLegacy),
     seal: mutation(seal),
     stopOld: mutation(stopOld),

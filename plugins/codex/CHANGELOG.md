@@ -19,8 +19,18 @@
   missing.
 - Native Windows is unsupported: state writes for jobs and configuration are
   refused. This includes Factory Claude sessions when they load the plugin.
-- Source metadata pins the byte-equal module to the landed factory-core
-  merge `2ae84f989d3f3c61b622103aa7e9a20b21100158`.
+- Source metadata pins the byte-equal module to its factory-core source
+  commit (`fenced-lock.source.json`).
+- macOS session transport, design D: a stable session capability survives a
+  successful compact, so Bash and running workers keep working; startup,
+  resume and clear replace it and SessionEnd revokes it. Every SessionStart
+  attempt has its own id (compare-and-set), and Stop/SessionEnd activations
+  stay bound to their attempt. A worker logs its final output before it
+  publishes, and only that final publication waits (bounded) across a
+  pending SessionStart. Proven Claude Code versions are data
+  (`provider-receipts.json`), matched on version, platform and architecture.
+  The exported envelope is wire version 3 and no longer carries a source;
+  version 2 envelopes refuse.
 
 ## 1.0.7-sjotie.22 (fork, Homebase #1822)
 

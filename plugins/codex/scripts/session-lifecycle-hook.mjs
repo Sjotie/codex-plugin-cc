@@ -14,7 +14,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, prepareSessionStateLock, beginSessionStateLockStart, finishSessionStateLockStart, activateFixedHookAdmission, completeFixedSessionEndAdmission, resolveStateFile, STATE_LOCK_ADMISSION_ENV, updateJobRecord } from "./lib/state.mjs";
+import { loadState, beginSessionStateLockStart, completeSessionStateLockStart, activateFixedHookAdmission, completeFixedSessionEndAdmission, resolveStateFile, STATE_LOCK_ADMISSION_ENV, updateJobRecord } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -134,17 +134,17 @@ function handleSessionStart(input, started) {
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
   if (process.platform === "darwin") {
-    const admission = prepareSessionStateLock(input.cwd, input.session_id, input, started);
+    // Compact keeps the capability C, so its envelope is the one Bash already
+    // holds; every other source exports a new C. The attempt T is ready now.
+    const published = completeSessionStateLockStart(input.cwd, input.session_id, input, started);
     appendEnvVar("CLAUDE_CODE_SESSION_ID", process.env.CLAUDE_CODE_SESSION_ID);
-    appendEnvVar(STATE_LOCK_ADMISSION_ENV, JSON.stringify(admission));
-    finishSessionStateLockStart(admission);
+    appendEnvVar(STATE_LOCK_ADMISSION_ENV, JSON.stringify(published.envelope));
     // Claude records this exact stdout with the observed child exit code.
     // Ready-state alone never authorizes a consumer before that receipt.
     process.stdout.write(`${JSON.stringify({ continue: true, suppressOutput: true,
       hookSpecificOutput: { hookEventName: "SessionStart",
         additionalContext: `Codex Companion session context refreshed at ${new Date().toISOString()}.` },
-      codexStateLockAdmission: { generation: admission.generation, sessionId: admission.sessionId,
-        root: admission.root, source: admission.source } })}\n`);
+      codexStateLockAdmission: published.token })}\n`);
   }
 }
 

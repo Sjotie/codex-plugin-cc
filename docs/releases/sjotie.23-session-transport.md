@@ -2,35 +2,42 @@
 
 Ticket #1916. Tier H: process identity and state integrity. This work is local
 to the candidate branches. Backup pushes to those branches are authorized;
-landing, tags, publication and installed-plugin updates remain unauthorized. Native startup/resume is proven; actual compact reveals a functional blocker below.
+landing, tags, publication and installed-plugin updates remain unauthorized. Native startup/resume is proven for the generation design; actual compact revealed the blocker below, which design D addresses. D's native proof is still open.
 
 ## Contract
 
-The same SQLite authority A stores a pending/ready generation for each Claude
-session ID. SessionStart commits pending before parsing stdin or writing the
-environment file when that SID already has a locator. Every new start source
-(startup, resume, compact, clear) takes this path. A valid new session creates
-its locator before beginning its first generation. Preparation uses the
-existing fence F and process-proof route; finishing validates that certificate
-and compare-and-sets the same pending generation to ready. It does not rescan.
+Design D (built 21-10-2026, [design and build notes](sjotie.23-compact-d-design.md))
+replaces the generation. The same SQLite authority A stores, per Claude
+session ID, a capability C (stable id, issuing source, base certificate), the
+current SessionStart attempt T (pending, ready or revoked) and, while T is
+pending, the ready predecessor as candidate. SessionStart commits a new
+pending T before parsing stdin or writing the environment file when that SID
+already has a locator; this stops C at once. Startup, resume and clear then
+prove and seal through the existing route and issue a new C, which ends the
+old C for good. Compact takes no new proof: it keeps the candidate C after
+validating the unchanged base certificate and the predecessor's receipt
+under A. A compact without such a predecessor refuses. Finish
+compare-and-sets exactly its own pending attempt to ready. It does not rescan.
 
-Ready alone grants nothing. Every macOS acquire also checks the current
-session generation, canonical root, A/F identities, sealed record/hash,
-locator binding and the provider's current successful SessionStart receipt.
-The provider must have observed numeric exit code zero for the exact fixed
-SessionStart command. Claude 2.1.301 can label an exit-one or killed hook
+Ready alone grants nothing. Every macOS acquire also checks C, the current
+ready attempt, canonical root, A/F identities, sealed record/hash, locator
+binding and the provider's successful SessionStart receipt for the current
+attempt. The provider must have observed numeric exit code zero for the exact
+fixed SessionStart command. Claude 2.1.301 can label an exit-one or killed hook
 `hook_success`, so the attachment type is insufficient. Its raw stdout must
-contain the current generation, session ID, root and source. A later failed
-or malformed receipt for this command refuses; known other hook commands
-cannot shadow this hook's receipt. An unidentified command remains unknown.
-No receipt is cached. Unknown versions refuse.
+contain the current attempt id, capability id, session ID, root and source. A
+later failed or malformed receipt for this command refuses; known other hook
+commands cannot shadow this hook's receipt. An unidentified command remains
+unknown. No receipt is cached. A version, platform or architecture not listed
+in `provider-receipts.json` refuses. The capability id is unpredictable but
+not a secret; the threat model below is unchanged.
 
 The locator is immutable runtime metadata under
 `<Claude config>/codex-companion-session-admission/<sha256-session-id>.json`.
 Its file identity, nonce, config root, workspace, state root and transcript
 path bind the epoch in A. It is lookup/deny evidence, not another authority.
 Its location is independent of `CLAUDE_PLUGIN_DATA`, so changing that data
-root for the same SID revokes the original generation and refuses rebinding.
+root for the same SID stops the original capability and refuses rebinding.
 Missing, partial, corrupt or copied locator evidence refuses. The hook does
 not silently repair it.
 

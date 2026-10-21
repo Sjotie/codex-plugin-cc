@@ -1165,8 +1165,9 @@ test("session start hook exports the Claude session id, transcript path, and plu
     assert.match(admissionLine, /^export CODEX_COMPANION_LOCK_ADMISSION='\{/);
     const envelope = JSON.parse(admissionLine.slice("export CODEX_COMPANION_LOCK_ADMISSION='".length, -1));
     assert.equal(envelope.sessionId, "sess-current");
-    assert.equal(envelope.version, 2);
-    assert.match(envelope.generation, /^[a-f0-9]{64}$/);
+    assert.equal(envelope.version, 3);
+    assert.match(envelope.capabilityId, /^[a-f0-9]{64}$/);
+    assert.equal(Object.hasOwn(envelope, "source"), false);
     assert.match(envelope.bindingEpoch, /^[a-f0-9]{64}$/);
     assert.match(envelope.admission.recordHash, /^[a-f0-9]{64}$/);
     exports = `${lines.join("\n")}\n`;
