@@ -72,7 +72,7 @@ function fixture(t, repo = defaultRepo) {
     fs.readFileSync=function(file,...rest){
       if(file===0&&process.env.ADMISSION_STDIN_HOLD)while(!fs.existsSync(process.env.ADMISSION_STDIN_HOLD))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
       const c=JSON.parse(read.call(this,process.env.ADMISSION_FIXTURE,'utf8'));
-      if(c.denyAfterReceipt && String(file)===c.transcript && ++receiptReads>2)throw Object.assign(new Error('receipt became unreadable'),{code:'EPERM'});
+      if(c.denyAfterReceipt && String(file)===c.transcript && ++receiptReads>1)throw Object.assign(new Error('receipt became unreadable'),{code:'EPERM'});
       return read.call(this,file,...rest);};
     const initial=JSON.parse(read(process.env.ADMISSION_FIXTURE,'utf8'));
     if(initial.brokerWitness)net.createConnection=function(){fs.appendFileSync(initial.brokerWitness,'attempted\\n');throw new Error('fixture broker connection blocked');};
@@ -203,14 +203,13 @@ function fixture(t, repo = defaultRepo) {
     t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; });
     return exited;
   };
-  // Refusal class of one acquire that opted into the admission wait: a
-  // definitive refusal throws ESTATELOCKREFUSED at once, a transient one
-  // times out (ESTATELOCKTIMEOUT) after the 1 ms bound.
+  // Refusal class of one acquire attempt: definitive is ESTATELOCKREFUSED,
+  // transient is ESTATELOCKTIMEOUT with refusal "transient".
   // sourced: the env file this Bash call sources (default the live one).
   const classify = (extra = {}, sourced = envFile) => {
     fs.writeFileSync(config, JSON.stringify({ consumer: true }));
     const code = `const m=await import(${JSON.stringify(state)});const l=m.openStateLock(process.argv[1]);let out;
-      try{const h=l.acquire({deadlineMs:0,admissionWaitMs:1});l.release(h);out='acquired';}catch(e){out=e.code==='ESTATELOCKREFUSED'?'definitive':e.code==='ESTATELOCKTIMEOUT'?'transient':e.code;}console.log(out);`;
+      try{const h=l.acquire({deadlineMs:0});l.release(h);out='acquired';}catch(e){out=e.code==='ESTATELOCKREFUSED'?'definitive':e.code==='ESTATELOCKTIMEOUT'&&e.refusal==='transient'?'transient':String(e.code)+'/'+e.refusal;}console.log(out);`;
     const r = spawnSync("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "fixture", sourced, process.execPath, preload, code, workspace], { cwd: workspace, env: { ...env, ...extra }, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.trim();
@@ -249,7 +248,7 @@ test("route2: absent hook refuses without publishing F", options, (t) => {
 test("route2: refused state write cannot create job directories before admission", options, (t) => {
   const f = fixture(t);
   const r = f.consume({}, "denied");
-  assert.equal(r.error?.code, "ESTATELOCKTIMEOUT");
+  assert.equal(r.error?.code, "ESTATELOCKREFUSED");
   assert.equal(fs.existsSync(path.dirname(r.fence)), false);
 });
 
@@ -751,7 +750,10 @@ test("D: without the final-publication wait the same compact refuses the result,
   const { f, job, out, raw } = await workerOverCompact(t, { waitMs: 0, longPendingMs: 11_000 });
   assert.equal(out.published, false, raw.stdout + raw.stderr);
   assert.equal(out.error.code, "ESTATELOCKTIMEOUT");
-  assert.equal(JSON.parse(fs.readFileSync(job.file, "utf8")).status, "running");
+  const stored = JSON.parse(fs.readFileSync(job.file, "utf8"));
+  assert.equal(stored.status, "failed", "the exit reporter's ordinary attempt lands once the compact is ready");
+  assert.match(stored.errorMessage, /before reporting a terminal result/);
+  assert.equal(stored.rendered, undefined, "the result itself was not published");
   const log = fs.readFileSync(job.logFile, "utf8");
   assert.match(log, /Final output\nworker result survives compact/);
   assert.match(log, /was not published to the job record/);
@@ -784,7 +786,7 @@ test("D: clear replay — the old capture works before clear and is refused afte
   const stateBefore = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null;
   const replayed = replay(oldCapture, true);
   assert.equal(replayed.acquired, false);
-  assert.equal(replayed.error, "ESTATELOCKTIMEOUT");
+  assert.equal(replayed.error, "ESTATELOCKREFUSED");
   assert.equal(fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null, stateBefore, "refused replay changed nothing");
   // New SID after clear, with its own transcript.
   const transcript2 = path.join(f.root, "transcript-next.jsonl");

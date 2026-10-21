@@ -61,7 +61,9 @@ const cases=[
   ["receipt-pending-definitive",transport,"compact refuses while its attempt is pending",'      if (error?.receiptPending === true) return "pending";\n',''],
   ["unattributed-failure-definitive",transport,"unattributed failure is transient",'if (!ours && latest.type === "attachment" && a?.command === SESSION_START_COMMAND) notYet(','if (false) notYet('],
   ["final-output-not-logged-first",tracked,"without the final-publication wait",'    appendLogBlock(logFile, "Final output", execution.rendered);\n    const completedRecord','    const completedRecord'],
-  ["final-publication-wait-removed",tracked,"auto compact while a worker publishes",'    }, null, finalPublishLockOptions()));\n    if (completedRecord','    }, null));\n    if (completedRecord'],
+  ["final-publication-wait-removed",tracked,"auto compact while a worker publishes",'(error.refusal === "transient" && elapsed < waitMs)','false'],
+  ["definitive-refusal-retried",tracked,"stops at once when its C is replaced",'const lockWait = error instanceof StateLockTimeout && !(error instanceof StateLockRefused);','const lockWait = error instanceof StateLockTimeout;'],
+  ["definitive-refusal-keeps-exit-reporter",tracked,"stops at once when its C is replaced",'      if (error instanceof StateLockRefused) settleProcessExitReporter();\n',''],
   ["second-wait-after-refused-result",tracked,"without the final-publication wait",'    if (error?.finalPublicationFailed) {','    if (false) {']
 ];
 for(const [name,file,pattern,from,to]of cases){

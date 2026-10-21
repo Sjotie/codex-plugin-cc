@@ -137,14 +137,16 @@ function handleSessionStart(input, started) {
     // Compact keeps the capability C, so its envelope is the one Bash already
     // holds; every other source exports a new C. The attempt T is ready now.
     const published = completeSessionStateLockStart(input.cwd, input.session_id, input, started);
-    appendEnvVar("CLAUDE_CODE_SESSION_ID", process.env.CLAUDE_CODE_SESSION_ID);
-    appendEnvVar(STATE_LOCK_ADMISSION_ENV, JSON.stringify(published.envelope));
     // Claude records this exact stdout with the observed child exit code.
     // Ready-state alone never authorizes a consumer before that receipt.
+    // Written before the exports: if they fail, the failed receipt carries
+    // this attempt's token, so waiting holders of C stop at once.
     process.stdout.write(`${JSON.stringify({ continue: true, suppressOutput: true,
       hookSpecificOutput: { hookEventName: "SessionStart",
         additionalContext: `Codex Companion session context refreshed at ${new Date().toISOString()}.` },
       codexStateLockAdmission: published.token })}\n`);
+    appendEnvVar("CLAUDE_CODE_SESSION_ID", process.env.CLAUDE_CODE_SESSION_ID);
+    appendEnvVar(STATE_LOCK_ADMISSION_ENV, JSON.stringify(published.envelope));
   }
 }
 

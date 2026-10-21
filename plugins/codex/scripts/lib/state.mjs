@@ -7,7 +7,7 @@ import { StateLockTimeout, StateLockUnavailable, domainVerdict, openFencedLock }
 import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
-import { STATE_LOCK_ADMISSION_ENV, resolveAdmissionStateDir, readSessionLocator, createSessionLocator, sessionChecks, validStartInput, envelopeFor, consumerSessionOptions, readSessionReceipt, bindTranscriptPath } from "./session-admission.mjs";
+import { STATE_LOCK_ADMISSION_ENV, resolveAdmissionStateDir, readSessionLocator, createSessionLocator, sessionChecks, validStartInput, envelopeFor, consumerSessionOptions, bindTranscriptPath } from "./session-admission.mjs";
 export { STATE_LOCK_ADMISSION_ENV } from "./session-admission.mjs";
 
 const STATE_VERSION = 1;
@@ -186,7 +186,6 @@ export function activateFixedHookAdmission(input, event) {
     locator.transcriptPath !== fs.realpathSync(input.transcript_path)) throw new StateLockUnavailable("Fixed hook session root or transcript mismatch");
   const current = hookLock(locator).readSessionCapability({ sessionId: input.session_id, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
   if (!current) throw new StateLockUnavailable("Fixed hook has no proven current SessionStart receipt");
-  readSessionReceipt(locator, { capabilityId: current.capability.id, attemptId: current.attempt.id, source: current.attempt.source });
   const envelope = { ...envelopeFor(locator, current.capability), attemptId: current.attempt.id };
   process.env.CODEX_COMPANION_SESSION_ID = input.session_id;
   process.env[STATE_LOCK_ADMISSION_ENV] = JSON.stringify(envelope);
@@ -257,11 +256,11 @@ export function artifactReport(stateDir) {
   return { indexed: indexed.length, orphans, unreadable };
 }
 
-// admissionWaitMs: see acquire in fenced-lock.mjs; only the final worker
-// publication passes it.
-function withStateLock(cwd, fn, { admissionWaitMs = 0 } = {}) {
+// lockOptions.deadlineMs: the final worker publication takes single attempts
+// and paces them itself (tracked-jobs.mjs); everything else keeps the default.
+function withStateLock(cwd, fn, lockOptions = {}) {
   const lock = openStateLock(cwd);
-  const handle = lock.acquire({ admissionWaitMs });
+  const handle = lock.acquire(lockOptions.deadlineMs === undefined ? {} : { deadlineMs: lockOptions.deadlineMs });
   try {
     ensureStateDir(cwd);
     return fn({ lock, handle });

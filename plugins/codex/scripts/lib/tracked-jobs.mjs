@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
+import { StateLockRefused, StateLockTimeout } from "./fenced-lock.mjs";
 import { isTerminalJobStatus } from "./job-status.mjs";
 import {
   readJobFile,
@@ -11,24 +12,44 @@ import {
 } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
-// How long the final result publication waits while the session admission is
-// in a transient state (a SessionStart attempt pending, or its receipt not
-// yet recorded), e.g. across a compact. Only that last publication waits.
+// How long the final result publication keeps trying while the session
+// admission refusal is transient (a SessionStart attempt pending, or its
+// receipt not yet recorded), e.g. across a compact. Only that last
+// publication waits; every other state write keeps the ordinary deadline.
 export const FINAL_PUBLISH_ADMISSION_WAIT_ENV = "CODEX_COMPANION_FINAL_PUBLISH_WAIT_MS";
 const DEFAULT_FINAL_PUBLISH_ADMISSION_WAIT_MS = 180_000;
+const MAX_FINAL_PUBLISH_ADMISSION_WAIT_MS = 900_000;
+const ORDINARY_LOCK_DEADLINE_MS = 10_000;
+const LOCK_RETRY_MS = 50;
+const ADMISSION_RETRY_MS = 500;
 
-function finalPublishLockOptions() {
-  const parsed = Number(process.env[FINAL_PUBLISH_ADMISSION_WAIT_ENV]);
-  return { admissionWaitMs: Number.isFinite(parsed) && parsed >= 0 ? Math.min(parsed, 900_000) : DEFAULT_FINAL_PUBLISH_ADMISSION_WAIT_MS };
+function finalPublishAdmissionWaitMs() {
+  const raw = process.env[FINAL_PUBLISH_ADMISSION_WAIT_ENV];
+  const parsed = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.min(parsed, MAX_FINAL_PUBLISH_ADMISSION_WAIT_MS) : DEFAULT_FINAL_PUBLISH_ADMISSION_WAIT_MS;
 }
 
-// The result is already in the job log; say so when the index cannot take it.
-function publishFinal(logFile, publish) {
-  try {
-    return publish();
-  } catch (error) {
-    appendLogLine(logFile, `The result above was not published to the job record: ${error instanceof Error ? error.message : String(error)}`);
-    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { finalPublicationFailed: true });
+// The result is already in the job log. Each try is one complete lock
+// attempt (everything validated again under the authority); between tries
+// the event loop runs, so signals are handled. A definitive refusal stops at
+// once; a transient one keeps trying up to the wait above, anything else up
+// to the ordinary deadline.
+async function publishFinal(logFile, publish) {
+  const waitMs = finalPublishAdmissionWaitMs();
+  const start = performance.now();
+  for (;;) {
+    try {
+      return publish({ deadlineMs: 0 });
+    } catch (error) {
+      const elapsed = performance.now() - start;
+      const lockWait = error instanceof StateLockTimeout && !(error instanceof StateLockRefused);
+      if (lockWait && (elapsed < ORDINARY_LOCK_DEADLINE_MS || (error.refusal === "transient" && elapsed < waitMs))) {
+        await new Promise((resolve) => setTimeout(resolve, elapsed < ORDINARY_LOCK_DEADLINE_MS ? LOCK_RETRY_MS : ADMISSION_RETRY_MS));
+        continue;
+      }
+      appendLogLine(logFile, `The result above was not published to the job record: ${error instanceof Error ? error.message : String(error)}`);
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { finalPublicationFailed: true });
+    }
   }
 }
 
@@ -302,7 +323,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     const completedAt = nowIso();
     // Log first: a publication refused by the state lock must not lose the result.
     appendLogBlock(logFile, "Final output", execution.rendered);
-    const completedRecord = publishFinal(logFile, () => updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+    const completedRecord = await publishFinal(logFile, (lockOptions) => updateJobRecord(job.workspaceRoot, job.id, (existing) => {
       if (existing?.status === "cancelled") {
         return null;
       }
@@ -322,7 +343,7 @@ export async function runTrackedJob(job, runner, options = {}) {
         failure: execution.failure ?? null,
         errorMessage: execution.failure ? (execution.failure.message ?? null) : null
       };
-    }, null, finalPublishLockOptions()));
+    }, null, lockOptions));
     if (completedRecord?.status === "cancelled") {
       settleProcessExitReporter();
       return stopTrackedJobIfCancelled(job, logFile);
@@ -331,9 +352,11 @@ export async function runTrackedJob(job, runner, options = {}) {
     return execution;
   } catch (error) {
     // The result could not be published: do not wait a second time to
-    // publish a failure over it. The log keeps the result.
+    // publish a failure over it. The log keeps the result. After a timeout
+    // the exit reporter still makes its ordinary attempt to mark the job
+    // failed; after a definitive refusal no write of this process can pass.
     if (error?.finalPublicationFailed) {
-      settleProcessExitReporter();
+      if (error instanceof StateLockRefused) settleProcessExitReporter();
       throw error;
     }
     const cancelledDuringRun = stopTrackedJobIfCancelled(job, logFile);
@@ -344,7 +367,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const completedAt = nowIso();
     appendLogLine(logFile, `Failed: ${errorMessage}`);
-    const failedRecord = publishFinal(logFile, () => updateJobRecord(job.workspaceRoot, job.id, (existing) => {
+    const failedRecord = await publishFinal(logFile, (lockOptions) => updateJobRecord(job.workspaceRoot, job.id, (existing) => {
       if (existing?.status === "cancelled") {
         return null;
       }
@@ -358,7 +381,7 @@ export async function runTrackedJob(job, runner, options = {}) {
         completedAt,
         logFile: options.logFile ?? job.logFile ?? existing?.logFile ?? null
       };
-    }, null, finalPublishLockOptions()));
+    }, null, lockOptions));
     if (failedRecord?.status === "cancelled") {
       settleProcessExitReporter();
       return stopTrackedJobIfCancelled(job, logFile);

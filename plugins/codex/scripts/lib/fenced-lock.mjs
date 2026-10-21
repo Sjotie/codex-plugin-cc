@@ -69,9 +69,8 @@ export class StateLockTimeout extends Error {
 }
 
 // A session consumer refused for a reason that waiting cannot change (another
-// capability, revoked, binding/authority/fence changed). Thrown at once by an
-// acquire that opted into admissionWaitMs; a subclass so existing timeout
-// handling still applies.
+// capability, revoked, binding/authority/fence changed). A subclass so
+// existing timeout handling still applies.
 export class StateLockRefused extends StateLockTimeout {
   constructor(message, reason) {
     super(message, reason);
@@ -1175,32 +1174,25 @@ export function openFencedLock(fencePath, options = {}) {
     }
   }
 
-  // admissionWaitMs (session consumers only): past deadlineMs, keep retrying
-  // up to this bound while the last admission refusal was transient (the
-  // current attempt is pending, or its receipt does not exist yet); BUSY keeps
-  // the earlier classification. A definitive refusal then stops at once. Each
-  // retry is a complete consumeAttempt under A; nothing is cached.
-  function acquire({ deadlineMs = o.deadlineMs, admissionWaitMs = 0 } = {}) {
+  // A session consumer that gives up reports the class of its last refusal:
+  // StateLockRefused when it was definitive, otherwise StateLockTimeout with
+  // refusal "transient" or null (BUSY or an unclassified I/O error keep the
+  // earlier class). The class never grants anything; a caller may use it to
+  // decide whether waiting longer can help.
+  function acquire({ deadlineMs = o.deadlineMs } = {}) {
     ensureAvailable();
     if (!consumerOnly) fs.mkdirSync(dir, { recursive: true });
-    const start = performance.now();
-    const deadline = start + deadlineMs;
-    const admissionDeadline = start + Math.max(deadlineMs, admissionWaitMs);
-    const waitsForAdmission = sessionConsumerOnly && admissionWaitMs > 0;
+    const deadline = performance.now() + deadlineMs;
     let reason = "";
-    let admissionTransient = false;
+    let refusal = null;
     for (;;) {
       const result = attempt();
       if (result.handle) return result.handle;
       reason = result.reason;
-      if (result.refusal === "definitive" && waitsForAdmission) {
-        throw new StateLockRefused(`State lock refused: ${F} (${reason})`, reason);
-      }
-      if (result.refusal === "transient") admissionTransient = true;
-      else if (result.refusal === "definitive") admissionTransient = false;
-      const now = performance.now();
-      if (now >= deadline && !(waitsForAdmission && admissionTransient && now < admissionDeadline)) {
-        throw new StateLockTimeout(`Timed out waiting for state lock: ${F} (${reason})${o.timeoutHint ? `; ${o.timeoutHint}` : ""}`, reason);
+      if (result.refusal) refusal = result.refusal;
+      if (performance.now() >= deadline) {
+        if (refusal === "definitive") throw new StateLockRefused(`State lock refused: ${F} (${reason})`, reason);
+        throw Object.assign(new StateLockTimeout(`Timed out waiting for state lock: ${F} (${reason})${o.timeoutHint ? `; ${o.timeoutHint}` : ""}`, reason), { refusal });
       }
       sleepSync(o.retryMs);
     }
@@ -1280,8 +1272,15 @@ export function openFencedLock(fencePath, options = {}) {
   }
 
   // refusal: "transient" only for a session attempt that may still become
-  // usable for this capability; every other refusal is "definitive". BUSY
-  // carries no refusal class. The class only decides how long acquire waits.
+  // usable for this capability; "definitive" for a validation decision (a
+  // plain Error, or StateLockLost: A or F replaced); none for BUSY and for
+  // system or SQLite errors (they carry an errno-style code), which say
+  // nothing about the admission.
+  function refusalOf(error) {
+    if (error?.transient === true) return "transient";
+    return error?.code === undefined || error.code === "ESTATELOCKLOST" ? "definitive" : null;
+  }
+
   function consumeAttempt() {
     let h = null;
     try {
@@ -1299,7 +1298,7 @@ export function openFencedLock(fencePath, options = {}) {
       return { handle: h };
     } catch (error) {
       if (h) unlock(h);
-      return { reason: `admission refused (${error.code ?? error.message})`, refusal: error?.transient === true ? "transient" : "definitive" };
+      return { reason: `admission refused (${error.code ?? error.message})`, refusal: refusalOf(error) };
     }
   }
 
