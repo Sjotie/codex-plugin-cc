@@ -594,14 +594,16 @@ test("N31g: a fifo and a socket named state.lock.<pid> count as residues", async
 const TARGET = { pid: 4242, start: "100", script: "codex-companion.mjs", sub: "task-worker", comm: "node", uid: 1000, reason: "geen marker-fd" };
 const PLUGIN_ARGV = ["node", "/p/scripts/codex-companion.mjs", "task-worker"];
 
-// The procfs identity a scan on this machine records (design v2.12): records
-// made by these tests must be judged here, not scanned again.
+// The Linux view used by these fixtures (design v2.12). The stop-old tests
+// explicitly set platform: "linux", including when run on macOS. Without
+// procfs there, procIdentity records null dev/bootId and the injected initial
+// verdict. Match that view so the test exercises its target, not a rescan.
 function scanProc() {
   let bootId = null;
   try {
     bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   } catch {}
-  return LINUX ? { dev: String(fs.statSync("/proc").dev), bootId, init: true } : null;
+  return { dev: LINUX ? String(fs.statSync("/proc").dev) : null, bootId, init: true };
 }
 
 function fencedDir(t, S0) {
@@ -687,12 +689,13 @@ test("N32g: EPERM is not gone: outcome eperm, not ok, no seal", (t) => {
   assert.equal(s.sealed(), false);
 });
 
-test("N32g (real): kill of a process of another uid gives eperm", (t) => {
+test("N32g (real): a signal-0 probe of another uid supplies EPERM without a stop signal", (t) => {
   if (process.getuid?.() === 0) {
     t.skip("running as root: EPERM cannot occur");
     return;
   }
-  // pid 1 belongs to root; its identity is faked as a plugin target.
+  // pid 1 belongs to root; never send it a stop signal. Pass through the
+  // actual EPERM from an unsignalling liveness probe instead.
   const one = { ...TARGET, pid: 1 };
   const { F } = fencedDir(t, [one]);
   const lock = openFencedLock(F, {
@@ -700,6 +703,7 @@ test("N32g (real): kill of a process of another uid gives eperm", (t) => {
     domain: INITIAL,
     scanner: () => ({ self: { pid: process.pid, start: null, matched: true }, processes: [] }),
     identityReader: () => alive(),
+    kill: (pid) => process.kill(pid, 0),
     platform: "linux"
   });
   const r = lock.stopOld({ graceMs: 100 });
