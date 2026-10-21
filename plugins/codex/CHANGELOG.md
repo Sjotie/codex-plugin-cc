@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (fork, Homebase #1916)
+## 1.0.7-sjotie.23 (release candidate, Homebase #1916; not published)
 
 - The state lock is a kernel lock (`state.lock.db`, SQLite `BEGIN EXCLUSIVE`)
   behind a fence directory `state.lock/`. A dead holder releases it at once,
@@ -17,6 +17,10 @@
   stale snapshot.
 - `/codex:setup` reports the state lock and asks for Node.js 22.13 when it is
   missing.
+- Native Windows is unsupported: state writes for jobs and configuration are
+  refused. This includes Factory Claude sessions when they load the plugin.
+- Source metadata pins the byte-equal module to the landed factory-core
+  merge `2ae84f989d3f3c61b622103aa7e9a20b21100158`.
 
 ## 1.0.7-sjotie.22 (fork, Homebase #1822)
 

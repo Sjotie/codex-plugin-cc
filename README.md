@@ -18,6 +18,19 @@ they already have.
 - **ChatGPT subscription (incl. Free) or OpenAI API key.**
   - Usage will contribute to your Codex usage limits. [Learn more](https://developers.openai.com/codex/pricing).
 - **Node.js 22.13 or later** (the state lock uses `node:sqlite`; `/codex:setup` checks it)
+- **Windows is not supported by the fenced state lock.** On native Windows
+  the plugin refuses state writes: jobs cannot be created or tracked and
+  configuration changes cannot be saved. `/codex:setup` reports that the
+  state lock is unavailable. This also applies if a Factory Claude session
+  loads the plugin; Factory does not make this limitation disappear.
+
+The `1.0.7-sjotie.23` changes on this branch are a release candidate. See the
+[release checklist](docs/releases/sjotie.23.md) for the measured platform
+coverage and the remaining release gates.
+The macOS release gate is still closed: on the measured Claude Code sandbox,
+the Bash tool cannot run `ps`, so it cannot prove that old writers are gone.
+`MACOS_SCAN_PROVEN` remains `false`; a new unsealed state directory will not
+admit writes automatically. Do not remove its fence to bypass that refusal.
 
 ## Install
 
