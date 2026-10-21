@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.7-sjotie.23 (release candidate, Homebase #1916; not published)
+## 1.0.7-sjotie.23 (fork, Homebase #1916; 2026-10-21)
 
 - The state lock is a kernel lock (`state.lock.db`, SQLite `BEGIN EXCLUSIVE`)
   behind a fence directory `state.lock/`. A dead holder releases it at once,

@@ -1,11 +1,35 @@
-# sjotie.23 candidate — native blocker remains
+# sjotie.23 — released on the fork (2026-10-21)
 
 **Tier H:** process identity, mutual exclusion and job artifact integrity.
-The whole candidate is **not landable and not ready for final cross-family
-review**. Actual interactive compact has a fresh-Bash refusal; no alternate
-Bash admission route is supplied. Only backup pushes to the candidate branches
-are authorized; no plugin-main landing, publication, tag, deployment or
-installation update is authorized.
+
+## Status
+
+The native blocker below (a fresh Bash refused after interactive compact) is
+solved by design D: a stable session capability C, an attempt T per
+SessionStart, and a compact that keeps C only from a proven ready
+predecessor. Contract, build notes and tests:
+[sjotie.23-compact-d-design.md](sjotie.23-compact-d-design.md).
+
+- Vendored core: factory-core `82f99ab7` (`fenced-lock.source.json`).
+- Plugin: `feat/1916-d-compact` up to `e71eb067`, merged into
+  `sjotie-integration` and fork `main`.
+- Cross-family review: Muse GO on D (`bdfe274`) and on the delta
+  `bdfe274..e71eb067`, no P1 or P2.
+- Native proof on macOS arm64, Claude Code 2.1.301
+  (`tests/fenced-lock/macos-d-pty-probe.py`): 12/12 green, including manual
+  and auto compact, a worker publishing over compact, and Stop/End.
+- The native proof runs with the Bash sandbox off. Sandboxed Bash cannot
+  write plugin state on macOS: Claude gives plugin hooks a
+  `CLAUDE_PLUGIN_DATA` outside the sandbox write area. This predates D and is
+  open on Homebase #1916.
+- Also open on #1916: the Stop hook on a version without a proven receipt,
+  the wire-v2 guard of the old `macos-companion-*` harnesses, and recording
+  `CLAUDE_CONFIG_DIR` as trusted input for `/codex:transfer`.
+- Installation (marketplace checkout, cache, `installed_plugins.json`) is a
+  separate step.
+
+The sections below describe the earlier generation-based candidate and its
+evidence; they are kept as the record of why D was needed.
 
 ## Provenance and contract
 

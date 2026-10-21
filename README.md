@@ -24,9 +24,10 @@ they already have.
   state lock is unavailable. This also applies if a Factory Claude session
   loads the plugin; Factory does not make this limitation disappear.
 
-The `1.0.7-sjotie.23` changes on this branch are a release candidate. See the
-[release checklist](docs/releases/sjotie.23.md) for the measured platform
-coverage and the remaining release gates.
+`1.0.7-sjotie.23` keeps the session capability across compact (design D,
+[design and build notes](docs/releases/sjotie.23-compact-d-design.md)). The
+[release checklist](docs/releases/sjotie.23.md) lists the measured platform
+coverage and the follow-ups that remain open.
 On macOS, the `SessionStart` hook prepares only the session's workspace. It
 publishes the fence under the SQLite authority, scans for old writers, and
 exports permission only after the fence is safely sealed. Bash and background
