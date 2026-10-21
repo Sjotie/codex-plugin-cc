@@ -763,7 +763,7 @@ test("D: a worker waiting over a resume stops at once when its C is replaced", o
   const { f, job, out, raw, afterFeedMs } = await workerOverCompact(t, { waitMs: 120_000, longPendingMs: 300, finishWith: "resume" });
   assert.equal(out.published, false, raw.stdout + raw.stderr);
   assert.equal(out.error.code, "ESTATELOCKREFUSED");
-  assert.ok(afterFeedMs < 10_000, `stopped ${afterFeedMs} ms after the resume, not at the bound`);
+  assert.ok(afterFeedMs < 5_000, `stopped ${afterFeedMs} ms after the resume, not at the bound or the ordinary deadline`);
   assert.equal(JSON.parse(fs.readFileSync(job.file, "utf8")).status, "running");
   assert.match(fs.readFileSync(job.logFile, "utf8"), /worker result survives compact/);
 });
