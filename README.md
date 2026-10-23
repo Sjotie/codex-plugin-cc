@@ -227,7 +227,7 @@ Examples:
 /codex:transfer --source ~/.claude/projects/-Users-me-repo/<session-id>.jsonl
 ```
 
-The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `${CLAUDE_CONFIG_DIR}/projects` (or `~/.claude/projects` when unset). `CLAUDE_CONFIG_DIR`, like `HOME`, is trusted process input: changing it selects the project root. The root and source are both resolved through symlinks; files outside that root are refused, and older Codex versions that do not expose session import must be upgraded before using this command.
+The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `${CLAUDE_CONFIG_DIR}/projects` (or `~/.claude/projects` when unset). `CLAUDE_CONFIG_DIR`, like `HOME`, is trusted process input: changing it selects the project root. The root and source are both resolved through symlinks; files outside that root are refused at check time (later filesystem changes are not covered), and older Codex versions that do not expose session import must be upgraded before using this command.
 
 ### `/codex:status`
 
@@ -300,7 +300,7 @@ You can also use `/codex:setup` to manage the optional review gate.
 /codex:setup --disable-review-gate
 ```
 
-When the review gate is disabled, `Stop` only reads the job index for running-task notices; it needs no SessionStart receipt and does not reconcile or write state. When enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. On macOS this requires the current proven SessionStart receipt before any reconciliation or review; missing or invalid proof refuses the hook. If that review finds issues, the stop is blocked so Claude can address them first.
+When the review gate is disabled, `Stop` reads effective job status and worker liveness without writing for running-task notices; it needs no SessionStart receipt and does not persist reconciliation or write state. When enabled, the plugin uses a `Stop` hook to run a targeted Codex review based on Claude's response. On macOS this requires the current proven SessionStart receipt before any reconciliation or review; missing or invalid proof skips the review and allows the stop, with a `systemMessage` telling the user the review did not run. State writes remain refused. Other hook errors (exit 1) also allow the stop; the review gate is not a guarantee that every stop was reviewed. If that review finds issues, the stop is blocked so Claude can address them first.
 
 > [!WARNING]
 > The review gate can create a long-running Claude/Codex loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.

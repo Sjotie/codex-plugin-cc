@@ -844,9 +844,16 @@ for (const gate of [false, true]) {
     fs.writeFileSync(f.transcript, "");
     const before = fs.readFileSync(stateFile);
     const result = f.runFixed("Stop", { fast: true });
-    assert.equal(result.status, gate ? 1 : 0, result.stderr);
-    assert.equal(result.stdout, "");
-    assert.match(result.stderr, gate ? /no proven current SessionStart receipt/ : /fixture-queued is still running/);
+    assert.equal(result.status, 0, result.stderr);
+    if (gate) {
+      const output = JSON.parse(result.stdout);
+      assert.match(output.systemMessage, /review did not run.*no proven current SessionStart receipt/s);
+      assert.match(output.systemMessage, /stop is not blocked/);
+      assert.equal(Object.hasOwn(output, "decision"), false);
+    } else {
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /fixture-queued is still running/);
+    }
     assert.deepEqual(fs.readFileSync(stateFile), before);
     assert.equal(fs.readdirSync(path.join(path.dirname(f.fence), "jobs")).length, 1);
   });
@@ -868,3 +875,27 @@ test("fixed hook reports missing transcript as unproven receipt, not raw ENOENT"
   assert.equal(result.acquired, false);
   assert.match(result.error, /no proven current SessionStart receipt/);
 });
+
+
+for (const stored of ["completed", "dead worker"]) {
+  test(`disabled Stop uses readonly effective status: ${stored}`, options, t => {
+    const f = prepared(t);
+    assert.equal(f.consume({}, "seed-job").acquired, true);
+    const dir = path.dirname(f.fence);
+    const index = path.join(dir, "state.json"), record = path.join(dir, "jobs/fixture-queued.json");
+    const state = JSON.parse(fs.readFileSync(index, "utf8"));
+    state.jobs[0].status = "running";
+    fs.writeFileSync(index, JSON.stringify(state));
+    const job = JSON.parse(fs.readFileSync(record, "utf8"));
+    job.status = stored === "completed" ? "completed" : "running";
+    job.pid = stored === "completed" ? null : 2147483647;
+    fs.writeFileSync(record, JSON.stringify(job));
+    const before = [fs.readFileSync(index), fs.readFileSync(record)];
+    fs.writeFileSync(f.transcript, "");
+    const result = f.runFixed("Stop", { fast: true });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /still running/);
+    assert.equal(result.stdout, "");
+    assert.deepEqual([fs.readFileSync(index), fs.readFileSync(record)], before);
+  });
+}

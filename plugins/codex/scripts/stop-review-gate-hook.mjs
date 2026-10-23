@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { getCodexAvailability } from "./lib/codex.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
-import { getConfig, loadState, listJobs, activateFixedHookAdmission } from "./lib/state.mjs";
+import { getConfig, listJobsReadOnly, listJobs, activateFixedHookAdmission } from "./lib/state.mjs";
 import { sortJobsNewestFirst } from "./lib/job-control.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
@@ -145,11 +145,22 @@ function main() {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
 
-  // A disabled gate only reports the index: listJobs may reconcile under the
+  // A disabled gate only reports a readonly snapshot: listJobs may reconcile under the
   // write lock, which requires a proven admission even for this fixed hook.
-  if (config.stopReviewGate) activateFixedHookAdmission(input, "Stop");
+  if (config.stopReviewGate) {
+    try {
+      activateFixedHookAdmission(input, "Stop");
+    } catch (error) {
+      // Admission still refuses all writes. This optional gate does not block
+      // Stop on a hook error; report the skipped review explicitly (exit 0 JSON).
+      const detail = error instanceof Error ? error.message : String(error);
+      logNote(detail);
+      emitDecision({ systemMessage: `Codex stop-time review did not run: ${detail}. This stop is not blocked. Run /codex:review --wait manually after restoring SessionStart admission.` });
+      return;
+    }
+  }
   const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(
-    config.stopReviewGate ? listJobs(workspaceRoot) : loadState(workspaceRoot).jobs, input));
+    config.stopReviewGate ? listJobs(workspaceRoot) : listJobsReadOnly(workspaceRoot), input));
   const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");
   const runningTaskNote = runningJob
     ? `Codex task ${runningJob.id} is still running. Check /codex:status and use /codex:cancel ${runningJob.id} if you want to stop it before ending the session.`

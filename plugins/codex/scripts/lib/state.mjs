@@ -690,6 +690,20 @@ function reconcileUnderLock(cwd) {
   });
 }
 
+// Snapshot only: use the current job record and worker outcome without
+// taking a lock, creating admission, or persisting reconciliation.
+function readOnlyJobs(cwd, jobs) {
+  return jobs.map((job) => {
+    const effective = readEffective(cwd, job);
+    if (effective.source === "unknown") return job;
+    return reconcileJobWorkerState(cwd, applyEffective(job, effective)).job;
+  });
+}
+
+export function listJobsReadOnly(cwd) {
+  return readOnlyJobs(cwd, loadState(cwd).jobs);
+}
+
 export function listJobs(cwd) {
   const state = loadState(cwd);
   // Lock-free first look: only take the lock when something needs a change.
@@ -705,10 +719,7 @@ export function listJobs(cwd) {
     // Reading never depends on the lock: show the effective status of every
     // job without writing, and say why nothing was reconciled.
     process.stderr.write(`state: job list not reconciled (${error.message})\n`);
-    return state.jobs.map((job) => {
-      const effective = readEffective(cwd, job);
-      return effective.source === "unknown" ? job : applyEffective(job, effective);
-    });
+    return readOnlyJobs(cwd, state.jobs);
   }
 }
 

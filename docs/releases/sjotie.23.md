@@ -22,18 +22,32 @@ predecessor. Contract, build notes and tests:
   write plugin state on macOS: Claude gives plugin hooks a
   `CLAUDE_PLUGIN_DATA` outside the sandbox write area. This predates D and is
   open on Homebase #1916.
-- Follow-up on #1916: a disabled Stop gate now only reads the job index and
+- Follow-up on #1916: a disabled Stop gate now only reads effective job status and
   needs no receipt; an enabled gate still requires current admission before
-  reconciliation/review. Missing transcripts report unproven admission.
-  The old harnesses accept only explicit wire v2, including when a newer or
-  unknown version is encountered. `CLAUDE_CONFIG_DIR` is documented as trusted
-  process input, with both project root and source resolved through symlinks.
+  reconciliation/review. Missing admission skips the review and allows Stop,
+  with a systemMessage warning; state writes stay refused. Other exit-1 hook
+  failures are also non-blocking. Missing transcripts report unproven admission.
+  The old harnesses accept only the byte-exact pre-D session-admission blob
+  `4155409a29102697cd70263af006c106ca6a97a1` at `258047fb`, refusing all other
+  sources (including version declarations inside comments).
+  `CLAUDE_CONFIG_DIR` is documented as trusted
+  process input, with both project root and source resolved through symlinks
+  at check time; later filesystem changes are not covered.
   These follow-ups require review and are not part of the installed .23.
-  Local verification on 23-10: transport + harness guard **110/110**; isolated
-  Stop/transfer runtime selection **11/11**. The new regression selection
-  first had seven failures on the released source, then passed after the fix.
-  Scanner/platform outcomes are injected in transport tests; no new native
-  macOS result is claimed.
+  After the Opus NO-GO on `353e3bf`, local verification on 23-10 used
+  `node --test --test-concurrency=4 tests/*.test.mjs` through test-slot and
+  test-home: **522 tests, 516 pass, 6 skips, 0 failures** (Node 26.12.1).
+  The review regressions first had six failures on `353e3bf`, then all
+  **13/13** passed. The committed pre-D fixture is byte-equal to the source
+  at `258047fb` (verified with `git hash-object` and `cmp` against `git show`);
+  the earlier synthetic v2 declaration was not a real compatibility test.
+  The first full run used an overlong temporary socket path (121 bytes;
+  a direct bind gave `AF_UNIX path too long`) and was aborted; the isolated
+  rerun used a fresh short temporary root. No failures were waived.
+  The Stop output follows the [Claude hooks JSON contract](https://code.claude.com/docs/en/hooks#json-output):
+  `systemMessage` on exit zero warns without blocking Stop. This local test
+  checks emitted JSON, not a new native Claude UI journey. Scanner/platform
+  outcomes are injected in transport tests; no new Mac result is claimed.
 - Installation (marketplace checkout, cache, `installed_plugins.json`) is a
   separate step.
 
