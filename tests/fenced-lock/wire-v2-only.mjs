@@ -9,8 +9,11 @@ export const PRE_D_PRODUCT_REF = "258047fbc24cfb8539897875410282c65ede842b";
 
 // sessionAdmissionSource: the text of the product's session-admission.mjs.
 export function requireWireV2(sessionAdmissionSource, harness) {
-  if (!/export const ENVELOPE_VERSION = 3;/.test(sessionAdmissionSource)) return;
-  process.stderr.write(`${harness}: this harness belongs to the generation transport (wire v2) and is out of service for wire v3. ` +
+  // This is a compatibility guard for known source, not a JS parser. Only
+  // one explicit v2 declaration is supported; unknown formats stay retired.
+  const declarations = [...sessionAdmissionSource.matchAll(/^export const ENVELOPE_VERSION\s*=\s*(\d+);\s*$/gm)];
+  if (declarations.length === 1 && declarations[0][1] === "2") return;
+  process.stderr.write(`${harness}: this harness belongs to the generation transport (wire v2) and is out of service for this product version. ` +
     `Use tests/fenced-lock/macos-d-pty-probe.py for wire v3, or run this harness against the pre-D product ${PRE_D_PRODUCT_REF}.\n`);
   process.exit(2);
 }

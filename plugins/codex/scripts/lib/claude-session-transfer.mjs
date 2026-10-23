@@ -7,7 +7,9 @@ import { ensureAbsolutePath } from "./fs.mjs";
 export const TRANSCRIPT_PATH_ENV = "CODEX_COMPANION_TRANSCRIPT_PATH";
 
 // Claude keeps its transcripts under its config root: CLAUDE_CONFIG_DIR when
-// set (e.g. one per account), otherwise ~/.claude.
+// set (e.g. one per account), otherwise ~/.claude. Like HOME, this is trusted
+// process input: whoever controls it selects the projects root. Both root and
+// source are realpathed below; a symlink cannot import a file outside it.
 export function claudeProjectsDir() {
   const configRoot = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   if (!path.isAbsolute(configRoot)) {

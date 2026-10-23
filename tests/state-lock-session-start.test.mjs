@@ -148,7 +148,8 @@ function fixture(t, repo = defaultRepo) {
   };
   const runFixed = (event, spec={}) => {
     fs.writeFileSync(config, JSON.stringify({consumer:true,transcript,...spec}));
-    return spawnSync(process.execPath,["--import",preload,hook,event],{cwd:workspace,env:{...env,...(spec.brokerWitness?{CODEX_COMPANION_APP_SERVER_ENDPOINT:`unix:${path.join(root,'broker.sock')}`}:{})},input:JSON.stringify(hookInput({hook_event_name:event})),encoding:"utf8"});
+    const entry = event === "Stop" ? path.join(repo, "plugins/codex/scripts/stop-review-gate-hook.mjs") : hook;
+    return spawnSync(process.execPath,["--import",preload,entry,event],{cwd:workspace,env:{...env,...(spec.brokerWitness?{CODEX_COMPANION_APP_SERVER_ENDPOINT:`unix:${path.join(root,'broker.sock')}`}:{})},input:JSON.stringify(hookInput({hook_event_name:event})),encoding:"utf8"});
   };
   const complete = (mode) => {
     fs.writeFileSync(config,JSON.stringify({consumer:true}));
@@ -829,4 +830,41 @@ test("D: journey startup → manual compact → auto compact with worker → res
   fs.writeFileSync(f.envFile, resumed);
   assert.equal(f.runFixed("SessionEnd").status, 0);
   assert.equal(f.consume().acquired, false, "clear's SessionEnd revoked C2");
+});
+
+for (const gate of [false, true]) {
+  test(`Stop without a receipt: gate=${gate} preserves state and only the enabled gate refuses`, options, t => {
+    const f = prepared(t);
+    assert.equal(f.consume({}, "seed-job").acquired, true);
+    const stateFile = path.join(path.dirname(f.fence), "state.json");
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    state.config.stopReviewGate = gate;
+    state.jobs[0].status = "running"; // listJobs would reconcile this stale job.
+    fs.writeFileSync(stateFile, JSON.stringify(state));
+    fs.writeFileSync(f.transcript, "");
+    const before = fs.readFileSync(stateFile);
+    const result = f.runFixed("Stop", { fast: true });
+    assert.equal(result.status, gate ? 1 : 0, result.stderr);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, gate ? /no proven current SessionStart receipt/ : /fixture-queued is still running/);
+    assert.deepEqual(fs.readFileSync(stateFile), before);
+    assert.equal(fs.readdirSync(path.join(path.dirname(f.fence), "jobs")).length, 1);
+  });
+}
+
+test("Stop with the default disabled gate needs no SessionStart or transcript", options, t => {
+  const f = fixture(t);
+  fs.unlinkSync(f.transcript);
+  const result = f.runFixed("Stop");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.equal(fs.existsSync(f.env.CLAUDE_PLUGIN_DATA), false, "readonly Stop must not create state or authority");
+});
+
+test("fixed hook reports missing transcript as unproven receipt, not raw ENOENT", options, t => {
+  const f = prepared(t);
+  fs.unlinkSync(f.transcript);
+  const result = f.activate("Stop");
+  assert.equal(result.acquired, false);
+  assert.match(result.error, /no proven current SessionStart receipt/);
 });

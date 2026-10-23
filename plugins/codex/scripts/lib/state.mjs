@@ -183,7 +183,7 @@ export function activateFixedHookAdmission(input, event) {
     !path.isAbsolute(input.transcript_path ?? "")) throw new StateLockUnavailable("Fixed hook identity unknown; state writes refused");
   const locator = readSessionLocator(input.session_id);
   if (!locator || locator.root !== fs.realpathSync(resolveStateDir(input.cwd)) || locator.cwd !== fs.realpathSync(input.cwd) ||
-    locator.transcriptPath !== fs.realpathSync(input.transcript_path)) throw new StateLockUnavailable("Fixed hook session root or transcript mismatch");
+    locator.transcriptPath !== bindTranscriptPath(input.transcript_path)) throw new StateLockUnavailable("Fixed hook session root or transcript mismatch");
   const current = hookLock(locator).readSessionCapability({ sessionId: input.session_id, bindingEpoch: locator.bindingEpoch, deadlineMs: 1000 });
   if (!current) throw new StateLockUnavailable("Fixed hook has no proven current SessionStart receipt");
   const envelope = { ...envelopeFor(locator, current.capability), attemptId: current.attempt.id };

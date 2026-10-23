@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- A disabled Stop review gate only reads the job index for running-task
+  notices; it no longer requires macOS admission or reconciles state.
+  An enabled gate still requires the current SessionStart receipt before
+  reconciliation or review. Missing transcripts report unproven admission.
+- Retired generation-transport harnesses run only with explicit wire v2;
+  newer or unknown product versions stop before running the harness.
+- Document `CLAUDE_CONFIG_DIR` as trusted input selecting the transfer project
+  root, with root and source both resolved through symlinks.
+
 ## 1.0.7-sjotie.23 (fork, Homebase #1916; 2026-10-21)
 
 - The state lock is a kernel lock (`state.lock.db`, SQLite `BEGIN EXCLUSIVE`)

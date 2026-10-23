@@ -22,9 +22,18 @@ predecessor. Contract, build notes and tests:
   write plugin state on macOS: Claude gives plugin hooks a
   `CLAUDE_PLUGIN_DATA` outside the sandbox write area. This predates D and is
   open on Homebase #1916.
-- Also open on #1916: the Stop hook on a version without a proven receipt,
-  the wire-v2 guard of the old `macos-companion-*` harnesses, and recording
-  `CLAUDE_CONFIG_DIR` as trusted input for `/codex:transfer`.
+- Follow-up on #1916: a disabled Stop gate now only reads the job index and
+  needs no receipt; an enabled gate still requires current admission before
+  reconciliation/review. Missing transcripts report unproven admission.
+  The old harnesses accept only explicit wire v2, including when a newer or
+  unknown version is encountered. `CLAUDE_CONFIG_DIR` is documented as trusted
+  process input, with both project root and source resolved through symlinks.
+  These follow-ups require review and are not part of the installed .23.
+  Local verification on 23-10: transport + harness guard **110/110**; isolated
+  Stop/transfer runtime selection **11/11**. The new regression selection
+  first had seven failures on the released source, then passed after the fix.
+  Scanner/platform outcomes are injected in transport tests; no new native
+  macOS result is claimed.
 - Installation (marketplace checkout, cache, `installed_plugins.json`) is a
   separate step.
 
