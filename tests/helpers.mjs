@@ -6,8 +6,10 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // #1983: a test run started inside an agent session inherits that session's ids, and
-// status/result then hide every job written without them. Tests own their environment.
-for (const name of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_TRANSCRIPT_PATH", "CLAUDE_CODE_SESSION_ID"]) {
+// status/result then hide every job written without them. #1916: inherited plugin
+// data/config roots can also write test state into the real agent installation.
+// Tests own their environment and choose any provider/plugin paths explicitly.
+for (const name of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_TRANSCRIPT_PATH", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PLUGIN_DATA", "CLAUDE_CONFIG_DIR"]) {
   delete process.env[name];
 }
 

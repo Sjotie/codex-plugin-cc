@@ -33,10 +33,22 @@ predecessor. Contract, build notes and tests:
   `CLAUDE_CONFIG_DIR` is documented as trusted
   process input, with both project root and source resolved through symlinks
   at check time; later filesystem changes are not covered.
-  These follow-ups require review and are not part of the installed .23.
-  After the Opus NO-GO on `353e3bf`, local verification on 23-10 used
+  Opus delta-review gave GO on `9aa0b15`. These changes are not part of the
+  installed .23 until a separate installation update.
+  After the Opus NO-GO on `353e3bf`, verification on **Omarchy, Linux x86_64**,
+  on 23-10 used
   `node --test --test-concurrency=4 tests/*.test.mjs` through test-slot and
   test-home: **522 tests, 516 pass, 6 skips, 0 failures** (Node 26.12.1).
+  HOME/XDG and provider/plugin environment were isolated; the temporary root
+  was short enough for Unix sockets. This is not a macOS full-suite result:
+  Opus observed about 90 admission-certificate errors on macOS on both the
+  old and new source. No Mac full-suite pass is claimed.
+  The test helper now also drops inherited `CLAUDE_PLUGIN_DATA` and
+  `CLAUDE_CONFIG_DIR` before tests choose their own paths. Its regression
+  supplies owned fake agent paths and verifies that they are discarded;
+  existing test directories in installed plugin data are not removed.
+  After the fresh-main rebase and helper fix, the same isolated Linux Node
+  selection passed again: **523 tests, 517 pass, 6 skips, 0 failures**.
   The review regressions first had six failures on `353e3bf`, then all
   **13/13** passed. The committed pre-D fixture is byte-equal to the source
   at `258047fb` (verified with `git hash-object` and `cmp` against `git show`);
