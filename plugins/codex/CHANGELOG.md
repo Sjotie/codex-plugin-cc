@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The shared broker starts without `FACTORY_PROC_TAG` (Homebase #1762). A
+  Factory host stops every process carrying a session's tag when that session
+  closes, unloads or restarts; with the tag of the session that happened to
+  start it, closing that session would stop the broker under another
+  session's running task.
 - A disabled Stop review gate only reads effective job status for running-task
   notices; it no longer requires macOS admission or reconciles state.
   An enabled gate still requires the current SessionStart receipt before

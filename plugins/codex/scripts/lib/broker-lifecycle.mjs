@@ -139,11 +139,23 @@ export async function sendBrokerShutdown(endpoint, timeoutMs = BROKER_SHUTDOWN_T
   });
 }
 
+/**
+ * Factory #1762: the broker is shared by every Claude session of this account and workspace, so it must not carry
+ * the process tag of the one session that happened to start it. A Factory host stops every process with a session's
+ * FACTORY_PROC_TAG when that session closes, unloads or restarts; with the tag, closing session A would kill the
+ * broker (and its app-server) while session B still has a task on it. Everything else in the environment stays.
+ */
+export function brokerSpawnEnv(env = process.env) {
+  const out = { ...env };
+  delete out.FACTORY_PROC_TAG;
+  return out;
+}
+
 export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, env = process.env }) {
   const logFd = fs.openSync(logFile, "a");
   const child = spawn(process.execPath, [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile], {
     cwd,
-    env,
+    env: brokerSpawnEnv(env),
     detached: true,
     stdio: ["ignore", logFd, logFd]
   });
