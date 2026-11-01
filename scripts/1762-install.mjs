@@ -114,6 +114,25 @@ function survey() {
   return { homes, dirs: new Map([...dirs].sort(([a], [b]) => a.localeCompare(b))), skip, red: missing > 0 || dirs.size === 0 };
 }
 
+/**
+ * The owner record of an existing lock directory: the owner file is opened without following a symlink (O_NOFOLLOW
+ * on the file; the directory was checked with lstat just before, a swap in between is not excluded), at most 400
+ * bytes are read, and only text in exactly the format this script writes is shown. Anything else is "onleesbaar",
+ * so a refusal prints at most a pid, a hostname and a time, never other content.
+ */
+const OWNER_RE = /^pid \d{1,10} op \S{1,255} sinds \d{4}-\d\d-\d\dT[\d:.]+Z$/;
+function lockOwner(lock) {
+  try {
+    const fd = fs.openSync(path.join(lock, "owner"), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+    try {
+      if (!fs.fstatSync(fd).isFile()) return " (eigenaar onleesbaar)";
+      const buf = Buffer.alloc(400);
+      const text = buf.subarray(0, fs.readSync(fd, buf, 0, 400, 0)).toString("utf8").trim();
+      return OWNER_RE.test(text) ? ` (${text})` : " (eigenaar onleesbaar)";
+    } finally { fs.closeSync(fd); }
+  } catch (e) { return e.code === "ENOENT" ? " (eigenaar nog niet geschreven: net gestart, of vlak na het aanmaken gestopt)" : " (eigenaar onleesbaar)"; }
+}
+
 /** One lock per plugins directory for the whole run; all or none. Ctrl-C or SIGTERM removes the held locks. */
 const heldLocks = [];
 function lockAll(dirs) {
@@ -123,13 +142,17 @@ function lockAll(dirs) {
       const lock = path.join(dir, LOCK_NAME);
       try { fs.mkdirSync(lock); } catch (e) {
         if (e.code !== "EEXIST") throw e;
-        let owner = "onbekend";
-        try { owner = fs.readFileSync(path.join(lock, "owner"), "utf8").trim(); } catch { /* none */ }
-        refuse(`${lock} bestaat (${owner}): een andere installer draait, of een eerdere stopte onverwacht. Draait die pid niet meer, haal de map dan weg`);
+        let st = null;
+        try { st = fs.lstatSync(lock); } catch { /* gone meanwhile */ }
+        if (!st?.isDirectory()) refuse(`${lock} bestaat maar is geen gewone map (symlink of bestand). Deze installer maakt dat nooit zo: onderzoek wie het neerzette en haal het niet blind weg`);
+        refuse(`${lock} bestaat${lockOwner(lock)}: een andere installer draait, of een eerdere stopte onverwacht. ` +
+          `Haal de map pas weg als die installer niet meer draait én er geen git-proces van hem meer loopt (bijv. een checkout in marketplaces/${MARKET})`);
       }
       held.push(lock);
       heldLocks.push(lock);
-      fs.writeFileSync(path.join(lock, "owner"), `pid ${process.pid} op ${os.hostname()} sinds ${new Date().toISOString()}\n`);
+      if (!createExclusive(path.join(lock, "owner"), `pid ${process.pid} op ${os.hostname()} sinds ${new Date().toISOString()}\n`, 0o600)) {
+        refuse(`${lock}/owner bestond al in een lock dat deze run net maakte; iemand anders schrijft hier. Gestopt`);
+      }
     }
   } catch (e) { unlockAll(held); throw e; }
   for (const sig of ["SIGINT", "SIGTERM"]) process.once(sig, () => { unlockAll(heldLocks); process.exit(sig === "SIGINT" ? 130 : 143); });
@@ -332,7 +355,10 @@ function planOrApply(apply) {
           else if (!FIELDS.every((k) => same(e[k], rec.before[k]))) problems.push(`${entryKey(e)} veranderde tijdens apply`);
         }
         if (list.length !== record.entries.length) problems.push("het aantal codex-regels veranderde tijdens apply");
-        if (problems.length) refuse(`${L.installed}: ${problems.join("; ")}; niet geschreven. Herstelpunt en cache staan er; undo maakt dit af`);
+        if (problems.length) refuse(`${L.installed}: ${problems.join("; ")}; niet geschreven. Herstelpunt en cache staan er. ` +
+          "undo ruimt het herstelpunt alleen op als geen codex-regel tussentijds veranderde; anders laat undo die regel staan (exit 1) " +
+          `en zolang ${path.basename(restorePath(dir, v))} bestaat weigert apply. Verzoen de regel met de hand; wil je de nieuwe waarde houden, ` +
+          "verplaats dan na controle het herstelpunt zelf (de cachemap mag blijven)");
         for (const e of list) Object.assign(e, { installPath: versionPath(e.installPath, v), version: v, gitCommitSha: s, lastUpdated: appliedAt });
         return { changed: list.length > 0 };
       });
@@ -431,7 +457,10 @@ async function proof() {
   const v = version();
   const { homes, red } = survey();
   let bad = red ? 1 : 0;
-  // Measuring stops at the deadline; the cleanup after it takes at most 6 s (all children in parallel).
+  // No new measurement starts after the deadline. One that is running can still overrun it: an env read on macOS
+  // (execFileSync ps, timeout 10 s, blocks the event loop meanwhile), the import of an installed module and its
+  // spawnBrokerProcess call (installed code, no timeout). The cleanup after that takes at most 6 s (all children in
+  // parallel). A soft bound for an interactive check, not a guarantee.
   const deadline = Date.now() + PROOF_DEADLINE_MS;
   const sessionTag = process.env[TAG_NAME];
   const tag = sessionTag && /^[0-9a-f]{32}$/.test(sessionTag) ? sessionTag : crypto.randomBytes(16).toString("hex");

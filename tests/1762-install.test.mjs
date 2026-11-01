@@ -285,6 +285,45 @@ test("r3 P2-1: apply and undo refuse while another run holds the lock, and chang
   assert.notEqual(r.code, 0, r.out);
 });
 
+test("r4 P2: a held lock never reads or prints a file outside it (owner symlink, symlinked lock directory)", () => {
+  const f = fakeHome();
+  // The sentinel has the exact owner format, so only the symlink guards (not the format check) keep it out.
+  const sentinel = path.join(f.H, "outside-secret.txt");
+  fs.writeFileSync(sentinel, "pid 1 op SENTINEL-1762 sinds 2026-01-01T00:00:00.000Z\n");
+  const lock = path.join(f.P, "codex-1762-install.lock");
+  fs.mkdirSync(lock);
+  fs.symlinkSync(sentinel, path.join(lock, "owner"));
+  let r = apply(f);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /eigenaar onleesbaar/, r.out);
+  assert.ok(!r.out.includes("SENTINEL-1762"), `outside file printed:\n${r.out}`);
+  r = run(f.H, ["undo", "--version", V24]);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /bestaat/, r.out);
+  assert.ok(!r.out.includes("SENTINEL-1762"), `outside file printed by undo:\n${r.out}`);
+  // A lock directory that is itself a symlink to a directory holding an owner file.
+  fs.rmSync(lock, { recursive: true });
+  const outsideDir = path.join(f.H, "outside-dir");
+  fs.mkdirSync(outsideDir);
+  fs.copyFileSync(sentinel, path.join(outsideDir, "owner"));
+  fs.symlinkSync(outsideDir, lock);
+  r = apply(f);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /geen gewone map/, r.out);
+  assert.ok(!r.out.includes("SENTINEL-1762"), `outside file printed via a symlinked lock:\n${r.out}`);
+  assert.equal(codex(f)[0].version, V23);
+});
+
+test("r4 self-review: a real owner record of a held lock is shown, also with a long hostname", () => {
+  const f = fakeHome();
+  const lock = path.join(f.P, "codex-1762-install.lock");
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, "owner"), `pid 4242 op ${"h".repeat(80)}.local sinds 2026-11-02T00:00:00.000Z\n`);
+  const r = apply(f);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /pid 4242 op h{80}\.local/, r.out);
+});
+
 test("r3 P2-2: reapply refuses when a codex entry the restore point does not know appeared, and changes nothing", () => {
   const f = fakeHome();
   assert.equal(apply(f).code, 0);
@@ -304,7 +343,9 @@ test("r3 P2-2: an undo that cannot set everything back fails and keeps the resto
   assert.ok(fs.existsSync(restoreFile(f)), "restore point renamed after an incomplete undo");
 });
 
-test("r3 P2-3: a symlink at a temporary file name never redirects a write", () => {
+// Regression for the pid-based names of 104bf1b/6af8048 (red there: the victim was overwritten). Temp names are now
+// random, so this no longer reaches the O_EXCL/O_NOFOLLOW path; the two fixedTmpSuffix tests below cover that.
+test("r3 P2-3: a symlink at the old pid-based temporary name is never written through", () => {
   const f = fakeHome();
   const victim = path.join(f.H, "victim.txt");
   fs.writeFileSync(victim, "VICTIM\n");
@@ -313,6 +354,8 @@ test("r3 P2-3: a symlink at a temporary file name never redirects a write", () =
     "sh", victim, restoreFile(f), f.installed, process.execPath, SCRIPT, "apply", ...A24, "--branch", B24],
     { env: { ...process.env, HOME: f.H }, encoding: "utf8", timeout: 180_000 });
   assert.equal(fs.readFileSync(victim, "utf8"), "VICTIM\n", (r.stdout ?? "") + (r.stderr ?? ""));
+  assert.equal(r.status, 0, (r.stdout ?? "") + (r.stderr ?? "")); // the install itself went through
+  assert.deepEqual(codex(f).map((e) => e.version), [V24, V24]);
 });
 
 test("r3 P2-3: a symlink planted at the temporary name of the restore point is refused, nothing is written through it", () => {
