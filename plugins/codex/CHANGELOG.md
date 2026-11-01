@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.22.1 (fork, Homebase #1762; 2026-11-02)
+
+Hotfix on the 1.0.7-sjotie.22 line for hosts that do not run the
+sjotie.23 state lock yet (macOS). Only this change; the sjotie.23 state
+lock and later fixes are not in it.
+
+- The shared broker starts without `FACTORY_PROC_TAG` (Homebase #1762). A
+  Factory host stops every process carrying a session's tag when that session
+  closes, unloads or restarts; with the tag of the session that happened to
+  start it, closing that session would stop the broker under another
+  session's running task.
+
 ## 1.0.7-sjotie.22 (fork, Homebase #1822)
 
 - `state.lock` is published with its PID already in it (written to a private
