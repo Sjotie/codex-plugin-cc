@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.7-sjotie.24 (fork, Homebase #1762 and #1916; 2026-11-02)
 
 - The shared broker starts without `FACTORY_PROC_TAG` (Homebase #1762). A
   Factory host stops every process carrying a session's tag when that session
