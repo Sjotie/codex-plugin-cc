@@ -69,7 +69,9 @@ const need = (name) => opt(name) ?? refuse(`--${name} ontbreekt`);
 const OUT_MAX = 64 << 20;
 function sh(cmd, argv, o = {}) {
   try { return execFileSync(cmd, argv, { maxBuffer: OUT_MAX, ...o }); } catch (e) {
-    const what = `${cmd} ${argv.join(" ")}`.slice(0, 200) + (o.cwd ? ` (in ${o.cwd})` : "");
+    let where = o.cwd;
+    if (!where) { try { where = process.cwd(); } catch { where = "onbekende map"; } } // a deleted cwd must not hide the error
+    const what = `${cmd} ${argv.join(" ")}`.slice(0, 200) + ` (in ${where})`;
     if (e.code === "ENOBUFS") refuse(`${what}: uitvoer groter dan ${(o.maxBuffer ?? OUT_MAX) >> 20} MB; afgebroken, niets aangenomen`);
     if (e.code === "ETIMEDOUT") refuse(`${what}: duurde langer dan ${Math.round((o.timeout ?? 0) / 1000)} s; afgebroken`);
     if (typeof e.code === "string") refuse(`${what}: kon niet draaien (${e.code})`);
@@ -375,7 +377,8 @@ function planOrApply(apply) {
     }
     // Phase 2: write. A refusal after a restore point was written says so (undo sets back what apply changed).
     let changes = 0;
-    let recordWritten = null;
+    const recordsWritten = [];
+    let checkoutStarted = false;
     try {
     for (const { dir, users, L, done } of work) {
       console.log(`\n== ${dir}  (gebruikt door: ${users.join(", ")})`);
@@ -398,7 +401,7 @@ function planOrApply(apply) {
       const rp = restorePath(dir, v);
       const tmp = newTmp(rp, JSON.stringify(record, null, 2) + "\n", 0o600);
       try { fs.linkSync(tmp, rp); } catch (e) { if (e.code === "EEXIST") refuse(`${rp} verscheen tijdens de run; gestopt vóór de eerste wijziging hier`); throw e; } finally { fs.rmSync(tmp, { force: true }); }
-      recordWritten = rp;
+      recordsWritten.push(rp);
       // Order: the cache first (an extra directory changes nothing), then installed_plugins.json, then the checkout.
       // A refusal before installed_plugins.json leaves only the restore point and the cache: undo then completes.
       if (!fs.existsSync(L.cache)) {
@@ -418,21 +421,30 @@ function planOrApply(apply) {
           else if (!FIELDS.every((k) => same(e[k], rec.before[k]))) problems.push(`${entryKey(e)} veranderde tijdens apply`);
         }
         if (list.length !== record.entries.length) problems.push("het aantal codex-regels veranderde tijdens apply");
-        if (problems.length) refuse(`${L.installed}: ${problems.join("; ")}; niet geschreven. Herstelpunt en cache staan er. ` +
-          "undo ruimt het herstelpunt alleen op als geen codex-regel tussentijds veranderde; anders laat undo die regel staan (exit 1) " +
-          `en zolang ${path.basename(restorePath(dir, v))} bestaat weigert apply. Verzoen de regel met de hand; wil je de nieuwe waarde houden, ` +
-          "verplaats dan na controle het herstelpunt zelf (de cachemap mag blijven)");
+        if (problems.length) {
+          const err = new Refusal(`${L.installed}: ${problems.join("; ")}; niet geschreven. Herstelpunt en cache staan er. ` +
+            "undo ruimt het herstelpunt alleen op als geen codex-regel tussentijds veranderde; anders laat undo die regel staan (exit 1) " +
+            `en zolang ${path.basename(restorePath(dir, v))} bestaat weigert apply. Verzoen de regel met de hand; wil je de nieuwe waarde houden, ` +
+            "verplaats dan na controle het herstelpunt zelf (de cachemap mag blijven)");
+          err.restoreNoted = true;
+          throw err;
+        }
         for (const e of list) Object.assign(e, { installPath: versionPath(e.installPath, v), version: v, gitCommitSha: s, lastUpdated: appliedAt });
         return { changed: list.length > 0 };
       });
       if (head !== s) {
+        checkoutStarted = true;
         git(L.market, "checkout", "--quiet", "--detach", s);
         if (git(L.market, "rev-parse", "HEAD") !== s) refuse("marketplace HEAD is na checkout niet de sha");
       }
     }
     } catch (e) {
-      if (e instanceof Refusal && recordWritten && !e.message.includes("Herstelpunt")) e.message += `. Herstelpunt ${recordWritten} is al geschreven: undo zet terug wat apply hier al veranderde`;
-      throw e;
+      // Any error after a restore point was written becomes a refusal that says what exists and what to do.
+      if (!recordsWritten.length || e.restoreNoted) throw e;
+      const base = e instanceof Refusal ? e.message : `${e.code ?? e.name}: ${String(e.stderr ?? e.message).trim().split("\n").pop()}`;
+      throw new Refusal(`${base}. Al geschreven herstelpunt(en): ${recordsWritten.join(", ")}. Draai undo en lees de uitkomst: ` +
+        "undo zet alleen terug wat nog precies is zoals apply het schreef, en meldt de rest met exit 1" +
+        (checkoutStarted ? ". Een marketplace-checkout brak af: undo zet die alleen terug als hij schoon is; bekijk anders git status in die checkout" : ""));
     }
     console.log(`\n${apply ? "toegepast" : "plan"}: ${changes} wijziging(en)${apply ? "" : " (niets geschreven)"}`);
   } finally { unlockAll(held); }
@@ -639,7 +651,8 @@ function undo() {
       for (const l of res.lines) console.log(l);
       let notDone = res.skipped;
       const head = git(L.market, "rev-parse", "HEAD");
-      if (head === r.marketplace.head) console.log(`   marketplace: staat al op ${head.slice(0, 9)}`);
+      if (head === r.marketplace.head && git(L.market, "status", "--porcelain")) { console.log(`   marketplace: staat op ${head.slice(0, 9)} maar heeft lokale wijzigingen (onderbroken checkout?); niet aangeraakt, bekijk git status`); notDone++; }
+      else if (head === r.marketplace.head) console.log(`   marketplace: staat al op ${head.slice(0, 9)}`);
       else if (head !== r.sha) { console.log(`   marketplace: veranderd sinds apply (nu ${head.slice(0, 9)}); niet aangeraakt`); notDone++; }
       else if (git(L.market, "status", "--porcelain")) { console.log("   marketplace: lokale wijzigingen; niet aangeraakt"); notDone++; }
       else {

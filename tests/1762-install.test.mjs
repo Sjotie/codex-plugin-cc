@@ -360,7 +360,20 @@ function fakePs(H, bytes) {
   return { PATH: `${bin}:${process.env.PATH}` };
 }
 
-test("r6 self-review: a command that times out or cannot start is a clear FOUT, not a stack trace", () => {
+test("r7: a command that cannot start (not executable) is a clear FOUT naming it and its directory", () => {
+  const f = fakeHome();
+  const bin = path.join(f.H, "noexec-bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\necho never\n", { mode: 0o644 }); // no execute bit
+  const r = run(f.H, ["brokers"], { env: { PATH: `${bin}:/nonexistent` } });
+  assert.notEqual(r.code, 0, r.out);
+  assert.ok(fs.existsSync(path.join(bin, "ps")));
+  const where = process.cwd().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(r.out, new RegExp(`FOUT: ps -axww .* \\(in ${where}\\): kon niet draaien \\(EACCES\\)`), r.out);
+  assert.doesNotMatch(r.out, /\n\s+at /, r.out);
+});
+
+test("r6 self-review: a command that times out is a clear FOUT, not a stack trace", () => {
   const f = fakeHome();
   const bin = path.join(f.H, "slow-bin");
   fs.mkdirSync(bin);
@@ -450,6 +463,24 @@ test("r3 P2-3: a symlink planted at the temporary name of the restore point is r
   assert.equal(fs.readFileSync(victim, "utf8"), "VICTIM\n", r.out);
   assert.equal(fs.readFileSync(f.installed, "utf8"), before);
   assert.equal(git(f.market, "rev-parse", "HEAD"), S23);
+  assert.doesNotMatch(r.out, /Draai undo/, r.out); // no restore point was written, so no undo advice
+});
+
+test("r7 self-review: a checkout that fails after the restore point is a FOUT with the restore point and git status advice; undo then reports the dirty checkout", () => {
+  const f = fakeHome();
+  // Injected during apply (before the checkout): an untracked file that the checkout to 9d0dcc1 would overwrite.
+  const mutate = path.join(f.H, "block-checkout.mjs");
+  fs.writeFileSync(mutate, `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(path.join(f.market, "tests/broker-proc-tag.test.mjs"))}, "local\\n");\n`);
+  let r = run(f.H, ["apply", ...A24, "--branch", B24], { harness: { beforeRenameScript: mutate } });
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /FOUT: .*Al geschreven herstelpunt\(en\): .*Draai undo.*git status/, r.out);
+  assert.doesNotMatch(r.out, /\n\s+at /, r.out);
+  assert.equal(git(f.market, "rev-parse", "HEAD"), S23);
+  r = run(f.H, ["undo", "--version", V24]);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /lokale wijzigingen \(onderbroken checkout\?\)/, r.out);
+  assert.ok(fs.existsSync(restoreFile(f)), "restore point dropped although the checkout is dirty");
+  assert.deepEqual(codex(f).map((e) => e.version), [V23, V23]); // the entries apply wrote are set back
 });
 
 test("r3 P2-3: a symlink planted at the temporary name of installed_plugins.json is refused before that write; undo then completes", () => {
@@ -463,6 +494,9 @@ test("r3 P2-3: a symlink planted at the temporary name of installed_plugins.json
   assert.equal(fs.readFileSync(victim, "utf8"), "VICTIM\n", r.out);
   assert.equal(fs.readFileSync(f.installed, "utf8"), before);
   assert.equal(git(f.market, "rev-parse", "HEAD"), S23, "checkout moved although installed_plugins.json was not written");
+  // r7 P3: the refusal after the restore point names it and says to run undo; no checkout ran, so no checkout advice.
+  assert.match(r.out, /Al geschreven herstelpunt\(en\): .*codex-restore-1762-1\.0\.7-sjotie\.24\.json\. Draai undo en lees de uitkomst/, r.out);
+  assert.doesNotMatch(r.out, /git status/, r.out);
   r = run(f.H, ["undo", "--version", V24]);
   assert.equal(r.code, 0, r.out);
   assert.ok(!fs.existsSync(restoreFile(f)));
