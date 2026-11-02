@@ -60,7 +60,24 @@ const opts = (name) => args.flatMap((a, i) => (a === `--${name}` && args[i + 1] 
 class Refusal extends Error {}
 const refuse = (msg) => { throw new Refusal(msg); };
 const need = (name) => opt(name) ?? refuse(`--${name} ontbreekt`);
-const git = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+/**
+ * Every external command goes through here: a 64 MB output limit instead of Node's 1 MB default (`ps -ax` on a busy
+ * Mac is larger than 1 MB). Output over the limit, a timeout, a command that cannot start and a command stopped by a
+ * signal become a refusal (FOUT, exit 1) that names the command and its directory. Only a normal non-zero exit is
+ * thrown as is, because some callers read it as an answer (diff 1 = differs, git cat-file -e = no such commit).
+ */
+const OUT_MAX = 64 << 20;
+function sh(cmd, argv, o = {}) {
+  try { return execFileSync(cmd, argv, { maxBuffer: OUT_MAX, ...o }); } catch (e) {
+    const what = `${cmd} ${argv.join(" ")}`.slice(0, 200) + (o.cwd ? ` (in ${o.cwd})` : "");
+    if (e.code === "ENOBUFS") refuse(`${what}: uitvoer groter dan ${(o.maxBuffer ?? OUT_MAX) >> 20} MB; afgebroken, niets aangenomen`);
+    if (e.code === "ETIMEDOUT") refuse(`${what}: duurde langer dan ${Math.round((o.timeout ?? 0) / 1000)} s; afgebroken`);
+    if (typeof e.code === "string") refuse(`${what}: kon niet draaien (${e.code})`);
+    if (e.signal) refuse(`${what}: gestopt door ${e.signal}`);
+    throw e;
+  }
+}
+const git = (cwd, ...a) => sh("git", a, { cwd, encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
 const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
 const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -84,7 +101,7 @@ function sha() {
 }
 function branch() {
   const b = need("branch");
-  try { execFileSync("git", ["check-ref-format", "--branch", b], { stdio: "ignore" }); } catch { refuse(`--branch ${JSON.stringify(b)} is geen geldige branchnaam`); }
+  try { sh("git", ["check-ref-format", "--branch", b], { stdio: "ignore" }); } catch (e) { if (e instanceof Refusal) throw e; refuse(`--branch ${JSON.stringify(b)} is geen geldige branchnaam`); }
   return b;
 }
 
@@ -174,8 +191,8 @@ function lockAll(dirs) {
       const record = `pid ${process.pid} op ${safeHost()} sinds ${new Date().toISOString()} run ${nonce}`;
       if (!createExclusive(lock, record + "\n", 0o600)) {
         const seen = readLock(lock);
-        if (seen.kind === "geen bestand") refuse(`${lock} bestaat maar is geen gewoon bestand (symlink of map). Deze installer maakt sinds d4835b7 alleen een bestand; ` +
-          "een map kan van een oudere versie zijn (kijk of die nog draait). Anders: onderzoek wie het neerzette en haal het niet blind weg");
+        if (seen.kind === "geen bestand") refuse(`${lock} bestaat maar is geen gewoon bestand (symlink of map). Deze installer maakt sinds 59911aef alleen een bestand; ` +
+          "een map kan van een oudere versie zijn (t/m d4835b7; kijk of die nog draait). Anders: onderzoek wie het neerzette en haal het niet blind weg");
         refuse(`${lock} bestaat (${describeLock(seen)}): een andere installer draait, of een eerdere stopte onverwacht. ` +
           "Haal het bestand pas weg als die installer niet meer draait " +
           `én er geen git-proces van hem meer loopt (bijv. een checkout in marketplaces/${MARKET})`);
@@ -255,17 +272,21 @@ function entryProblems(L, entries) {
 }
 function treeEqual(a, b) {
   // diff -r, ignoring the .in_use marker Claude Code keeps in a cache directory.
-  try { execFileSync("diff", ["-r", "-q", "-x", ".in_use", a, b], { stdio: "ignore", timeout: 60_000 }); return true; } catch { return false; }
+  try { sh("diff", ["-r", "-q", "-x", ".in_use", a, b], { stdio: "ignore", timeout: 120_000 }); return true; } catch (e) {
+    if (e instanceof Refusal) throw e;
+    if (e.status === 1) return false; // the trees differ
+    refuse(`diff -r ${a} ${b}: exit ${e.status}; vergelijking niet gelukt`);
+  }
 }
 function archiveTo(repo, s, dest) {
-  const tar = execFileSync("git", ["archive", s, "plugins/codex"], { cwd: repo, maxBuffer: 256 << 20, timeout: 120_000 });
-  execFileSync("tar", ["-x", "-C", dest, "--strip-components=2"], { input: tar, timeout: 120_000 });
+  const tar = sh("git", ["archive", s, "plugins/codex"], { cwd: repo, maxBuffer: 256 << 20, timeout: 120_000 });
+  sh("tar", ["-x", "-C", dest, "--strip-components=2"], { input: tar, timeout: 120_000 });
 }
 function cacheEqual(market, s, cache) {
   const ref = fs.mkdtempSync(path.join(os.tmpdir(), "cx1762-"));
   try { archiveTo(market, s, ref); return treeEqual(ref, cache); } finally { fs.rmSync(ref, { recursive: true, force: true }); }
 }
-function hasCommit(repo, s) { try { git(repo, "cat-file", "-e", `${s}^{commit}`); return true; } catch { return false; } }
+function hasCommit(repo, s) { try { git(repo, "cat-file", "-e", `${s}^{commit}`); return true; } catch (e) { if (e instanceof Refusal) throw e; return false; } }
 
 /** A restore point written by this version of the script; any other refuses (older scripts recorded less). */
 function readRecord(rp) {
@@ -352,14 +373,16 @@ function planOrApply(apply) {
       if (problems.length) refuse(`${dir}:\n   ${problems.join("\n   ")}\nniets geschreven`);
       work.push({ dir, users, L, done: record !== null });
     }
-    // Phase 2: write.
+    // Phase 2: write. A refusal after a restore point was written says so (undo sets back what apply changed).
     let changes = 0;
+    let recordWritten = null;
+    try {
     for (const { dir, users, L, done } of work) {
       console.log(`\n== ${dir}  (gebruikt door: ${users.join(", ")})`);
       if (done) { console.log(`   alles staat al op ${v} (herstelpunt van een eerdere apply); niets te doen`); continue; }
       const head = git(L.market, "rev-parse", "HEAD");
       let headBranch = "";
-      try { headBranch = git(L.market, "symbolic-ref", "-q", "--short", "HEAD"); } catch { /* detached */ }
+      try { headBranch = git(L.market, "symbolic-ref", "-q", "--short", "HEAD"); } catch (e) { if (e instanceof Refusal) throw e; /* detached */ }
       const appliedAt = new Date().toISOString();
       const entries = codexEntries(L.installed);
       const keysNow = entries.map(entryKey);
@@ -375,6 +398,7 @@ function planOrApply(apply) {
       const rp = restorePath(dir, v);
       const tmp = newTmp(rp, JSON.stringify(record, null, 2) + "\n", 0o600);
       try { fs.linkSync(tmp, rp); } catch (e) { if (e.code === "EEXIST") refuse(`${rp} verscheen tijdens de run; gestopt vóór de eerste wijziging hier`); throw e; } finally { fs.rmSync(tmp, { force: true }); }
+      recordWritten = rp;
       // Order: the cache first (an extra directory changes nothing), then installed_plugins.json, then the checkout.
       // A refusal before installed_plugins.json leaves only the restore point and the cache: undo then completes.
       if (!fs.existsSync(L.cache)) {
@@ -405,6 +429,10 @@ function planOrApply(apply) {
         git(L.market, "checkout", "--quiet", "--detach", s);
         if (git(L.market, "rev-parse", "HEAD") !== s) refuse("marketplace HEAD is na checkout niet de sha");
       }
+    }
+    } catch (e) {
+      if (e instanceof Refusal && recordWritten && !e.message.includes("Herstelpunt")) e.message += `. Herstelpunt ${recordWritten} is al geschreven: undo zet terug wat apply hier al veranderde`;
+      throw e;
     }
     console.log(`\n${apply ? "toegepast" : "plan"}: ${changes} wijziging(en)${apply ? "" : " (niets geschreven)"}`);
   } finally { unlockAll(held); }
@@ -447,16 +475,24 @@ function verify() {
   process.exitCode = bad ? 1 : 0;
 }
 
-/** The variables we look for in a running pid's environment: /proc on Linux, `ps -E` on macOS. Null when unreadable. */
+/**
+ * The variables we look for in a running pid's environment: /proc on Linux, `ps -E` on macOS. Null when unreadable
+ * (proof then counts it as not measured, which is red). Output over the limit is not unreadable but an error: it
+ * stops the run (FOUT, exit 1), so a cut-off read never counts as "no tag".
+ */
 function envOf(pid, names = [TAG_NAME, MARKER_NAME, "CLAUDE_CONFIG_DIR"]) {
   try {
     if (process.platform === "linux") {
       const all = Object.fromEntries(fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean).map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)]));
       return Object.fromEntries(names.map((n) => [n, all[n]]));
     }
-    const line = execFileSync("ps", ["-E", "-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
+    const line = sh("ps", ["-E", "-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
+    if (!/(?:^|\s)PATH=/.test(line)) return null; // ps showed no environment for this pid: unreadable, not "no tag"
     return Object.fromEntries(names.map((n) => [n, line.match(new RegExp(`(?:^|\\s)${n}=(\\S*)`))?.[1]]));
-  } catch { return null; }
+  } catch (e) {
+    if (e instanceof Refusal) throw e;
+    return null;
+  }
 }
 
 /** A child we started, with its exit tracked; it is only ever signalled through its handle while it runs. */
@@ -555,7 +591,7 @@ async function proof() {
 
 function brokers() {
   // Reads only: every running app-server-broker.mjs of this user, its plugin version (from the script path) and tag.
-  const out = execFileSync("ps", ["-axww", "-o", "pid=,user=,command="], { encoding: "utf8", timeout: 10_000 });
+  const out = sh("ps", ["-axww", "-o", "pid=,user=,command="], { encoding: "utf8", timeout: 10_000 });
   const me = os.userInfo().username;
   let n = 0;
   for (const line of out.split("\n")) {
@@ -608,7 +644,7 @@ function undo() {
       else if (git(L.market, "status", "--porcelain")) { console.log("   marketplace: lokale wijzigingen; niet aangeraakt"); notDone++; }
       else {
         let tip = "";
-        try { tip = r.marketplace.branch ? git(L.market, "rev-parse", `refs/heads/${r.marketplace.branch}`) : ""; } catch { /* branch gone */ }
+        try { tip = r.marketplace.branch ? git(L.market, "rev-parse", `refs/heads/${r.marketplace.branch}`) : ""; } catch (e) { if (e instanceof Refusal) throw e; /* branch gone */ }
         if (r.marketplace.branch && tip === r.marketplace.head) git(L.market, "checkout", "--quiet", r.marketplace.branch);
         else git(L.market, "checkout", "--quiet", "--detach", r.marketplace.head);
         console.log(`   marketplace: terug op ${r.marketplace.head.slice(0, 9)}${r.marketplace.branch && tip === r.marketplace.head ? ` (${r.marketplace.branch})` : ""}`);

@@ -350,6 +350,43 @@ test("r5 self-review: an empty lock says the owner is not written yet; a lock go
   assert.match(r.out, /verdween tijdens deze run/, r.out);
 });
 
+/** A fake `ps` first on PATH that prints `bytes` bytes of lines that are no process rows (prepared, then cat: fast). */
+function fakePs(H, bytes) {
+  const bin = path.join(H, "fake-bin");
+  fs.mkdirSync(bin, { recursive: true });
+  const data = path.join(H, "fake-ps.out");
+  fs.writeFileSync(data, Buffer.from(("x".repeat(99) + "\n").repeat(Math.ceil(bytes / 100))));
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nexec cat ${JSON.stringify(data)}\n`, { mode: 0o755 });
+  return { PATH: `${bin}:${process.env.PATH}` };
+}
+
+test("r6 self-review: a command that times out or cannot start is a clear FOUT, not a stack trace", () => {
+  const f = fakeHome();
+  const bin = path.join(f.H, "slow-bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+  // brokers gives ps 10 s; a sleeping ps must end as FOUT ... duurde langer, with our own child stopped by Node.
+  const r = run(f.H, ["brokers"], { env: { PATH: `${bin}:${process.env.PATH}` } });
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /FOUT: ps .*duurde langer dan 10 s/, r.out);
+  assert.doesNotMatch(r.out, /\n\s+at /, r.out);
+});
+
+test("r6 Mac: brokers handles ps output above Node's 1 MB default (seen on the Mac: ENOBUFS)", () => {
+  const f = fakeHome();
+  const r = run(f.H, ["brokers"], { env: fakePs(f.H, 1_200_000) });
+  assert.equal(r.code, 0, r.out.slice(0, 2000));
+  assert.match(r.out, /brokers: 0 draaiend/, r.out.slice(0, 2000));
+});
+
+test("r6 Mac: ps output above the 64 MB limit is a clear FOUT, never an empty result", () => {
+  const f = fakeHome();
+  const r = run(f.H, ["brokers"], { env: fakePs(f.H, 68_000_000) });
+  assert.notEqual(r.code, 0, r.out.slice(0, 2000));
+  assert.match(r.out, /FOUT: ps .*groter dan 64 MB/, r.out.slice(0, 2000));
+  assert.doesNotMatch(r.out, /brokers: \d+ draaiend/);
+});
+
 test("r5 P3/P4: binary, too long, an impossible time or escape characters in a lock are shown as unreadable", () => {
   const cases = {
     binary: Buffer.from([0x70, 0x69, 0x64, 0x00, 0x1b, 0x5b, 0x33, 0x31, 0x6d, 0xff, 0xfe]),
