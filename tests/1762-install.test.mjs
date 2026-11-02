@@ -274,7 +274,7 @@ test("r2 self-review: an untracked file in a marketplace already at the sha does
 
 test("r3 P2-1: apply and undo refuse while another run holds the lock, and change nothing", () => {
   const f = fakeHome();
-  fs.mkdirSync(path.join(f.P, "codex-1762-install.lock"));
+  fs.writeFileSync(path.join(f.P, "codex-1762-install.lock"), "pid 4242 op otherhost sinds 2026-11-02T00:00:00.000Z run 0123456789abcdef\n");
   const before = fs.readFileSync(f.installed, "utf8");
   let r = apply(f);
   assert.notEqual(r.code, 0, r.out);
@@ -285,43 +285,87 @@ test("r3 P2-1: apply and undo refuse while another run holds the lock, and chang
   assert.notEqual(r.code, 0, r.out);
 });
 
-test("r4 P2: a held lock never reads or prints a file outside it (owner symlink, symlinked lock directory)", () => {
-  const f = fakeHome();
-  // The sentinel has the exact owner format, so only the symlink guards (not the format check) keep it out.
-  const sentinel = path.join(f.H, "outside-secret.txt");
-  fs.writeFileSync(sentinel, "pid 1 op SENTINEL-1762 sinds 2026-01-01T00:00:00.000Z\n");
-  const lock = path.join(f.P, "codex-1762-install.lock");
-  fs.mkdirSync(lock);
-  fs.symlinkSync(sentinel, path.join(lock, "owner"));
-  let r = apply(f);
-  assert.notEqual(r.code, 0, r.out);
-  assert.match(r.out, /eigenaar onleesbaar/, r.out);
-  assert.ok(!r.out.includes("SENTINEL-1762"), `outside file printed:\n${r.out}`);
-  r = run(f.H, ["undo", "--version", V24]);
-  assert.notEqual(r.code, 0, r.out);
-  assert.match(r.out, /bestaat/, r.out);
-  assert.ok(!r.out.includes("SENTINEL-1762"), `outside file printed by undo:\n${r.out}`);
-  // A lock directory that is itself a symlink to a directory holding an owner file.
-  fs.rmSync(lock, { recursive: true });
-  const outsideDir = path.join(f.H, "outside-dir");
-  fs.mkdirSync(outsideDir);
-  fs.copyFileSync(sentinel, path.join(outsideDir, "owner"));
-  fs.symlinkSync(outsideDir, lock);
-  r = apply(f);
-  assert.notEqual(r.code, 0, r.out);
-  assert.match(r.out, /geen gewone map/, r.out);
-  assert.ok(!r.out.includes("SENTINEL-1762"), `outside file printed via a symlinked lock:\n${r.out}`);
-  assert.equal(codex(f)[0].version, V23);
+const LOCK = (f) => path.join(f.P, "codex-1762-install.lock");
+const VALID_OUTSIDE = "pid 1 op SENTINEL-1762 sinds 2026-01-01T00:00:00.000Z run 0123456789abcdef\n";
+
+test("r4/r5 P2: a lock path that is a symlink (to a file or a directory) or a directory is refused without reading it", () => {
+  // The outside content has the exact owner format, so only the symlink/type guards (not the format check) keep it out.
+  for (const shape of ["symlink-to-file", "symlink-to-dir", "dir-with-owner"]) {
+    const f = fakeHome();
+    const sentinel = path.join(f.H, "outside-secret.txt");
+    fs.writeFileSync(sentinel, VALID_OUTSIDE);
+    const outsideDir = path.join(f.H, "outside-dir");
+    fs.mkdirSync(outsideDir);
+    fs.writeFileSync(path.join(outsideDir, "owner"), VALID_OUTSIDE);
+    if (shape === "symlink-to-file") fs.symlinkSync(sentinel, LOCK(f));
+    if (shape === "symlink-to-dir") fs.symlinkSync(outsideDir, LOCK(f));
+    if (shape === "dir-with-owner") { fs.mkdirSync(LOCK(f)); fs.symlinkSync(sentinel, path.join(LOCK(f), "owner")); }
+    for (const argv of [["apply", ...A24, "--branch", B24], ["undo", "--version", V24]]) {
+      const r = run(f.H, argv);
+      assert.notEqual(r.code, 0, `${shape} ${argv[0]}: ${r.out}`);
+      assert.match(r.out, /geen gewoon bestand/, `${shape} ${argv[0]}: ${r.out}`);
+      assert.ok(!r.out.includes("SENTINEL-1762"), `${shape} ${argv[0]} printed an outside file:\n${r.out}`);
+    }
+    assert.equal(codex(f)[0].version, V23);
+    assert.equal(fs.readFileSync(sentinel, "utf8"), VALID_OUTSIDE);
+    assert.deepEqual(fs.readdirSync(outsideDir), ["owner"]);
+  }
 });
 
 test("r4 self-review: a real owner record of a held lock is shown, also with a long hostname", () => {
   const f = fakeHome();
-  const lock = path.join(f.P, "codex-1762-install.lock");
-  fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, "owner"), `pid 4242 op ${"h".repeat(80)}.local sinds 2026-11-02T00:00:00.000Z\n`);
+  fs.writeFileSync(LOCK(f), `pid 4242 op ${"h".repeat(80)}.local sinds 2026-11-02T00:00:00.000Z run 0123456789abcdef\n`);
   const r = apply(f);
   assert.notEqual(r.code, 0, r.out);
   assert.match(r.out, /pid 4242 op h{80}\.local/, r.out);
+});
+
+test("r5 P2: a lock that no longer holds this run's record at release stays, and is reported", () => {
+  const f = fakeHome();
+  const foreign = "pid 777 op elsewhere sinds 2026-11-02T00:00:00.000Z run fedcba9876543210\n";
+  const mutate = path.join(f.H, "swap-lock.mjs");
+  // Injected during apply: someone replaces the lock. The directory branch only exists to run this test against the
+  // old directory design (d4835b7), where the lock with the foreign record was removed with rm -r.
+  fs.writeFileSync(mutate, `import fs from "node:fs"; const l = ${JSON.stringify(LOCK(f))};
+    if (fs.statSync(l).isDirectory()) fs.writeFileSync(l + "/owner", ${JSON.stringify(foreign)});
+    else { fs.unlinkSync(l); fs.writeFileSync(l, ${JSON.stringify(foreign)}); }\n`);
+  const r = run(f.H, ["apply", ...A24, "--branch", B24], { harness: { beforeRenameScript: mutate } });
+  assert.ok(fs.existsSync(LOCK(f)), `a lock with a foreign record was removed:\n${r.out}`);
+  const left = fs.statSync(LOCK(f)).isDirectory() ? fs.readFileSync(path.join(LOCK(f), "owner"), "utf8") : fs.readFileSync(LOCK(f), "utf8");
+  assert.equal(left, foreign);
+  assert.match(r.out, /hoort niet meer bij deze run/, r.out);
+});
+
+test("r5 self-review: an empty lock says the owner is not written yet; a lock gone during the run is reported", () => {
+  let f = fakeHome();
+  fs.writeFileSync(LOCK(f), "");
+  let r = apply(f);
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /nog niet geschreven/, r.out);
+  f = fakeHome();
+  const mutate = path.join(f.H, "drop-lock.mjs");
+  fs.writeFileSync(mutate, `import fs from "node:fs"; fs.rmSync(${JSON.stringify(LOCK(f))}, { force: true });\n`);
+  r = run(f.H, ["apply", ...A24, "--branch", B24], { harness: { beforeRenameScript: mutate } });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /verdween tijdens deze run/, r.out);
+});
+
+test("r5 P3/P4: binary, too long, an impossible time or escape characters in a lock are shown as unreadable", () => {
+  const cases = {
+    binary: Buffer.from([0x70, 0x69, 0x64, 0x00, 0x1b, 0x5b, 0x33, 0x31, 0x6d, 0xff, 0xfe]),
+    // A valid record followed by more than the read bound: refused (the format alone would also refuse it).
+    trailingBeyondBound: `pid 4242 op ${"h".repeat(200)} sinds 2026-11-02T00:00:00.000Z run 0123456789abcdef${" ".repeat(200)}\n`,
+    badTime: "pid 4242 op host sinds 2026-99-99T99:99:99.999Z run 0123456789abcdef\n",
+    escape: "pid 4242 op ho\u001b[31mst sinds 2026-11-02T00:00:00.000Z run 0123456789abcdef\n"
+  };
+  for (const [name, content] of Object.entries(cases)) {
+    const f = fakeHome();
+    fs.writeFileSync(LOCK(f), content);
+    const r = apply(f);
+    assert.notEqual(r.code, 0, `${name}: ${r.out}`);
+    assert.match(r.out, /eigenaar onleesbaar/, `${name}: ${r.out}`);
+    assert.ok(!r.out.includes("\u001b") && !r.out.includes("\u0000") && !r.out.includes("pid 4242"), `${name} printed raw content:\n${JSON.stringify(r.out)}`);
+  }
 });
 
 test("r3 P2-2: reapply refuses when a codex entry the restore point does not know appeared, and changes nothing", () => {

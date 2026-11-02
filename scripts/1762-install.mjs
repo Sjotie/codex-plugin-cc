@@ -15,8 +15,9 @@
 // plugins directory is red unless named with --skip-home; no plugins directory at all is red.
 //
 // apply and undo hold one lock per real plugins directory (homes that symlink to one directory count once) for the
-// whole run: the directory codex-1762-install.lock, made with mkdir. A lock that exists refuses the run; after a
-// crash, remove it by hand once no installer runs. Inside the locks, apply first checks every directory and only
+// whole run: the file codex-1762-install.lock (O_EXCL|O_NOFOLLOW, holding pid, host, time and a run nonce). A lock
+// that exists refuses the run; a run releases only a lock that still holds its own record (unlink). After a crash,
+// remove it by hand once that installer and its git children no longer run. Inside the locks, apply first checks every directory and only
 // then writes:
 //   - no restore point yet: everything must look as expected (marketplace checkout clean if it has to move, sha
 //     fetchable from origin <branch>, an existing cache directory equal to `git archive <sha> plugins/codex`, every
@@ -115,53 +116,91 @@ function survey() {
 }
 
 /**
- * The owner record of an existing lock directory: the owner file is opened without following a symlink (O_NOFOLLOW
- * on the file; the directory was checked with lstat just before, a swap in between is not excluded), at most 400
- * bytes are read, and only text in exactly the format this script writes is shown. Anything else is "onleesbaar",
- * so a refusal prints at most a pid, a hostname and a time, never other content.
+ * The lock is one file per plugins directory, codex-1762-install.lock, created with O_CREAT|O_EXCL|O_NOFOLLOW; the
+ * owner record goes through that same descriptor. Format: `pid <n> op <host> sinds <ISO time> run <16 hex>`, at
+ * most 400 bytes. The run nonce makes the record of this run unique.
  */
-const OWNER_RE = /^pid \d{1,10} op \S{1,255} sinds \d{4}-\d\d-\d\dT[\d:.]+Z$/;
-function lockOwner(lock) {
-  try {
-    const fd = fs.openSync(path.join(lock, "owner"), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
-    try {
-      if (!fs.fstatSync(fd).isFile()) return " (eigenaar onleesbaar)";
-      const buf = Buffer.alloc(400);
-      const text = buf.subarray(0, fs.readSync(fd, buf, 0, 400, 0)).toString("utf8").trim();
-      return OWNER_RE.test(text) ? ` (${text})` : " (eigenaar onleesbaar)";
-    } finally { fs.closeSync(fd); }
-  } catch (e) { return e.code === "ENOENT" ? " (eigenaar nog niet geschreven: net gestart, of vlak na het aanmaken gestopt)" : " (eigenaar onleesbaar)"; }
+const LOCK_MAX = 400;
+const safeHost = () => (os.hostname().replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 253) || "onbekend");
+const OWNER_RE = /^pid ([1-9]\d{0,9}) op ([A-Za-z0-9._-]{1,253}) sinds (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z) run ([0-9a-f]{16})$/;
+/** A valid owner record, or null: wrong format, an impossible time, or longer than LOCK_MAX bytes. */
+function parseOwner(text) {
+  const m = OWNER_RE.exec(text);
+  if (!m) return null;
+  const t = new Date(m[3]);
+  return Number.isNaN(t.getTime()) || t.toISOString() !== m[3] ? null : text;
 }
+/**
+ * Reads an existing lock without following a symlink. kind: "record" (with text), "leeg" (created, record not yet
+ * written), "onleesbaar" (wrong format, impossible time, binary, or an open error such as EACCES), "geen bestand"
+ * (a symlink, a directory or another non-file: nothing is read) or "weg". The read is bounded; the format alone
+ * already limits a valid record to about 320 bytes, the extra byte only keeps a huge file from being read.
+ */
+function readLock(lock) {
+  let fd;
+  try { fd = fs.openSync(lock, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)); } catch (e) {
+    if (e.code === "ENOENT") return { kind: "weg" };
+    if (["ELOOP", "EMLINK", "EISDIR", "ENOTDIR", "ENXIO"].includes(e.code)) return { kind: "geen bestand" };
+    return { kind: "onleesbaar", why: e.code };
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) return { kind: "geen bestand" };
+    const buf = Buffer.alloc(LOCK_MAX + 1);
+    const n = fs.readSync(fd, buf, 0, LOCK_MAX + 1, 0);
+    if (n === 0) return { kind: "leeg" };
+    if (n > LOCK_MAX) return { kind: "onleesbaar" };
+    const text = parseOwner(buf.subarray(0, n).toString("latin1").replace(/\n$/, ""));
+    return text ? { kind: "record", text } : { kind: "onleesbaar" };
+  } finally { fs.closeSync(fd); }
+}
+const describeLock = (seen) => ({
+  record: seen.text, leeg: "eigenaar nog niet geschreven: net gestart, of vlak na het aanmaken gestopt", weg: "net weer weg; probeer opnieuw",
+  onleesbaar: `eigenaar onleesbaar${seen.why ? `, ${seen.why}` : ""}`, "geen bestand": "geen gewoon bestand"
+}[seen.kind]);
 
-/** One lock per plugins directory for the whole run; all or none. Ctrl-C or SIGTERM removes the held locks. */
-const heldLocks = [];
+/** One lock per plugins directory for the whole run; all or none. Ctrl-C or SIGTERM releases the held locks. */
+const heldLocks = []; // { path, record }
+let signalsInstalled = false;
 function lockAll(dirs) {
+  if (!signalsInstalled) {
+    signalsInstalled = true;
+    for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { unlockAll(heldLocks); process.exit(sig === "SIGINT" ? 130 : 143); });
+  }
   const held = [];
+  const nonce = crypto.randomBytes(8).toString("hex");
   try {
     for (const dir of dirs) {
       const lock = path.join(dir, LOCK_NAME);
-      try { fs.mkdirSync(lock); } catch (e) {
-        if (e.code !== "EEXIST") throw e;
-        let st = null;
-        try { st = fs.lstatSync(lock); } catch { /* gone meanwhile */ }
-        if (!st?.isDirectory()) refuse(`${lock} bestaat maar is geen gewone map (symlink of bestand). Deze installer maakt dat nooit zo: onderzoek wie het neerzette en haal het niet blind weg`);
-        refuse(`${lock} bestaat${lockOwner(lock)}: een andere installer draait, of een eerdere stopte onverwacht. ` +
-          `Haal de map pas weg als die installer niet meer draait én er geen git-proces van hem meer loopt (bijv. een checkout in marketplaces/${MARKET})`);
+      const record = `pid ${process.pid} op ${safeHost()} sinds ${new Date().toISOString()} run ${nonce}`;
+      if (!createExclusive(lock, record + "\n", 0o600)) {
+        const seen = readLock(lock);
+        if (seen.kind === "geen bestand") refuse(`${lock} bestaat maar is geen gewoon bestand (symlink of map). Deze installer maakt sinds d4835b7 alleen een bestand; ` +
+          "een map kan van een oudere versie zijn (kijk of die nog draait). Anders: onderzoek wie het neerzette en haal het niet blind weg");
+        refuse(`${lock} bestaat (${describeLock(seen)}): een andere installer draait, of een eerdere stopte onverwacht. ` +
+          "Haal het bestand pas weg als die installer niet meer draait " +
+          `én er geen git-proces van hem meer loopt (bijv. een checkout in marketplaces/${MARKET})`);
       }
-      held.push(lock);
-      heldLocks.push(lock);
-      if (!createExclusive(path.join(lock, "owner"), `pid ${process.pid} op ${os.hostname()} sinds ${new Date().toISOString()}\n`, 0o600)) {
-        refuse(`${lock}/owner bestond al in een lock dat deze run net maakte; iemand anders schrijft hier. Gestopt`);
-      }
+      const h = { path: lock, record };
+      held.push(h);
+      heldLocks.push(h);
     }
   } catch (e) { unlockAll(held); throw e; }
-  for (const sig of ["SIGINT", "SIGTERM"]) process.once(sig, () => { unlockAll(heldLocks); process.exit(sig === "SIGINT" ? 130 : 143); });
   return held;
 }
+/**
+ * Releases only a lock that still holds this run's own record (unlink, never recursive); anything else stays and is
+ * reported. Never throws, so it neither skips the other locks nor hides the error that ended the run. Left open:
+ * read and unlink are two steps; a lock removed by hand and recreated by a new run in between would be removed.
+ */
 function unlockAll(held) {
-  for (const lock of [...held].reverse()) {
-    fs.rmSync(lock, { recursive: true, force: true });
-    const i = heldLocks.indexOf(lock);
+  for (const h of [...held].reverse()) {
+    try {
+      const seen = readLock(h.path);
+      if (seen.kind === "record" && seen.text === h.record) fs.unlinkSync(h.path);
+      else if (seen.kind === "weg") console.error(`let op: ${h.path} verdween tijdens deze run; de uitsluiting gold dus niet de hele run`);
+      else console.error(`let op: ${h.path} hoort niet meer bij deze run (${describeLock(seen)}); laten staan`);
+    } catch (e) { console.error(`let op: ${h.path} kon niet worden vrijgegeven (${e.code ?? e.message}); haal hem weg na controle`); }
+    const i = heldLocks.indexOf(h);
     if (i >= 0) heldLocks.splice(i, 1);
   }
 }
