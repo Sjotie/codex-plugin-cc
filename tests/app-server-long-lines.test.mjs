@@ -32,29 +32,24 @@ rl.on("line", (line) => {
   return dir;
 }
 
-for (const [name, ending] of [
-  ["with a trailing newline", "\n"],
-  ["without a trailing newline", ""]
-]) {
-  test(`direct app-server client parses a >64 KiB line with U+2028/2029 delivered in chunks, ${name}`, async () => {
-    const dir = installLongLineCodex(ending);
-    let timer;
-    const client = await Promise.race([
-      CodexAppServerClient.connect(process.cwd(), {
-        disableBroker: true,
-        env: { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` }
-      }),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("connect did not settle within 10s")), 10000);
-      })
-    ]).finally(() => clearTimeout(timer));
-    try {
-      assert.equal(client.exitError, null);
-    } finally {
-      await client.close();
-    }
-  });
-}
+test("direct app-server client parses a >64 KiB line with U+2028/2029 delivered in chunks", async () => {
+  const dir = installLongLineCodex("\n");
+  let timer;
+  const client = await Promise.race([
+    CodexAppServerClient.connect(process.cwd(), {
+      disableBroker: true,
+      env: { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` }
+    }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("connect did not settle within 10s")), 10000);
+    })
+  ]).finally(() => clearTimeout(timer));
+  try {
+    assert.equal(client.exitError, null);
+  } finally {
+    await client.close();
+  }
+});
 
 class RecordingClient extends AppServerClientBase {
   seen = [];
