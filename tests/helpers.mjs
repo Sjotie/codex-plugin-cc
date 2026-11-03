@@ -13,6 +13,15 @@ for (const name of ["CODEX_COMPANION_SESSION_ID", "CODEX_COMPANION_TRANSCRIPT_PA
   delete process.env[name];
 }
 
+// #4653 todo: the broker and its tests listen on a unix socket inside a temp
+// directory, and a socket path must fit sun_path (103 characters on macOS). The
+// TMPDIR of an agent session is too deep for that, so a run there failed with
+// broker endpoints that could not be bound. On macOS a long TMPDIR is replaced
+// by a short directory for this process and every process the tests start.
+if (process.platform === "darwin" && os.tmpdir().length > 40) {
+  process["env"].TMPDIR = fs.mkdtempSync("/tmp/cxt-");
+}
+
 // #1916: the seal of the state lock scans every process on the machine, and
 // other sessions on a developer machine may run old plugin processes. Tests
 // and every node process they start see only the processes a test exposes
