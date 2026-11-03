@@ -1059,6 +1059,9 @@ async function handleTask(argv) {
     return;
   }
 
+  ensureCodexAvailable(cwd);
+  requireTaskRequest(prompt, resumeLast || Boolean(resumeThreadId));
+
   awaitStateLockSeal(workspaceRoot);
   const job = buildTaskJob(workspaceRoot, taskMetadata, write);
   await runForegroundCommand(

@@ -108,6 +108,17 @@ test("a wait that does not help ends in the named error", () => {
   assert.equal(lock.calls.length, 2);
 });
 
+test("a total below the ordinary deadline caps the first try", () => {
+  // The fake returns at once, so some of the 3 s is left for the second try; in
+  // real use the first try has spent it.
+  const lock = fakeLock({ outcomes: [timeout(), timeout()] });
+  assert.throws(() => acquireWithSealWait(lock, options({ waitMs: 3000 })), (error) => /pid 1902705/.test(error.message));
+  assert.deepEqual(lock.calls[0], { deadlineMs: 3000 });
+  const off = fakeLock({ outcomes: [timeout()] });
+  assert.throws(() => acquireWithSealWait(off, options({ waitMs: 0 })));
+  assert.deepEqual(off.calls, [{}], "0 switches the wait off: the ordinary deadline");
+});
+
 test("every blocker is described once, however often it is shown", () => {
   const lock = fakeLock({ outcomes: [timeout(), timeout()], processes: [OLD_TASK_WORKER, OLD_BROKER] });
   const opts = options({ waitMs: 10_000, logs: [] });

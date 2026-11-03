@@ -20,6 +20,8 @@ import { StateLockRefused, StateLockTimeout } from "./fenced-lock.mjs";
 export const DEFAULT_SEAL_WAIT_MS = 60_000;
 export const MAX_SEAL_WAIT_MS = 300_000;
 export const SEAL_WAIT_ENV = "CODEX_COMPANION_SEAL_WAIT_MS";
+// The deadline of an ordinary lock acquire (state.mjs); a smaller total caps it.
+const ORDINARY_DEADLINE_MS = 10_000;
 
 // The total for commands that start work: the environment overrides the default
 // (0 switches the wait off).
@@ -86,7 +88,7 @@ export function sealBlockedMessage(blockers, { describe = describeProcess, compa
   const list = blockers.map((p) => blockerLine(p, describe)).join("; ");
   const stop =
     companionScript && cwd
-      ? ` To stop exactly these processes (this ends their work; add --include-unidentified for ones that could not be identified): node ${shellQuote(companionScript)} state-lock stop-old --cwd ${shellQuote(cwd)}.`
+      ? ` To stop the ones it can identify (this ends their work; add --include-unidentified for the rest): node ${shellQuote(companionScript)} state-lock stop-old --cwd ${shellQuote(cwd)}.`
       : "";
   return (
     `The state lock fence is not sealed: ${blockers.length} old plugin process${many ? "es" : ""} from before the fence ` +
@@ -122,7 +124,8 @@ export function acquireWithSealWait(lock, options = {}) {
   const started = performance.now();
   let error;
   try {
-    return lock.acquire({});
+    // A total below the ordinary deadline is a total: the first try respects it.
+    return lock.acquire(waitMs > 0 && waitMs < ORDINARY_DEADLINE_MS ? { deadlineMs: waitMs } : {});
   } catch (caught) {
     if (!(caught instanceof StateLockTimeout) || caught instanceof StateLockRefused) throw caught;
     error = caught;
