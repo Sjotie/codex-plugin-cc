@@ -12,7 +12,6 @@ import fs from "node:fs";
 import net from "node:net";
 import process from "node:process";
 import { spawn } from "node:child_process";
-import readline from "node:readline";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, isBrokerSessionReady, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
@@ -120,7 +119,8 @@ export class AppServerClientBase {
     this.exitError = null;
     /** @type {AppServerNotificationHandler | null} */
     this.notificationHandler = null;
-    this.lineBuffer = "";
+    this.lineParts = [];
+    this.linePartsLength = 0;
     this.transport = "unknown";
 
     this.exitPromise = new Promise((resolve) => {
@@ -163,18 +163,25 @@ export class AppServerClientBase {
   // U+2029, which JSON.stringify leaves unescaped, so a long reply containing
   // one was cut in the middle of a string and failed to parse.
   handleChunk(chunk) {
-    this.lineBuffer += chunk;
-    let newlineIndex = this.lineBuffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      const line = this.lineBuffer.slice(0, newlineIndex);
-      this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
+    // Parts are joined only when their newline arrives, so a long line costs
+    // linear time however many chunks it comes in.
+    let rest = chunk;
+    while (!this.exitResolved) {
+      const newlineIndex = rest.indexOf("\n");
+      if (newlineIndex === -1) {
+        this.lineParts.push(rest);
+        this.linePartsLength += rest.length;
+        break;
+      }
+      this.lineParts.push(rest.slice(0, newlineIndex));
+      rest = rest.slice(newlineIndex + 1);
+      const line = this.takeBufferedLine();
       this.handleLine(line);
-      newlineIndex = this.lineBuffer.indexOf("\n");
     }
-    const limit = this.maxLineChars ?? MAX_LINE_CHARS;
-    if (this.lineBuffer.length > limit) {
-      const size = this.lineBuffer.length;
-      this.lineBuffer = "";
+    const limit = this.options.maxLineChars ?? MAX_LINE_CHARS;
+    if (!this.exitResolved && this.linePartsLength > limit) {
+      const size = this.linePartsLength;
+      this.takeBufferedLine();
       this.handleExit(
         createProtocolError(
           `codex app-server sent a JSONL line of at least ${size} characters without a newline; the limit is ${limit}.`
@@ -183,11 +190,18 @@ export class AppServerClientBase {
     }
   }
 
+  takeBufferedLine() {
+    const line = this.lineParts.length === 1 ? this.lineParts[0] : this.lineParts.join("");
+    this.lineParts = [];
+    this.linePartsLength = 0;
+    return line;
+  }
+
   /** The stream ended: a last line without a trailing newline is still a message. */
   flushLineBuffer() {
-    const line = this.lineBuffer;
-    this.lineBuffer = "";
-    this.handleLine(line);
+    if (!this.exitResolved) {
+      this.handleLine(this.takeBufferedLine());
+    }
   }
 
   handleLine(line) {

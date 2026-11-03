@@ -69,9 +69,21 @@ test("handleChunk buffers a line across chunk boundaries and flushes a last line
 });
 
 test("handleChunk fails loudly, with the size, when a line exceeds the limit", () => {
-  const client = new AppServerClientBase(process.cwd());
-  client.maxLineChars = 100;
+  const client = new AppServerClientBase(process.cwd(), { maxLineChars: 100 });
   client.handleChunk("y".repeat(150));
   assert.match(client.exitError.message, /at least 150 characters.*limit is 100/);
   assert.equal(appServer.MAX_LINE_CHARS, 64 * 1024 * 1024);
+});
+
+test("handleChunk joins a line delivered in many chunks and ignores input after a fatal error", () => {
+  const client = new RecordingClient(process.cwd());
+  const piece = "z".repeat(65536);
+  for (let i = 0; i < 100; i += 1) client.handleChunk(piece);
+  client.handleChunk("\nafter");
+  assert.equal(client.seen.length, 1);
+  assert.equal(client.seen[0].length, 100 * 65536);
+
+  client.handleExit(new Error("dead"));
+  client.handleChunk('{"method":"late"}\n');
+  assert.equal(client.seen.length, 1);
 });
