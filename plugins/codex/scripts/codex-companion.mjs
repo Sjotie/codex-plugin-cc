@@ -963,7 +963,6 @@ async function handleReviewCommand(argv, config) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  awaitStateLockSeal(workspaceRoot);
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
     base: options.base,
@@ -972,6 +971,7 @@ async function handleReviewCommand(argv, config) {
 
   config.validateRequest?.(target, focusText);
   const metadata = buildReviewJobMetadata(config.reviewName, target);
+  awaitStateLockSeal(workspaceRoot);
   const job = createCompanionJob({
     prefix: "review",
     kind: metadata.kind,
@@ -1015,7 +1015,6 @@ async function handleTask(argv) {
 
   const cwd = resolveTaskCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  awaitStateLockSeal(workspaceRoot);
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
@@ -1039,6 +1038,7 @@ async function handleTask(argv) {
     ensureCodexAvailable(cwd);
     requireTaskRequest(prompt, resumeLast || Boolean(resumeThreadId));
 
+    awaitStateLockSeal(workspaceRoot);
     const job = buildTaskJob(workspaceRoot, taskMetadata, write);
     const request = buildTaskRequest({
       cwd,
@@ -1059,6 +1059,7 @@ async function handleTask(argv) {
     return;
   }
 
+  awaitStateLockSeal(workspaceRoot);
   const job = buildTaskJob(workspaceRoot, taskMetadata, write);
   await runForegroundCommand(
     job,

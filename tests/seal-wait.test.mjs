@@ -24,6 +24,7 @@ function timeout(reason = SEAL_REASON) {
 }
 
 // A lock whose acquire follows a script: each entry is a handle or an error.
+// processes: the blockers status lists; or a function of the number of acquires so far.
 function fakeLock({ outcomes, processes = [OLD_TASK_WORKER] }) {
   const calls = [];
   return {
@@ -35,7 +36,8 @@ function fakeLock({ outcomes, processes = [OLD_TASK_WORKER] }) {
       return next;
     },
     status() {
-      return { waitingOn: processes.length ? { kind: "processes", processes } : { kind: "nothing" } };
+      const list = typeof processes === "function" ? processes(calls.length) : processes;
+      return { waitingOn: list.length ? { kind: "processes", processes: list } : { kind: "nothing" } };
     }
   };
 }
@@ -97,7 +99,7 @@ test("a start command waits for the old processes: the second try gets the rest 
 test("a wait that does not help ends in the named error", () => {
   const lock = fakeLock({ outcomes: [timeout(), timeout()] });
   assert.throws(
-    () => acquireWithSealWait(lock, options({ waitMs: 5 })),
+    () => acquireWithSealWait(lock, options({ waitMs: 10_000 })),
     (error) => {
       assert.match(error.message, /pid 1902705/);
       return true;
@@ -108,7 +110,7 @@ test("a wait that does not help ends in the named error", () => {
 
 test("every blocker is described once, however often it is shown", () => {
   const lock = fakeLock({ outcomes: [timeout(), timeout()], processes: [OLD_TASK_WORKER, OLD_BROKER] });
-  const opts = options({ waitMs: 5, logs: [] });
+  const opts = options({ waitMs: 10_000, logs: [] });
   assert.throws(() => acquireWithSealWait(lock, opts));
   assert.deepEqual(opts.described.sort(), [1902705, 1902787]);
 });
@@ -124,20 +126,21 @@ test("a caller with its own deadline gets the plain lock: no wait, no diagnosis,
   assert.equal(acquireWithSealWait(fakeLock({ outcomes: [handle] }), { ...opts, deadlineMs: 250 }), handle);
 });
 
-test("a timeout that is not about the seal is rethrown unchanged, with no wait", () => {
-  for (const reason of ["busy: another process holds the lock", "admission: transient refusal"]) {
+test("a timeout with no old process listed (busy, transient refusal) is rethrown unchanged, with no wait", () => {
+  for (const reason of ["busy: another process holds the lock", "admission: transient refusal", SEAL_REASON]) {
     const original = timeout(reason);
-    const lock = fakeLock({ outcomes: [original], processes: [OLD_TASK_WORKER] });
+    const lock = fakeLock({ outcomes: [original], processes: [] });
     assert.throws(() => acquireWithSealWait(lock, options({ waitMs: 60_000 })), (error) => error === original);
     assert.equal(lock.calls.length, 1);
   }
 });
 
-test("a seal reason without listed processes keeps the original timeout", () => {
-  const original = timeout();
-  const lock = fakeLock({ outcomes: [original], processes: [] });
-  assert.throws(() => acquireWithSealWait(lock, options({ waitMs: 60_000 })), (error) => error === original);
-  assert.equal(lock.calls.length, 1);
+test("when the old processes ended during the wait and something else holds the lock, the new error is not blamed on them", () => {
+  const busy = timeout("busy: another process holds the lock");
+  const lock = fakeLock({ outcomes: [timeout(), busy], processes: (calls) => (calls < 2 ? [OLD_TASK_WORKER] : []) });
+  const logs = [];
+  assert.throws(() => acquireWithSealWait(lock, options({ waitMs: 10_000, logs })), (error) => error === busy);
+  assert.equal(logs.length, 1, "it did wait for the old process first");
 });
 
 test("a definitive refusal and other errors pass through untouched", () => {

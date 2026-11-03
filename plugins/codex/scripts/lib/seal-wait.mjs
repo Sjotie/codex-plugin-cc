@@ -86,7 +86,7 @@ export function sealBlockedMessage(blockers, { describe = describeProcess, compa
   const list = blockers.map((p) => blockerLine(p, describe)).join("; ");
   const stop =
     companionScript && cwd
-      ? ` To stop exactly these processes (this ends their work): node ${shellQuote(companionScript)} state-lock stop-old --cwd ${shellQuote(cwd)}.`
+      ? ` To stop exactly these processes (this ends their work; add --include-unidentified for ones that could not be identified): node ${shellQuote(companionScript)} state-lock stop-old --cwd ${shellQuote(cwd)}.`
       : "";
   return (
     `The state lock fence is not sealed: ${blockers.length} old plugin process${many ? "es" : ""} from before the fence ` +
@@ -127,25 +127,28 @@ export function acquireWithSealWait(lock, options = {}) {
     if (!(caught instanceof StateLockTimeout) || caught instanceof StateLockRefused) throw caught;
     error = caught;
   }
-  // Only a seal waiting for old plugin processes is a seal wait; a busy lock or
-  // a transient refusal keeps its own error.
-  if (!/not sealed/.test(error.reason ?? "")) throw error;
+  // The lock's own status decides whether this is a seal wait (old plugin
+  // processes listed); a busy lock or a transient refusal keeps its own error.
   let blockers = blockersOf(lock);
   if (!blockers) throw error;
 
-  const remainingMs = waitMs - (performance.now() - started);
-  if (remainingMs > 0) {
-    log(
-      `state lock: waiting up to ${Math.ceil(remainingMs / 1000)} s more for old plugin processes from before the fence: ` +
-        `${blockers.map((p) => blockerLine(p, describe)).join("; ")}`
-    );
-    try {
-      return lock.acquire({ deadlineMs: remainingMs });
-    } catch (caught) {
-      if (!(caught instanceof StateLockTimeout) || caught instanceof StateLockRefused) throw caught;
-      error = caught;
+  if (waitMs - (performance.now() - started) > 0) {
+    // Describing the blockers (ps) counts against the budget.
+    const shown = blockers.map((p) => blockerLine(p, describe)).join("; ");
+    const remainingMs = waitMs - (performance.now() - started);
+    if (remainingMs > 0) {
+      log(`state lock: waiting up to ${Math.ceil(remainingMs / 1000)} s more for old plugin processes from before the fence: ${shown}`);
+      try {
+        return lock.acquire({ deadlineMs: remainingMs });
+      } catch (caught) {
+        if (!(caught instanceof StateLockTimeout) || caught instanceof StateLockRefused) throw caught;
+        error = caught;
+      }
+      // Still a seal wait? If the old processes are gone and something else
+      // holds the lock now, say that plainly instead of naming stale blockers.
+      blockers = blockersOf(lock);
+      if (!blockers) throw error;
     }
-    blockers = blockersOf(lock) ?? blockers;
   }
   const waitedMs = performance.now() - started;
   const message = `${sealBlockedMessage(blockers, { describe, companionScript, cwd, waitedMs })} (${error.message})`;
