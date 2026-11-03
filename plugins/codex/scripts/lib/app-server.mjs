@@ -21,6 +21,8 @@ import { APPS_DISABLE_OVERRIDE, APPS_POLICY_ID, shouldAutoAcceptElicitation } fr
 const PLUGIN_MANIFEST_URL = new URL("../../.claude-plugin/plugin.json", import.meta.url);
 const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"));
 
+// Upper bound for one JSONL line (in characters); exceeding it is a loud error.
+export const MAX_LINE_CHARS = 64 * 1024 * 1024;
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
 
@@ -157,6 +159,9 @@ export class AppServerClientBase {
     this.sendMessage({ method, params });
   }
 
+  // #4653: JSONL is split on "\n" only. node:readline also splits on U+2028 and
+  // U+2029, which JSON.stringify leaves unescaped, so a long reply containing
+  // one was cut in the middle of a string and failed to parse.
   handleChunk(chunk) {
     this.lineBuffer += chunk;
     let newlineIndex = this.lineBuffer.indexOf("\n");
@@ -166,6 +171,23 @@ export class AppServerClientBase {
       this.handleLine(line);
       newlineIndex = this.lineBuffer.indexOf("\n");
     }
+    const limit = this.maxLineChars ?? MAX_LINE_CHARS;
+    if (this.lineBuffer.length > limit) {
+      const size = this.lineBuffer.length;
+      this.lineBuffer = "";
+      this.handleExit(
+        createProtocolError(
+          `codex app-server sent a JSONL line of at least ${size} characters without a newline; the limit is ${limit}.`
+        )
+      );
+    }
+  }
+
+  /** The stream ended: a last line without a trailing newline is still a message. */
+  flushLineBuffer() {
+    const line = this.lineBuffer;
+    this.lineBuffer = "";
+    this.handleLine(line);
   }
 
   handleLine(line) {
@@ -290,9 +312,11 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.handleExit(detail);
     });
 
-    this.readline = readline.createInterface({ input: this.proc.stdout });
-    this.readline.on("line", (line) => {
-      this.handleLine(line);
+    this.proc.stdout.on("data", (chunk) => {
+      this.handleChunk(chunk);
+    });
+    this.proc.stdout.on("end", () => {
+      this.flushLineBuffer();
     });
 
     await this.request("initialize", {
@@ -309,10 +333,6 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     }
 
     this.closed = true;
-
-    if (this.readline) {
-      this.readline.close();
-    }
 
     if (this.proc && !this.proc.killed) {
       this.proc.stdin.end();
@@ -447,6 +467,8 @@ export class CodexAppServerClient {
         }
         throw markBrokerTransportError(error);
       }
+      // A direct child that failed to initialize must not outlive the failure.
+      await client.close().catch(() => {});
       throw error;
     }
     return client;
