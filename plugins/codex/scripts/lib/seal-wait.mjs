@@ -2,32 +2,26 @@
 // plugin processes from before the fence (fenced-lock.mjs, #1916). Those are
 // alive by pid and start time, not stale, and could still write state, so the
 // fence is right to wait. What this module adds, in the consumer only:
-//   - commands that start work (task, review, ...) wait longer than the
-//     ordinary 10 s and say so on stderr while they wait;
-//   - when the wait still fails, the error names each blocker (user, parent,
-//     age, working directory) and the two routes: wait, or state-lock stop-old.
+//   - a command that starts work checks the fence once, up front, and waits
+//     for those processes up to a total of 60 s (a pre-flight; nothing later
+//     in the run waits), saying on stderr what it waits for;
+//   - when the wait still fails, the error names each such process (user,
+//     parent, age, working directory), says they are not stale, and gives the
+//     two routes: wait, or state-lock stop-old.
+// A caller that passes its own deadlineMs (the single-attempt final publication
+// in tracked-jobs.mjs) gets the plain lock behaviour: no wait, no diagnosis.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
 import { StateLockRefused, StateLockTimeout } from "./fenced-lock.mjs";
 
-export const DEFAULT_SEAL_WAIT_MS = 50_000;
+// Total time a start command spends on the lock, the ordinary 10 s deadline
+// included.
+export const DEFAULT_SEAL_WAIT_MS = 60_000;
 export const MAX_SEAL_WAIT_MS = 300_000;
 export const SEAL_WAIT_ENV = "CODEX_COMPANION_SEAL_WAIT_MS";
 
-// What the companion adds to the ordinary lock deadline for a command that
-// starts work. Hooks and read paths keep 0.
-let sealWaitMs = 0;
-
-export function setStateLockSealWait(ms) {
-  sealWaitMs = Number.isFinite(ms) && ms > 0 ? Math.min(ms, MAX_SEAL_WAIT_MS) : 0;
-}
-
-export function getStateLockSealWait() {
-  return sealWaitMs;
-}
-
-// The wait for commands that start work: the environment overrides the default
+// The total for commands that start work: the environment overrides the default
 // (0 switches the wait off).
 export function startCommandSealWaitMs(env = {}) {
   const raw = env[SEAL_WAIT_ENV];
@@ -42,11 +36,15 @@ export function startCommandSealWaitMs(env = {}) {
 export function describeProcess(pid) {
   const out = { user: null, ppid: null, running: null, cwd: null };
   try {
-    const text = execFileSync("ps", ["-o", "user=,ppid=,etime=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 }).trim();
-    const [user, ppid, etime] = text.split(/\s+/);
-    out.user = user ?? null;
-    out.ppid = ppid === undefined ? null : Number(ppid);
-    out.running = etime ?? null;
+    const text = execFileSync("ps", ["-o", "ppid=,etime=,user=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const [ppid, etime, ...user] = text.split(/\s+/);
+    out.ppid = /^\d+$/.test(ppid ?? "") ? Number(ppid) : null;
+    out.running = etime || null;
+    out.user = user.join(" ") || null;
   } catch {
     // gone or not readable
   }
@@ -56,6 +54,10 @@ export function describeProcess(pid) {
     // not Linux, or not ours to read
   }
   return out;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 function blockersOf(lock) {
@@ -72,7 +74,7 @@ function blockerLine(p, describe) {
   const what = p.script ? `${p.script}${p.sub ? ` ${p.sub}` : ""}` : `${p.comm ?? "unknown process"}${p.reason ? `, ${p.reason}` : ""}`;
   const bits = [
     d.user ? `user ${d.user}` : null,
-    d.ppid === null || d.ppid === undefined ? null : `parent ${d.ppid}`,
+    Number.isInteger(d.ppid) ? `parent ${d.ppid}` : null,
     d.running ? `running ${d.running}` : null,
     d.cwd ? `cwd ${d.cwd}` : null
   ].filter(Boolean);
@@ -80,56 +82,72 @@ function blockerLine(p, describe) {
 }
 
 export function sealBlockedMessage(blockers, { describe = describeProcess, companionScript = null, cwd = null, waitedMs = 0 } = {}) {
+  const many = blockers.length !== 1;
   const list = blockers.map((p) => blockerLine(p, describe)).join("; ");
-  const stop = companionScript && cwd ? ` To stop exactly these processes (this ends their work): node "${companionScript}" state-lock stop-old --cwd "${cwd}".` : "";
+  const stop =
+    companionScript && cwd
+      ? ` To stop exactly these processes (this ends their work): node ${shellQuote(companionScript)} state-lock stop-old --cwd ${shellQuote(cwd)}.`
+      : "";
   return (
-    `The state lock fence is not sealed: ${blockers.length} old plugin process${blockers.length === 1 ? "" : "es"} from before the fence ` +
-    `${blockers.length === 1 ? "is" : "are"} still running and could still write state, so new work waits for ${blockers.length === 1 ? "it" : "them"}` +
-    `${waitedMs > 0 ? ` (waited ${Math.round(waitedMs / 1000)} s)` : ""}. ` +
-    `${blockers.length === 1 ? "It is" : "They are"} not stale: alive by pid and start time. ${list}. ` +
-    `Wait for them to finish, then the lock seals by itself and the command can be run again.${stop}`
+    `The state lock fence is not sealed: ${blockers.length} old plugin process${many ? "es" : ""} from before the fence ` +
+    `${many ? "are" : "is"} still running and could still write state, so new work waits for ${many ? "them" : "it"}` +
+    `${waitedMs >= 1000 ? ` (waited ${Math.round(waitedMs / 1000)} s)` : ""}. ` +
+    `${many ? "They are" : "It is"} not stale: alive by pid and start time. ${list}. ` +
+    `Wait for ${many ? "them" : "it"} to finish, then the lock seals by itself and the command can be run again.${stop}`
   );
 }
 
-// acquire with the diagnosis. lock: openFencedLock result; options.deadlineMs as
-// for lock.acquire. Returns the handle or throws the original error, or for a
-// seal blocked by old processes a StateLockTimeout that names them.
+// acquire with the diagnosis. lock: an openFencedLock result. waitMs: the total
+// time to spend on the lock when old processes hold the fence (0 = the ordinary
+// deadline only). An explicit deadlineMs means the caller paces its own attempts:
+// plain acquire.
 export function acquireWithSealWait(lock, options = {}) {
   const {
     deadlineMs,
-    waitMs = sealWaitMs,
-    describe = describeProcess,
+    waitMs = 0,
+    describe: describeOne = describeProcess,
     log = (line) => process.stderr.write(`${line}\n`),
     companionScript = null,
     cwd = null
   } = options;
-  const acquireOptions = deadlineMs === undefined ? {} : { deadlineMs };
+  if (deadlineMs !== undefined) return lock.acquire({ deadlineMs });
+
+  // One ps per process however often it is shown.
+  const seen = new Map();
+  const describe = (pid) => {
+    if (!seen.has(pid)) seen.set(pid, describeOne(pid));
+    return seen.get(pid);
+  };
+
+  const started = performance.now();
   let error;
   try {
-    return lock.acquire(acquireOptions);
+    return lock.acquire({});
   } catch (caught) {
     if (!(caught instanceof StateLockTimeout) || caught instanceof StateLockRefused) throw caught;
     error = caught;
   }
+  // Only a seal waiting for old plugin processes is a seal wait; a busy lock or
+  // a transient refusal keeps its own error.
+  if (!/not sealed/.test(error.reason ?? "")) throw error;
   let blockers = blockersOf(lock);
   if (!blockers) throw error;
 
-  let waited = 0;
-  if (waitMs > 0) {
+  const remainingMs = waitMs - (performance.now() - started);
+  if (remainingMs > 0) {
     log(
-      `state lock: waiting up to ${Math.round(waitMs / 1000)} s for old plugin processes from before the fence: ` +
+      `state lock: waiting up to ${Math.ceil(remainingMs / 1000)} s more for old plugin processes from before the fence: ` +
         `${blockers.map((p) => blockerLine(p, describe)).join("; ")}`
     );
-    const started = performance.now();
     try {
-      return lock.acquire({ deadlineMs: waitMs });
+      return lock.acquire({ deadlineMs: remainingMs });
     } catch (caught) {
       if (!(caught instanceof StateLockTimeout) || caught instanceof StateLockRefused) throw caught;
       error = caught;
-      waited = performance.now() - started;
     }
     blockers = blockersOf(lock) ?? blockers;
   }
-  const message = `${sealBlockedMessage(blockers, { describe, companionScript, cwd, waitedMs: waited })} (${error.message})`;
-  throw Object.assign(new StateLockTimeout(message, error.reason), { refusal: error.refusal ?? null, blockers });
+  const waitedMs = performance.now() - started;
+  const message = `${sealBlockedMessage(blockers, { describe, companionScript, cwd, waitedMs })} (${error.message})`;
+  throw Object.assign(new StateLockTimeout(message, error.reason), { refusal: error.refusal ?? null, blockers, cause: error });
 }

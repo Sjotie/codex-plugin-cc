@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { StateLockTimeout, StateLockUnavailable, domainVerdict, openFencedLock } from "./fenced-lock.mjs";
-import { acquireWithSealWait } from "./seal-wait.mjs";
+import { acquireWithSealWait, startCommandSealWaitMs } from "./seal-wait.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -261,8 +261,8 @@ export function artifactReport(stateDir) {
 // and paces them itself (tracked-jobs.mjs); everything else keeps the default.
 function withStateLock(cwd, fn, lockOptions = {}) {
   const lock = openStateLock(cwd);
-  // #4648: an unsealed fence waits for old plugin processes; commands that start
-  // work wait longer for them and a failure names them (seal-wait.mjs).
+  // #4648: a failure on an unsealed fence names the old plugin processes it waits
+  // for (seal-wait.mjs); a caller-paced deadlineMs is left alone.
   const handle = acquireWithSealWait(lock, { deadlineMs: lockOptions.deadlineMs, companionScript: COMPANION_SCRIPT, cwd });
   try {
     ensureStateDir(cwd);
@@ -270,6 +270,16 @@ function withStateLock(cwd, fn, lockOptions = {}) {
   } finally {
     lock.release(handle);
   }
+}
+
+// #4648: the pre-flight of a command that starts work. If old plugin processes
+// from before the fence hold the seal, wait for them here, once (up to
+// CODEX_COMPANION_SEAL_WAIT_MS in total, default 60 s), and fail with the named
+// blockers. Any other lock failure surfaces here too: the first real write
+// would throw the same error, so failing now only saves a second wait.
+export function awaitStateLockSeal(cwd, waitMs = startCommandSealWaitMs(globalThis.process["env"])) {
+  const lock = openStateLock(cwd);
+  lock.release(acquireWithSealWait(lock, { waitMs, companionScript: COMPANION_SCRIPT, cwd }));
 }
 
 export function loadState(cwd) {

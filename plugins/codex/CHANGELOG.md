@@ -2,14 +2,16 @@
 
 ## Unreleased
 
-- A command that starts work (`task`, `review`, `adversarial-review`, `transfer`)
-  now waits up to 50 s (`CODEX_COMPANION_SEAL_WAIT_MS`, `0` switches it off)
-  for old plugin processes that hold an unsealed state lock fence, and says on
+- A command that starts work (`task`, `review`, `adversarial-review`) checks
+  the state lock fence once, up front. If old plugin processes from before the
+  fence hold the seal, it waits for them, up to 60 s in total
+  (`CODEX_COMPANION_SEAL_WAIT_MS`, `0` switches the wait off), and says on
   stderr what it waits for. When it still fails, the error names each such
   process with its user, parent, age and working directory, says they are
   alive by pid and start time (not stale), and gives the two routes: wait, or
-  `state-lock stop-old` (Homebase #4648). Hooks and read paths keep the 10 s
-  deadline.
+  `state-lock stop-old` (Homebase #4648). Nothing later in the run waits, and a
+  caller that paces its own attempts (the final publication of a job) keeps the
+  plain lock behaviour.
 
 ## 1.0.7-sjotie.25 (fork, Homebase #4653; 2026-11-03)
 

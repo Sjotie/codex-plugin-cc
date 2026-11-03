@@ -28,6 +28,7 @@ import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   assignJobWorkerPid,
+  awaitStateLockSeal,
   generateJobId,
   getConfig,
   listJobs,
@@ -50,7 +51,6 @@ import {
 import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
 import { sqliteRuntime } from "./lib/fenced-lock.mjs";
 import { runStateLockCommand } from "./lib/state-lock-cli.mjs";
-import { setStateLockSealWait, startCommandSealWaitMs } from "./lib/seal-wait.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -963,6 +963,7 @@ async function handleReviewCommand(argv, config) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
+  awaitStateLockSeal(workspaceRoot);
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
     base: options.base,
@@ -1014,6 +1015,7 @@ async function handleTask(argv) {
 
   const cwd = resolveTaskCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
+  awaitStateLockSeal(workspaceRoot);
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
@@ -1353,13 +1355,6 @@ async function main() {
   if (subcommandArgs.some((arg) => arg === "--help" || arg === "-h")) {
     printUsage();
     return;
-  }
-
-  // #4648: work that starts here waits for old plugin processes that hold the
-  // fence (default 50 s, or CODEX_COMPANION_SEAL_WAIT_MS) instead of failing
-  // after 10 s; status, result and the hooks keep the short deadline.
-  if (["review", "adversarial-review", "task", "transfer"].includes(subcommand)) {
-    setStateLockSealWait(startCommandSealWaitMs(process.env));
   }
 
   switch (subcommand) {
