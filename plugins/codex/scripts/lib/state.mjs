@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { StateLockTimeout, StateLockUnavailable, domainVerdict, openFencedLock } from "./fenced-lock.mjs";
+import { acquireWithSealWait } from "./seal-wait.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
 import { isProcessAlive } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -260,7 +261,9 @@ export function artifactReport(stateDir) {
 // and paces them itself (tracked-jobs.mjs); everything else keeps the default.
 function withStateLock(cwd, fn, lockOptions = {}) {
   const lock = openStateLock(cwd);
-  const handle = lock.acquire(lockOptions.deadlineMs === undefined ? {} : { deadlineMs: lockOptions.deadlineMs });
+  // #4648: an unsealed fence waits for old plugin processes; commands that start
+  // work wait longer for them and a failure names them (seal-wait.mjs).
+  const handle = acquireWithSealWait(lock, { deadlineMs: lockOptions.deadlineMs, companionScript: COMPANION_SCRIPT, cwd });
   try {
     ensureStateDir(cwd);
     return fn({ lock, handle });

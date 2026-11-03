@@ -50,6 +50,7 @@ import {
 import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
 import { sqliteRuntime } from "./lib/fenced-lock.mjs";
 import { runStateLockCommand } from "./lib/state-lock-cli.mjs";
+import { setStateLockSealWait, startCommandSealWaitMs } from "./lib/seal-wait.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -1352,6 +1353,13 @@ async function main() {
   if (subcommandArgs.some((arg) => arg === "--help" || arg === "-h")) {
     printUsage();
     return;
+  }
+
+  // #4648: work that starts here waits for old plugin processes that hold the
+  // fence (default 50 s, or CODEX_COMPANION_SEAL_WAIT_MS) instead of failing
+  // after 10 s; status, result and the hooks keep the short deadline.
+  if (["review", "adversarial-review", "task", "transfer"].includes(subcommand)) {
+    setStateLockSealWait(startCommandSealWaitMs(process.env));
   }
 
   switch (subcommand) {
