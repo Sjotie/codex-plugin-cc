@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.25 (fork, Homebase #4653; 2026-11-03)
+
+- The direct app-server client reads JSONL by `\n` only. It used
+  `node:readline`, which also splits on U+2028/U+2029; `JSON.stringify` leaves
+  those unescaped, so a long reply containing one was cut in the middle of a
+  string and failed with "Failed to parse codex app-server JSONL: Unterminated
+  string". A long line is now buffered across chunks and parsed whole, a last
+  line without newline is flushed at stream end, and a line above 64 Mi
+  characters fails with an error that names its size.
+- A direct app-server child whose `initialize` fails is now closed instead of
+  left running.
+
 ## 1.0.7-sjotie.24 (fork, Homebase #1762 and #1916; 2026-11-02)
 
 - The shared broker starts without `FACTORY_PROC_TAG` (Homebase #1762). A
