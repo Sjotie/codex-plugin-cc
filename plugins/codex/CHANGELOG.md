@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.7-sjotie.26 (fork, Homebase #4648; 2026-11-03)
 
 - A command that starts work (`task`, `review`, `adversarial-review`) checks
   the state lock fence once, up front. If old plugin processes from before the
