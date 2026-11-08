@@ -712,6 +712,26 @@ test("D: the manifest names fixtures and evidence whose hashes match", options, 
   }
 });
 
+// Every admitted version has positive fixtures and a negative mismatch proof:
+// its own measured record shapes admit (with the context record after the
+// success record, as 2.1.308 writes it); the same records under an unlisted
+// version refuse.
+for (const e of JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex/scripts/lib/provider-receipts.json"), "utf8")).entries) {
+  test(`D: ${e.provider} ${e.version} ${e.platform}/${e.arch} fixtures admit, an unlisted version refuses`, options, (t) => {
+    const shapes = JSON.parse(fs.readFileSync(path.join(defaultRepo, e.fixtures), "utf8"));
+    for (const version of [e.version, "0.0.1"]) {
+      const f = fixture(t), r = f.runHook({}, undefined, { omit: true });
+      assert.equal(r.status, 0, r.stderr);
+      const values = { sessionId: "session-current", cwd: f.workspace, source: "startup", exitCode: r.status, stdout: r.stdout, content: "context", toolUseID: "fixture-hook" };
+      const records = [fill(shapes.hookSuccess, values), fill(shapes.additionalContext, values)].map((record) => ({ ...record, version }));
+      fs.writeFileSync(f.transcript, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+      const admitted = version === e.version;
+      assert.equal(f.consume().acquired, admitted, `Bash under ${version}`);
+      assert.equal(f.activate("Stop").acquired, admitted, `Stop under ${version}`);
+    }
+  });
+}
+
 // The queued job the consume helper seeds, as a worker would receive it.
 function seedJob(f) {
   const seeded = f.consume({}, "seed-job");

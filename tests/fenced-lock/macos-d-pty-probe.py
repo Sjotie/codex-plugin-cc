@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""Native proof of design D (#1916) on macOS with the real Claude Code 2.1.301.
+"""Native receipt proof of one Claude Code version on macOS (#1916, design D).
 
-Drives one owned interactive Claude session in a pseudo-terminal, with the
+This is the per-version proof that `provider-receipts.json` asks for: run it
+against the exact Claude Code version under test, with that version's entry
+already in the checkout's manifest; only a fully green run may back the entry.
+
+Drives owned interactive Claude sessions in a pseudo-terminal, with the
 product plugin byte-copied from this checkout and its fixed hooks unchanged:
 
   startup -> Bash probe -> start a background worker -> manual /compact ->
   Bash probe -> auto compact (small auto-compact window, filler output) ->
-  worker publishes -> Bash probe -> /exit
+  worker publishes -> Bash probe -> /clear -> Bash probe -> /exit
+  resume of the cleared session -> Bash probe -> /exit
+  three fresh startups whose SessionStart hook exits one, is killed after its
+  stdout, or writes a partial stdout -> Bash probe must refuse -> /exit
 
 and measures, for every SessionStart, the latency from the hook's exit event
 to the moment its receipt line R (this attempt's token) is in the transcript.
+It also checks that no capability or attempt id reaches model input: in every
+transcript these ids appear only in the raw stdout of the fixed hook's record.
 
 Run on the Mac, from the plugin checkout, with an existing Claude login:
 
-    uv run python tests/fenced-lock/macos-d-pty-probe.py
+    uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version 2.1.308
 
-Options: --auto-window TOKENS (default 20000), --max-fills N (default 60),
+Options: --expect-version X.Y.Z (required; must equal `claude --version` and
+have a darwin/arm64 manifest entry whose binarySha256 is this binary's),
+--auto-window TOKENS (default 20000), --max-fills N (default 60),
 --auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
 <fixture>/summary.json and prints its path; remove the directory when done.
 Exit status 0 only when every check passed. It stops only the Claude process
@@ -43,7 +54,6 @@ import threading
 import time
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-EXPECTED_VERSION = "2.1.301"
 COMMAND = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionStart'
 
 
@@ -83,8 +93,21 @@ if (root && m) {
   const log = (row) => fs.appendFileSync(`${root}/events.jsonl`, JSON.stringify({ ...row, event, pid: process.pid, sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? null }) + "\n");
   log({ kind: "hook-start", at: Date.now() });
   let token = null;
+  // Completion faults, only on SessionStart and only when the controller names
+  // one: after the hook wrote its token, exit one, SIGKILL itself, or deliver
+  // only the first half of that stdout and exit zero.
+  let fault = null;
+  try { fault = event === "SessionStart" ? fs.readFileSync(`${root}/fault`, "utf8").trim() || null : null; } catch {}
+  if (fault) log({ kind: "fault", at: Date.now(), fault });
   const write = process.stdout.write.bind(process.stdout);
-  process.stdout.write = (chunk, ...rest) => { try { const t = JSON.parse(String(chunk)).codexStateLockAdmission; if (t) token = t; } catch {} return write(chunk, ...rest); };
+  process.stdout.write = (chunk, ...rest) => {
+    let t = null; try { t = JSON.parse(String(chunk)).codexStateLockAdmission; } catch {}
+    if (t) token = t;
+    if (t && fault === "partial") { const text = String(chunk); return write(text.slice(0, Math.floor(text.length / 2)), () => process.exit(0)); }
+    if (t && fault === "exit-one") return write(chunk, () => process.exit(1));
+    if (t && fault === "killed") return write(chunk, () => { log({ kind: "hook-killed", at: Date.now(), attemptId: t.attemptId ?? null }); process.kill(process.pid, "SIGKILL"); });
+    return write(chunk, ...rest);
+  };
   // The hook exports Claude's transcript_path to CLAUDE_ENV_FILE; read it back
   // instead of guessing Claude's project-directory naming.
   const transcriptPath = () => { try { const m = [...fs.readFileSync(process.env.CLAUDE_ENV_FILE, "utf8").matchAll(/^export CODEX_COMPANION_TRANSCRIPT_PATH='(.*)'$/gm)].at(-1); return m ? m[1] : null; } catch { return null; } };
@@ -105,7 +128,7 @@ const state = await import(stateUrl);
 let acquired = false, wrote = false, error = null;
 try { const lock = state.openStateLock(root); const h = lock.acquire({ deadlineMs: 3000 }); acquired = true; lock.release(h); state.setConfig(root, "dProbeAt", Date.now()); wrote = true; }
 catch (e) { error = { code: e.code ?? null, reason: String(e.reason ?? e.message).slice(0, 160) }; }
-fs.writeFileSync(`${root}/probe-${Date.now()}.json`, JSON.stringify({ at: Date.now(), acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID) }));
+fs.writeFileSync(`${root}/probe-${Date.now()}.json`, JSON.stringify({ at: Date.now(), acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID), transcriptPath: process.env.CODEX_COMPANION_TRANSCRIPT_PATH ?? null }));
 console.log(acquired && wrote ? "PROBE OK" : "PROBE REFUSED");
 """
 
@@ -222,9 +245,14 @@ class TranscriptWatch(threading.Thread):
                     a = r.get("attachment") or {}
                     if a.get("command") != COMMAND:
                         continue
-                    token = (json.loads(a.get("stdout") or "{}") or {}).get("codexStateLockAdmission") or {}
+                    try:
+                        token, parsed = (json.loads(a.get("stdout") or "{}") or {}).get("codexStateLockAdmission") or {}, True
+                    except ValueError:
+                        token, parsed = {}, False
                     key = token.get("attemptId") or f"untokened-{len(self.seen)}"
-                    self.seen.setdefault(key, {"seenAt": now, "type": a.get("type"), "exitCode": a.get("exitCode"), "hookName": a.get("hookName"), "durationMs": a.get("durationMs"), "version": r.get("version"), "source": token.get("source")})
+                    self.seen.setdefault(key, {"seenAt": now, "type": a.get("type"), "exitCode": a.get("exitCode"), "hookName": a.get("hookName"), "durationMs": a.get("durationMs"), "version": r.get("version"), "source": token.get("source"),
+                                               "stdoutParsed": parsed, "stdoutHasToken": bool(token), "fieldTypes": {k: type(v).__name__ for k, v in a.items() if k in ("type", "hookEvent", "hookName", "exitCode", "command", "stdout")},
+                                               "recordFields": {k: type(r.get(k)).__name__ for k in ("type", "version", "sessionId", "cwd", "isSidechain")}})
                 except ValueError:
                     pass
             time.sleep(0.002)
@@ -233,16 +261,24 @@ class TranscriptWatch(threading.Thread):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
+    ap.add_argument("--expect-version", required=True)
     ap.add_argument("--auto-window", type=int, default=20000)
     ap.add_argument("--max-fills", type=int, default=60)
     ap.add_argument("--auto-minutes", type=float, default=25)
     args = ap.parse_args()
+    expected = args.expect_version
 
     assert sys.platform == "darwin", "native macOS only"
     assert platform.machine() == "arm64", "the receipt manifest proves darwin/arm64 only"
     version = subprocess.run([args.claude, "--version"], capture_output=True, text=True).stdout.strip()
-    assert version.startswith(EXPECTED_VERSION), f"Claude Code {EXPECTED_VERSION} required, found {version!r}"
+    assert version.split(" ")[0] == expected, f"Claude Code {expected} required, found {version!r}"
     claude_bin = os.path.realpath(shutil.which(args.claude) or args.claude)
+    # The product admits only manifest versions, so the entry under test must
+    # already be in this checkout; its binary hash must be the measured binary.
+    manifest = json.load(open(os.path.join(REPO, "plugins/codex/scripts/lib/provider-receipts.json")))
+    entry = [e for e in manifest["entries"] if (e["version"], e["platform"], e["arch"]) == (expected, "darwin", "arm64")]
+    assert len(entry) == 1, f"provider-receipts.json needs exactly one darwin/arm64 entry for {expected}"
+    assert entry[0]["binarySha256"] == file_sha(claude_bin), "manifest binarySha256 is not the measured Claude binary"
 
     root = os.path.realpath(tempfile.mkdtemp(prefix="d-pty-probe-"))
     plugin = os.path.join(root, "plugin")
@@ -308,6 +344,13 @@ def main():
     term = Pty(argv, root, env, os.path.join(root, "pty.log"))
     trusted = False
 
+    def relaunch(extra, name):
+        """Stop nothing: the previous owned Claude has exited. Start the next."""
+        nonlocal term, trusted
+        assert term.exited(), "previous Claude still running"
+        trusted = False
+        term = Pty(argv + extra, root, env, os.path.join(root, f"pty-{name}.log"))
+
     def wait(predicate, label, timeout=120):
         nonlocal trusted
         end = time.time() + timeout
@@ -336,17 +379,21 @@ def main():
     def session_start(source, after):
         return next((e for e in events("hook-exit", "SessionStart") if e["at"] > after and e.get("source") == source), None)
 
-    watch = None
+    # One watch per transcript: /clear and every relaunch start a new one.
+    watches = {}
+
+    def watch_for(path):
+        if path not in watches:
+            watches[path] = TranscriptWatch(path)
+            watches[path].start()
+            summary.setdefault("transcriptPathShas", []).append(sha(path))
+        return watches[path]
 
     def receipt_latency(start_exit, latency=True):
-        nonlocal watch
-        if watch is None:
-            path = start_exit.get("transcriptPath")
-            if not path:
-                raise RuntimeError("SessionStart exported no transcript path")
-            watch = TranscriptWatch(path)
-            watch.start()
-            summary["transcriptPathSha"] = sha(path)
+        path = start_exit.get("transcriptPath")
+        if not path:
+            raise RuntimeError("SessionStart exported no transcript path")
+        watch = watch_for(path)
         try:
             seen = wait(lambda: watch.seen.get(start_exit["attemptId"]), f"receipt line of {start_exit['source']}", 30)
         except RuntimeError:
@@ -370,7 +417,11 @@ def main():
         before = len(probes())
         turn("/d-probe", f"{label} probe")
         wait(lambda: len(probes()) > before, f"{label} probe file")
-        p = probes()[-1]
+        p = dict(probes()[-1])
+        transcript = p.pop("transcriptPath", None)
+        p["transcriptPathSha"] = sha(transcript)
+        if transcript:
+            watch_for(transcript)
         summary["phases"].append({"phase": label, "probe": p})
         persist()
         return p
@@ -442,11 +493,76 @@ def main():
         summary["worker"] = worker_result
         p3 = run_probe("after auto compact")
 
-        term.send("/exit\r")
-        wait(lambda: term.exited() or events("hook-exit", "SessionEnd"), "SessionEnd", 60)
+        # /clear: End of the old session, then SessionStart(clear) with a new
+        # session and a new capability. Like startup, the new transcript (and
+        # so its receipt line) exists only with the first turn.
+        t_clear = time.time() * 1000
+        term.send("/clear\r")
+        clear_exit = wait(lambda: session_start("clear", t_clear), "clear SessionStart", 120)
+        p4 = run_probe("after clear")
+        clear = receipt_latency(clear_exit, latency=False)
+        summary["phases"].append({"phase": "clear", "sessionStart": clear})
+        clear_end = [e for e in events("hook-exit", "SessionEnd") if t_clear < e["at"] <= clear_exit["at"]]
+
+        def leave(label):
+            term.send("/exit\r")
+            wait(lambda: term.exited(), f"{label} exit", 60)
+
+        leave("after clear")
+
+        # Resume of the cleared session in a new owned Claude process.
+        t_resume = time.time() * 1000
+        relaunch(["--resume", clear_exit["sessionId"]], "resume")
+        resume_exit = wait(lambda: session_start("resume", t_resume), "resume SessionStart", 120)
+        p5 = run_probe("after resume")
+        resume = receipt_latency(resume_exit, latency=False)
+        summary["phases"].append({"phase": "resume", "sessionStart": resume})
+        leave("after resume")
+
+        # Completion faults, each in its own fresh startup: the fixed hook has
+        # written its token to stdout, then exits one, is killed, or delivered
+        # only half of it. Claude may still label these hook_success; the
+        # product must refuse on the recorded receipt itself.
+        faults, fault_paths = {}, set()
+        for fault in ("exit-one", "killed", "partial"):
+            open(os.path.join(root, "fault"), "w").write(fault)
+            t_fault = time.time() * 1000
+            relaunch([], fault)
+            done_kind = "hook-killed" if fault == "killed" else "hook-exit"
+            wait(lambda: any(e["at"] > t_fault for e in events(done_kind, "SessionStart")), f"{fault} SessionStart", 120)
+            os.unlink(os.path.join(root, "fault"))
+            pf = run_probe(f"fault {fault}")
+            transcript = next((p.get("transcriptPath") for p in reversed(probes()) if p["at"] == pf["at"]), None)
+            rows = []
+            if transcript:
+                fault_paths.add(transcript)
+                watch = watch_for(transcript)
+                wait(lambda: watch.seen, f"{fault} receipt line", 30)
+                rows = [{k: v for k, v in row.items() if k in ("type", "exitCode", "hookName", "version", "stdoutParsed", "stdoutHasToken")} for row in watch.seen.values()]
+            faults[fault] = {"probe": pf, "recordedReceipts": rows}
+            summary["phases"].append({"phase": f"fault {fault}", "probe": pf, "recordedReceipts": rows})
+            persist()
+            leave(f"fault {fault}")
+        summary["faults"] = faults
+
+        # Proof never in model input: every transcript line that names one of
+        # our capability or attempt ids is the fixed hook's raw receipt record.
+        ids = {e[k] for e in events() for k in ("attemptId", "capabilityId") if e.get(k)}
+        leaks = 0
+        for path in watches:
+            for r in read_jsonl(path):
+                text = json.dumps(r)
+                if any(i in text for i in ids) and (r.get("attachment") or {}).get("command") != COMMAND:
+                    leaks += 1
+        summary["proofLeaks"] = leaks
 
         stops = events("hook-exit", "Stop")
         caps = {p1.get("capabilitySha"), p2.get("capabilitySha"), p3.get("capabilitySha")}
+        positive = [s for s in (startup, manual, auto, clear, resume) if s]
+        rows = [row for w in watches.values() for row in w.seen.values()]
+        positive_rows = [row for path, w in watches.items() if path not in fault_paths for row in w.seen.values() if row.get("stdoutHasToken")]
+        want_fields = {"type": "str", "hookEvent": "str", "hookName": "str", "exitCode": "int", "command": "str", "stdout": "str"}
+        want_record = {"type": "str", "version": "str", "sessionId": "str", "cwd": "str", "isSidechain": "bool"}
         summary["checks"] = {
             "startupProbeAdmitted": p1["acquired"] and p1["wrote"],
             "manualCompactKeepsC": manual["capabilitySha"] == startup["capabilitySha"] and manual["receiptExitCode"] == 0,
@@ -458,8 +574,20 @@ def main():
             "workerPublishedOverCompact": worker_result.get("published") is True and worker_result.get("storedStatus") == "completed" and worker_result.get("storedRendered") is True,
             "workerLogKeptResult": worker_result.get("logHasResult") is True,
             "stopHooksSucceeded": bool(stops) and all(e.get("code") == 0 for e in stops),
-            "sessionEndSucceeded": all(e.get("code") == 0 for e in events("hook-exit", "SessionEnd")),
-            "receiptVersionProven": all(s.get("receiptVersion") == EXPECTED_VERSION for s in (startup, manual, auto) if s),
+            "sessionEndSucceeded": bool(events("hook-exit", "SessionEnd")) and all(e.get("code") == 0 for e in events("hook-exit", "SessionEnd")),
+            "clearEndedOldSession": bool(clear_end) and all(e.get("code") == 0 for e in clear_end),
+            "bashAfterClearAdmitted": p4["acquired"] and p4["wrote"],
+            "clearNewCapability": clear["receiptExitCode"] == 0 and p4.get("capabilitySha") not in caps,
+            "bashAfterResumeAdmitted": p5["acquired"] and p5["wrote"],
+            "resumeNewCapability": resume["receiptExitCode"] == 0 and p5.get("capabilitySha") not in caps | {p4.get("capabilitySha")},
+            "exitOneRefused": not faults["exit-one"]["probe"]["wrote"],
+            "killedRefused": not faults["killed"]["probe"]["wrote"],
+            "partialRefused": not faults["partial"]["probe"]["wrote"],
+            "faultReceiptsRecorded": all(f["recordedReceipts"] for f in faults.values()),
+            "receiptVersionProven": bool(rows) and all(row.get("version") == expected for row in rows),
+            "receiptFieldsPresent": all(s["receiptType"] == "hook_success" for s in positive) and
+                bool(positive_rows) and all(row["fieldTypes"] == want_fields and row["recordFields"] == want_record for row in positive_rows),
+            "noProofInModelInput": leaks == 0,
         }
         summary["latencyMs"] = {label: s["latencyHookExitToReceiptMs"] for label, s in (("manual compact", manual), ("auto compact", auto)) if s}
         summary["passed"] = all(summary["checks"].values())
@@ -467,8 +595,8 @@ def main():
         summary["passed"] = False
         summary["failure"] = str(error)
     finally:
-        if watch:
-            watch.running = False
+        for w in watches.values():
+            w.running = False
         term.stop()
         summary["ownClaudeStopped"] = term.exited()
         persist()
