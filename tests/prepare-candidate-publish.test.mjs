@@ -35,10 +35,10 @@ function checkout(t) {
 // Calls publish_candidate with the manifest bytes as read at the run's start.
 // prelude: Python run after the import, with m (the probe), a (the input), os,
 // signal and time in scope; it injects a fault or a pause.
-function driverInput(c, startBytes, { failManifestReplace = false, changeAfterLink = null, prelude = "", version = VERSION, name = "input" } = {}) {
+function driverInput(c, startBytes, { failManifestReplace = false, changeAfterLink = null, prelude = "", version = VERSION, name = "input", deliver = false } = {}) {
   const input = path.join(c.root, `${name}.json`);
   const candidate = { ...entry(version), evidenceCommit: "0".repeat(40), evidenceSummarySha256: "0".repeat(64), fixturesSha256: "0".repeat(64) };
-  fs.writeFileSync(input, JSON.stringify({ probe, repo: c.repo, root: c.root, startBytes, candidate, failManifestReplace, changeAfterLink, prelude }));
+  fs.writeFileSync(input, JSON.stringify({ probe, repo: c.repo, root: c.root, startBytes, candidate, failManifestReplace, changeAfterLink, prelude, deliver }));
   return input;
 }
 const result = (stdout, stderr) => ({ ...JSON.parse(stdout.trim().split("\n").at(-1)), stderr });
@@ -53,7 +53,7 @@ function publishAsync(c, startBytes, opts) {
   const child = spawn(python, ["-I", "-B", "-c", DRIVER, driverInput(c, startBytes, opts)], { stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   child.stdout.on("data", (d) => { stdout += d; }); child.stderr.on("data", (d) => { stderr += d; });
-  return new Promise((resolve) => child.once("close", (status) => { assert.equal(status, 0, stderr); resolve(result(stdout, stderr)); }));
+  return new Promise((resolve, reject) => child.once("close", (status) => status === 0 ? resolve(result(stdout, stderr)) : reject(new Error(`driver exited ${status}: ${stderr}`))));
 }
 
 const DRIVER = `
@@ -75,14 +75,18 @@ if a["changeAfterLink"]:
     os.link = link
 exec(a["prelude"])
 try:
-    written = m.publish_candidate(a["repo"], a["startBytes"].encode(), a["candidate"], "e" * 40, '{"shapes": 1}\\n', '{"evidence": 1}\\n')
-    print(json.dumps({"ok": True, "written": written}))
+    deferred = None if a.get("deliver") else []
+    # Only where the function takes it: the same driver runs against older probes for red proofs.
+    import inspect
+    extra = (deferred,) if "deferred" in inspect.signature(m.publish_candidate).parameters else ()
+    written = m.publish_candidate(a["repo"], a["startBytes"].encode(), a["candidate"], "e" * 40, '{"shapes": 1}\\n', '{"evidence": 1}\\n', *extra)
+    print(json.dumps({"ok": True, "written": written, "deferred": deferred}))
 except Exception as e:
     print(json.dumps({"ok": False, "error": str(e)}))
 `;
 
 const leftovers = (c) => [path.dirname(MANIFEST), path.dirname(FIXTURES), path.dirname(EVIDENCE)]
-  .flatMap((dir) => fs.readdirSync(path.join(c.repo, dir)).filter((n) => n.includes(".candidate-")));
+  .flatMap((dir) => fs.readdirSync(path.join(c.repo, dir)).filter((n) => n.includes(".candidate-") || n.includes(".rollback-")));
 
 test("publish: a clean checkout gets the fixtures, the evidence and the completed entry", options, (t) => {
   const c = checkout(t);
@@ -125,7 +129,7 @@ for (const rel of [FIXTURES, EVIDENCE]) {
     fs.writeFileSync(path.join(c.repo, rel), "earlier\n");
     const r = publish(c, c.read(MANIFEST));
     assert.equal(r.ok, false);
-    assert.match(r.error, new RegExp(`left by an earlier publication: ${rel.replace(/[.]/g, "\\.")}`));
+    assert.match(r.error, new RegExp(`already in the checkout: ${rel.replace(/[.]/g, "\\.")}`));
     assert.equal(c.read(rel), "earlier\n");
     assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
     for (const other of [FIXTURES, EVIDENCE].filter((x) => x !== rel)) assert.equal(c.exists(other), false);
@@ -174,8 +178,8 @@ test("publish: a manifest change while the new files are placed refuses and remo
   assert.deepEqual(leftovers(c), []);
 });
 
-// The commit runs with SIGTERM/SIGHUP/SIGINT blocked: a signal that comes in
-// during it is handled after it, and the publication is complete.
+// SIGTERM/SIGHUP/SIGINT are only recorded during publication: one that comes
+// in during the commit is delivered after it, with the publication complete.
 for (const [label, prelude] of [
   ...["SIGTERM", "SIGHUP", "SIGINT"].map((sig) => [`${sig} right after the first link`, `real_link = os.link
 def link(src, dst, *rest, **kw):
@@ -193,6 +197,7 @@ os.replace = replace`]
     const r = publish(c, c.read(MANIFEST), { prelude });
     assert.equal(r.ok, true, r.error);
     assert.match(r.stderr, /signal \d+ came in during the commit; the publication is complete/);
+    assert.equal(r.deferred.length, 1, "the caller gets the signal to deliver");
     assert.deepEqual(JSON.parse(c.read(MANIFEST)).entries.map((e) => e.version), ["2.1.301", VERSION]);
     assert.equal(c.exists(FIXTURES), true);
     assert.equal(c.exists(EVIDENCE), true);
@@ -327,7 +332,9 @@ test("publish: a second publication after the first finished refuses", options, 
   const after = c.read(MANIFEST);
   const r = publish(c, start);
   assert.equal(r.ok, false);
-  assert.match(r.error, /left by an earlier publication/);
+  // The manifest is what it says first: the other publication changed it.
+  assert.match(r.error, /provider-receipts\.json changed during the run; nothing written/);
+  assert.equal(c.read(FIXTURES), '{"shapes": 1}\n');
   assert.equal(c.read(MANIFEST), after);
 });
 
@@ -337,7 +344,7 @@ test("publish: a temp left by a killed publication is named, not overwritten", o
   fs.writeFileSync(path.join(c.repo, stray), "stray\n");
   const r = publish(c, c.read(MANIFEST));
   assert.equal(r.ok, false);
-  assert.match(r.error, new RegExp(`left by an earlier publication: ${stray.replace(/[.]/g, "\\.")}`));
+  assert.match(r.error, new RegExp(`already in the checkout: ${stray.replace(/[.]/g, "\\.")}`));
   assert.equal(fs.readFileSync(path.join(c.repo, stray), "utf8"), "stray\n");
   assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
 });
@@ -359,4 +366,32 @@ os.link = link` });
   assert.equal(c.exists(FIXTURES), true);
   assert.equal(c.exists(EVIDENCE), true);
   assert.deepEqual(JSON.parse(c.read(MANIFEST)).entries.map((e) => e.version), ["2.1.301", VERSION]);
+});
+
+test("publish: without a caller to take it, a signal in the commit ends the process after the publication", options, (t) => {
+  const c = checkout(t);
+  const input = driverInput(c, c.read(MANIFEST), { deliver: true, prelude: `real_link = os.link
+def link(src, dst, *rest, **kw):
+    real_link(src, dst, *rest, **kw)
+    os.kill(os.getpid(), signal.SIGTERM)
+os.link = link` });
+  const r = spawnSync(python, ["-I", "-B", "-c", DRIVER, input], { encoding: "utf8" });
+  assert.equal(r.signal, "SIGTERM", `status ${r.status}: ${r.stderr}`);
+  assert.deepEqual(JSON.parse(c.read(MANIFEST)).entries.map((e) => e.version), ["2.1.301", VERSION]);
+  assert.equal(c.exists(FIXTURES), true);
+  assert.equal(c.exists(EVIDENCE), true);
+  assert.deepEqual(leftovers(c), []);
+});
+
+test("publish: a failing rollback step does not replace the commit's own error", options, (t) => {
+  const c = checkout(t);
+  const r = publish(c, c.read(MANIFEST), { failManifestReplace: true, prelude: `real_rename = os.rename
+def rename(src, dst, *rest, **kw):
+    if ".rollback-" in str(dst) and str(src).endswith(".json"):
+        raise PermissionError(13, "Permission denied")
+    return real_rename(src, dst, *rest, **kw)
+os.rename = rename` });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /injected: manifest replace failed/);
+  assert.match(r.stderr, /rollback could not remove: .*claude-code-9\.9\.9/);
 });
