@@ -1,0 +1,174 @@
+{
+ "ticket": 1916,
+ "kind": "native-notice-proof",
+ "release": "1.0.7-sjotie.28",
+ "provider": "claude-code",
+ "version": "2.1.308",
+ "platform": "darwin",
+ "arch": "arm64",
+ "evidenceCommit": "84c3ce5c295130812f6c99706f59a24139cff65f",
+ "note": "Two native runs on the Mac, one job (exit 0), product bytes of evidenceCommit. (1) tests/fenced-lock/macos-d-pty-probe.py as committed, proven 2.1.308: every check green and no hook_system_message record in any transcript. (2) A variant of that probe, generated outside the repository, that switches only the run copy's provider-receipts.json between owned sessions (as a plugin or Claude update would) and adds a rescue attempt (codex-companion task --background): P1 startup proven, U2 resume unproven, P3 resume proven, U4 startup unproven. On resume the screen shows earlier turns again, so the transcript records since the phase start decide there. Codex quota was empty during the run, so a proven rescue proves admission and the job record, not a Codex answer. Hashes only; no paths, ids or tokens.",
+ "committedProbe": {
+  "harnessSha256": "2ef0cddc4b22a9593a02e427f587c0d26de7d190e29483e05df028a134e51469",
+  "claudeBinarySha256": "ca923c86ac84b30574a82331a05b6e066c27477a926ceaffe46a845a33e4dd37",
+  "passed": true,
+  "failedChecks": [],
+  "checks": {
+   "startupProbeAdmitted": true,
+   "manualCompactKeepsC": true,
+   "bashAfterManualCompactAdmitted": true,
+   "autoCompactObserved": true,
+   "autoCompactKeepsC": true,
+   "bashAfterAutoCompactAdmitted": true,
+   "bashKeptOneEnvelope": true,
+   "workerPublishedOverCompact": true,
+   "workerLogKeptResult": true,
+   "stopHooksSucceeded": true,
+   "sessionEndSucceeded": true,
+   "clearEndedOldSession": true,
+   "bashAfterClearAdmitted": true,
+   "clearNewCapability": true,
+   "bashAfterResumeAdmitted": true,
+   "resumeNewCapability": true,
+   "exitOneRefused": true,
+   "killedRefused": true,
+   "partialRefused": true,
+   "faultReceiptsRecorded": true,
+   "receiptVersionProven": true,
+   "receiptFieldsPresent": true,
+   "noProofInModelInput": true,
+   "contextMergedWithOtherHook": true
+  },
+  "hookSystemMessageRecords": 0,
+  "transcripts": 5
+ },
+ "noticeVariant": {
+  "variantGeneratorSha256": "eeffe8a065e842b114925073bd74891d0d9cc43212829dbf69b9dae94162dbde",
+  "variantSha256": "0364b10222242902f96b8c185b2ecb33cec09851c4ead0c790b5bb24fd115e78",
+  "passed": true,
+  "checks": {
+   "P1noNotice": true,
+   "P1probeWrote": true,
+   "P1rescueQueued": true,
+   "P1noNoticeOnScreen": true,
+   "U2noticeRecord": true,
+   "U2probeRefused": true,
+   "U2rescueRefused": true,
+   "P3noNotice": true,
+   "P3probeWrote": true,
+   "P3rescueQueued": true,
+   "U4noticeRecord": true,
+   "U4probeRefused": true,
+   "U4rescueRefused": true,
+   "U4noticeOnScreen": true
+  },
+  "noticeOnScreen": {
+   "P1": false,
+   "U2": true,
+   "P3": false,
+   "U4": true
+  },
+  "phases": [
+   {
+    "phase": "P1 proven",
+    "probe": {
+     "acquired": true,
+     "wrote": true
+    }
+   },
+   {
+    "phase": "P1 proven",
+    "rescue": {
+     "exit": 0,
+     "admissionRefused": false,
+     "jobQueued": true
+    }
+   },
+   {
+    "phase": "P1 notices",
+    "notices": []
+   },
+   {
+    "phase": "U2 unproven",
+    "probe": {
+     "acquired": false,
+     "wrote": false,
+     "refusal": "admission refused (Session admission refused: latest provider receipt not proven)"
+    }
+   },
+   {
+    "phase": "U2 unproven",
+    "rescue": {
+     "exit": 1,
+     "admissionRefused": true,
+     "jobQueued": false
+    }
+   },
+   {
+    "phase": "U2 notices",
+    "notices": [
+     {
+      "hookName": "SessionStart:resume",
+      "namesVersion": true,
+      "namesRoute": true,
+      "namesRefusal": true,
+      "contentSha": "b228fd9f790a1a01"
+     }
+    ]
+   },
+   {
+    "phase": "P3 proven",
+    "probe": {
+     "acquired": true,
+     "wrote": true
+    }
+   },
+   {
+    "phase": "P3 proven",
+    "rescue": {
+     "exit": 0,
+     "admissionRefused": false,
+     "jobQueued": true
+    }
+   },
+   {
+    "phase": "P3 notices",
+    "notices": []
+   },
+   {
+    "phase": "U4 unproven",
+    "probe": {
+     "acquired": false,
+     "wrote": false,
+     "refusal": "admission refused (Session admission refused: latest provider receipt not proven)"
+    }
+   },
+   {
+    "phase": "U4 unproven",
+    "rescue": {
+     "exit": 1,
+     "admissionRefused": true,
+     "jobQueued": false
+    }
+   },
+   {
+    "phase": "U4 notices",
+    "notices": [
+     {
+      "hookName": "SessionStart:startup",
+      "namesVersion": true,
+      "namesRoute": true,
+      "namesRefusal": true,
+      "contentSha": "b228fd9f790a1a01"
+     }
+    ]
+   }
+  ],
+  "noticeText": "Codex Companion: Claude Code 2.1.308 on darwin/arm64 has no receipt proof in this plugin's provider-receipts.json, so every Codex state write here (rescue, review, setup, job updates) refuses with 'admission refused'. Retrying does not help. The fix is a plugin release that lists it, after a native receipt proof on this platform in the codex-plugin-cc source repository (not the installed plugin): uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version 2.1.308 --prepare-candidate.",
+  "afterRun": {
+   "jobsInIndex": 2,
+   "jobsStatus": "cancelled at SessionEnd (Stopped because the Claude session ended.)",
+   "unprovenPhasesQueuedJobs": 0
+  }
+ }
+}

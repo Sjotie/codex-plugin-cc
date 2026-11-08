@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased (fork, Homebase #1916)
+## 1.0.7-sjotie.28 (fork, Homebase #1916; 2026-11-08)
+
+Native proof on darwin/arm64 with Claude Code 2.1.308:
+`docs/releases/sjotie.28-notice-evidence.json` (proven: silent, writes and
+rescue admitted; unproven: the notice with its route, writes and rescue
+refused; both at startup and on resume after an update).
 
 - macOS: when the running Claude Code (native install) is not a proven
   provider version, SessionStart now says so to the user (`systemMessage`)
