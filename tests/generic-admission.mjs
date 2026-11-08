@@ -20,8 +20,8 @@ export function genericAdmission(fence, options) {
   fs.mkdirSync(requested, { recursive: true });
   const parent = fs.realpathSync(requested);
   if (!parent.startsWith(root + path.sep)) throw new Error('Generic admission fixture refuses state outside temporary storage');
-  if (fs.existsSync(fence) && fs.lstatSync(fence).isFile()) return options;
   if (process.argv[1]?.includes("state-lock-") || process.env.WRITER_STATE_MJS || process.env.ACTOR_WORKSPACE) return options;
+  if (fs.existsSync(fence) && fs.lstatSync(fence).isFile()) return options;
   const lock = openFencedLock(fence, { ...options,
     domain: () => ({ verdict: 'initial', scope: 'test-owned', reason: 'generic suite fixture' }),
     scanner: () => ({ self: { pid: process.pid, start: 'test-owned', matched: true }, processes: [] })
