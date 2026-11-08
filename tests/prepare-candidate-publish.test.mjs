@@ -3,7 +3,7 @@
 // to the checkout. It must never overwrite what it did not read, and never
 // write outside the checkout; a refusal leaves everything as it was.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,12 +33,31 @@ function checkout(t) {
 }
 
 // Calls publish_candidate with the manifest bytes as read at the run's start.
-function publish(c, startBytes, { failManifestReplace = false, changeAfterLink = null } = {}) {
-  const input = path.join(c.root, "input.json");
-  const candidate = { ...entry(VERSION), evidenceCommit: "0".repeat(40), evidenceSummarySha256: "0".repeat(64), fixturesSha256: "0".repeat(64) };
-  fs.writeFileSync(input, JSON.stringify({ probe, repo: c.repo, startBytes, candidate, failManifestReplace, changeAfterLink }));
-  const driver = `
-import importlib.util, json, os, sys
+// prelude: Python run after the import, with m (the probe), a (the input), os,
+// signal and time in scope; it injects a fault or a pause.
+function driverInput(c, startBytes, { failManifestReplace = false, changeAfterLink = null, prelude = "", version = VERSION, name = "input" } = {}) {
+  const input = path.join(c.root, `${name}.json`);
+  const candidate = { ...entry(version), evidenceCommit: "0".repeat(40), evidenceSummarySha256: "0".repeat(64), fixturesSha256: "0".repeat(64) };
+  fs.writeFileSync(input, JSON.stringify({ probe, repo: c.repo, root: c.root, startBytes, candidate, failManifestReplace, changeAfterLink, prelude }));
+  return input;
+}
+const result = (stdout, stderr) => ({ ...JSON.parse(stdout.trim().split("\n").at(-1)), stderr });
+
+function publish(c, startBytes, opts = {}) {
+  const r = spawnSync(python, ["-I", "-B", "-c", DRIVER, driverInput(c, startBytes, opts)], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  return result(r.stdout, r.stderr);
+}
+
+function publishAsync(c, startBytes, opts) {
+  const child = spawn(python, ["-I", "-B", "-c", DRIVER, driverInput(c, startBytes, opts)], { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (d) => { stdout += d; }); child.stderr.on("data", (d) => { stderr += d; });
+  return new Promise((resolve) => child.once("close", (status) => { assert.equal(status, 0, stderr); resolve(result(stdout, stderr)); }));
+}
+
+const DRIVER = `
+import importlib.util, json, os, signal, sys, time
 a = json.load(open(sys.argv[1]))
 spec = importlib.util.spec_from_file_location("probe", a["probe"]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 if a["failManifestReplace"]:
@@ -54,16 +73,13 @@ if a["changeAfterLink"]:
         real_link(src, dst, *rest, **kw)
         open(os.path.join(a["repo"], "plugins/codex/scripts/lib/provider-receipts.json"), "w").write(a["changeAfterLink"])
     os.link = link
+exec(a["prelude"])
 try:
     written = m.publish_candidate(a["repo"], a["startBytes"].encode(), a["candidate"], "e" * 40, '{"shapes": 1}\\n', '{"evidence": 1}\\n')
     print(json.dumps({"ok": True, "written": written}))
 except Exception as e:
     print(json.dumps({"ok": False, "error": str(e)}))
 `;
-  const r = spawnSync(python, ["-I", "-B", "-c", driver, input], { encoding: "utf8" });
-  assert.equal(r.status, 0, r.stderr);
-  return JSON.parse(r.stdout.trim().split("\n").at(-1));
-}
 
 const leftovers = (c) => [path.dirname(MANIFEST), path.dirname(FIXTURES), path.dirname(EVIDENCE)]
   .flatMap((dir) => fs.readdirSync(path.join(c.repo, dir)).filter((n) => n.includes(".candidate-")));
@@ -155,5 +171,117 @@ test("publish: a manifest change while the new files are placed refuses and remo
   assert.equal(c.read(MANIFEST), changed);
   assert.equal(c.exists(FIXTURES), false);
   assert.equal(c.exists(EVIDENCE), false);
+  assert.deepEqual(leftovers(c), []);
+});
+
+// The commit runs with SIGTERM/SIGHUP/SIGINT blocked: a signal that comes in
+// during it is handled after it, and the publication is complete.
+for (const [label, prelude] of [
+  ["right after the first link", `real_link = os.link
+def link(src, dst, *rest, **kw):
+    real_link(src, dst, *rest, **kw)
+    os.kill(os.getpid(), signal.SIGTERM)
+os.link = link`],
+  ["right after the manifest rename", `real_replace = os.replace
+def replace(src, dst, *rest, **kw):
+    real_replace(src, dst, *rest, **kw)
+    os.kill(os.getpid(), signal.SIGTERM)
+os.replace = replace`]
+]) {
+  test(`publish: SIGTERM ${label} completes the publication, then is handled`, options, (t) => {
+    const c = checkout(t);
+    const r = publish(c, c.read(MANIFEST), { prelude });
+    assert.equal(r.ok, true, r.error);
+    assert.match(r.stderr, /signal 15 came in during the commit; the publication is complete/);
+    assert.deepEqual(JSON.parse(c.read(MANIFEST)).entries.map((e) => e.version), ["2.1.301", VERSION]);
+    assert.equal(c.exists(FIXTURES), true);
+    assert.equal(c.exists(EVIDENCE), true);
+    assert.deepEqual(leftovers(c), []);
+  });
+}
+
+test("publish: SIGTERM before the commit rolls back with nothing written", options, (t) => {
+  const c = checkout(t);
+  const r = publish(c, c.read(MANIFEST), { prelude: `real_lexists = os.path.lexists
+def lexists(path):
+    os.kill(os.getpid(), signal.SIGTERM)
+    return real_lexists(path)
+os.path.lexists = lexists` });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /signal 15 during publication; rolled back/);
+  assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
+  assert.equal(c.exists(FIXTURES), false);
+  assert.equal(c.exists(EVIDENCE), false);
+  assert.deepEqual(leftovers(c), []);
+});
+
+test("publish: a rollback leaves a file it did not create and names it", options, (t) => {
+  const c = checkout(t);
+  // The second link fails after someone replaced the first linked file.
+  const r = publish(c, c.read(MANIFEST), { prelude: `real_link = os.link
+calls = []
+def link(src, dst, *rest, **kw):
+    calls.append(dst)
+    if len(calls) == 2:
+        other = os.path.join(a["root"], "foreign")
+        open(other, "w").write("foreign\\n")
+        os.replace(other, calls[0])
+        raise OSError("injected: second link failed")
+    return real_link(src, dst, *rest, **kw)
+os.link = link` });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /injected: second link failed/);
+  assert.equal(c.read(FIXTURES), "foreign\n");
+  assert.match(r.stderr, /left in place, not created by this run: .*claude-code-9\.9\.9\.json/);
+  assert.equal(c.exists(EVIDENCE), false);
+  assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
+  assert.deepEqual(leftovers(c), []);
+});
+
+test("publish: two publications from the same start never both succeed", options, async (t) => {
+  const c = checkout(t);
+  const start = c.read(MANIFEST);
+  // Each pauses at its manifest rename until released; with the lock only one gets there.
+  const prelude = `real_replace = os.replace
+def replace(src, dst, *rest, **kw):
+    if str(dst).endswith("provider-receipts.json"):
+        open(os.path.join(a["root"], "ready-" + a["candidate"]["version"]), "w").write("")
+        deadline = time.monotonic() + 10
+        while not os.path.exists(os.path.join(a["root"], "release")):
+            if time.monotonic() > deadline:
+                raise RuntimeError("test barrier timeout")
+            time.sleep(0.01)
+    return real_replace(src, dst, *rest, **kw)
+os.replace = replace`;
+  const runs = [publishAsync(c, start, { prelude, version: "8.8.8", name: "a" }), publishAsync(c, start, { prelude, version: VERSION, name: "b" })];
+  const ready = () => fs.readdirSync(c.root).filter((n) => n.startsWith("ready-"));
+  let atRelease;
+  try {
+    for (let i = 0; i < 300 && ready().length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    atRelease = ready().length;
+  } finally {
+    fs.writeFileSync(path.join(c.root, "release"), "");
+  }
+  const results = await Promise.all(runs);
+  assert.equal(atRelease, 1, "only the lock holder reaches the rename");
+  assert.deepEqual(results.map((r) => r.ok).sort(), [false, true]);
+  assert.match(results.find((r) => !r.ok).error, /changed during the run; nothing written/);
+  const won = results[0].ok ? "8.8.8" : VERSION;
+  assert.deepEqual(JSON.parse(c.read(MANIFEST)).entries.map((e) => e.version), ["2.1.301", won]);
+  const artifacts = [path.dirname(FIXTURES), path.dirname(EVIDENCE)].flatMap((d) => fs.readdirSync(path.join(c.repo, d)));
+  assert.deepEqual(artifacts.sort(), [`claude-code-${won}-receipt-evidence.json`, `claude-code-${won}.json`].sort());
+});
+
+test("publish: a lock held past the wait refuses with nothing written", options, async (t) => {
+  const c = checkout(t);
+  const holder = spawn(python, ["-I", "-B", "-c", `import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY); fcntl.flock(fd, fcntl.LOCK_EX); print("held", flush=True); time.sleep(5)`, path.join(c.repo, path.dirname(MANIFEST))], { stdio: ["ignore", "pipe", "inherit"] });
+  t.after(() => holder.kill());
+  await new Promise((resolve) => holder.stdout.once("data", resolve));
+  const r = publish(c, c.read(MANIFEST), { prelude: "m.PUBLISH_LOCK_WAIT_S = 0.3" });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /holds the lock .* nothing written/);
+  assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
+  assert.equal(c.exists(FIXTURES), false);
   assert.deepEqual(leftovers(c), []);
 });
