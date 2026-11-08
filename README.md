@@ -501,3 +501,8 @@ check reports this requirement before `listen`; the long-path diagnostic has
 its own test. Generic hook tests also stub fixed-hook activation/revocation;
 the dedicated transport suite tests those real functions. Low-level race
 fixtures use native ps/lsof with an explicit test-owned process scope.
+
+The generic admission fixture publishes one shared certificate atomically in
+the fixture fence. Consumers reuse it only while the fence/authority identities
+and sealed record hash match. Certificate reuse still acquires the real state
+lock; it avoids preparing admission again while another writer holds that lock.
