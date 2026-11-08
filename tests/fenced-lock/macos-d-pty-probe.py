@@ -502,7 +502,7 @@ def main():
         p4 = run_probe("after clear")
         clear = receipt_latency(clear_exit, latency=False)
         summary["phases"].append({"phase": "clear", "sessionStart": clear})
-        clear_end = [e for e in events("hook-exit", "SessionEnd") if t_clear < e["at"] <= clear_exit["at"]]
+        clear_end = [e for e in events("hook-exit", "SessionEnd") if t_clear < e["at"] <= p4["at"]]
 
         def leave(label):
             term.send("/exit\r")
@@ -523,6 +523,9 @@ def main():
         # written its token to stdout, then exits one, is killed, or delivered
         # only half of it. Claude may still label these hook_success; the
         # product must refuse on the recorded receipt itself.
+        # Stop/End before this point belong to the proven sessions; those in
+        # fault sessions run without a proven receipt and are observed only.
+        t_faults = time.time() * 1000
         faults, fault_paths = {}, set()
         for fault in ("exit-one", "killed", "partial"):
             open(os.path.join(root, "fault"), "w").write(fault)
@@ -556,7 +559,9 @@ def main():
                     leaks += 1
         summary["proofLeaks"] = leaks
 
-        stops = events("hook-exit", "Stop")
+        stops = [e for e in events("hook-exit", "Stop") if e["at"] < t_faults]
+        ends = [e for e in events("hook-exit", "SessionEnd") if e["at"] < t_faults]
+        summary["faultSessionHooks"] = [{"event": e["event"], "code": e.get("code")} for e in events("hook-exit") if e["at"] >= t_faults and e["event"] != "SessionStart"]
         caps = {p1.get("capabilitySha"), p2.get("capabilitySha"), p3.get("capabilitySha")}
         positive = [s for s in (startup, manual, auto, clear, resume) if s]
         rows = [row for w in watches.values() for row in w.seen.values()]
@@ -574,7 +579,7 @@ def main():
             "workerPublishedOverCompact": worker_result.get("published") is True and worker_result.get("storedStatus") == "completed" and worker_result.get("storedRendered") is True,
             "workerLogKeptResult": worker_result.get("logHasResult") is True,
             "stopHooksSucceeded": bool(stops) and all(e.get("code") == 0 for e in stops),
-            "sessionEndSucceeded": bool(events("hook-exit", "SessionEnd")) and all(e.get("code") == 0 for e in events("hook-exit", "SessionEnd")),
+            "sessionEndSucceeded": bool(ends) and all(e.get("code") == 0 for e in ends),
             "clearEndedOldSession": bool(clear_end) and all(e.get("code") == 0 for e in clear_end),
             "bashAfterClearAdmitted": p4["acquired"] and p4["wrote"],
             "clearNewCapability": clear["receiptExitCode"] == 0 and p4.get("capabilitySha") not in caps,
@@ -600,7 +605,7 @@ def main():
         term.stop()
         summary["ownClaudeStopped"] = term.exited()
         persist()
-        print(json.dumps({"summary": os.path.join(root, "summary.json"), "passed": summary.get("passed"), "latencyMs": summary.get("latencyMs"), "failure": summary.get("failure")}))
+        print(json.dumps({"summary": os.path.join(root, "summary.json"), "passed": summary.get("passed"), "latencyMs": summary.get("latencyMs"), "failure": summary.get("failure"), "failedChecks": [k for k, v in summary.get("checks", {}).items() if not v]}))
     sys.exit(0 if summary.get("passed") else 1)
 
 
