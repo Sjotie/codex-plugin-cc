@@ -129,6 +129,46 @@ def record_shapes(raw, version):
     }
 
 
+def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
+    """Completes the candidate entry and writes the fixtures, the evidence and
+    the manifest (read at the start of the run, plus the candidate) to the
+    checkout. Returns the written paths."""
+    manifest = json.loads(manifest_bytes)
+    manifest["entries"].append(candidate)
+    digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
+    candidate.update({"evidenceCommit": head, "evidenceSummarySha256": digest(evidence), "fixturesSha256": digest(shapes)})
+    hexes = {"evidenceCommit": 40, "binarySha256": 64, "evidenceSummarySha256": 64, "fixturesSha256": 64}
+    for key, size in hexes.items():
+        value = candidate[key]
+        assert len(value) == size and all(ch in "0123456789abcdef" for ch in value) and value.strip("0"), f"candidate {key} is not a real {size}-hex value"
+    writes = [(candidate["fixtures"], shapes), (candidate["evidenceSummary"], evidence), (MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")]
+    staged, placed = [], []
+    try:
+        for rel, text in writes:
+            target = os.path.join(repo, rel)
+            temp = f"{target}.candidate-{os.getpid()}"
+            with open(temp, "x") as f:
+                f.write(text)
+            staged.append((temp, target, os.path.exists(target) and open(target).read()))
+        for temp, target, before in staged:
+            os.replace(temp, target)
+            placed.append((target, before))
+    except BaseException:
+        # Back to the committed checkout: new files go, the manifest
+        # gets its committed bytes back.
+        for target, before in placed:
+            if before is False:
+                os.remove(target)
+            else:
+                with open(target, "w") as f:
+                    f.write(before)
+        for temp, _, _ in staged:
+            if os.path.exists(temp):
+                os.remove(temp)
+        raise
+    return [rel for rel, _ in writes]
+
+
 def sanitized(summary):
     """The summary with the fixture root and the home directory as placeholders."""
     text = json.dumps(summary)
@@ -354,7 +394,9 @@ def main():
     # The product admits only manifest versions, so the entry under test must
     # be in this checkout; its binary hash must be the measured binary.
     manifest_path = os.path.join(REPO, MANIFEST_REL)
-    manifest = json.load(open(manifest_path))
+    with open(manifest_path, "rb") as f:
+        manifest_bytes = f.read()
+    manifest = json.loads(manifest_bytes)
     listed = lambda m: [e for e in m["entries"] if (e["version"], e["platform"], e["arch"]) == (expected, "darwin", "arm64")]
     candidate = None
     if args.prepare_candidate:
@@ -738,38 +780,7 @@ def main():
                                     "manifest entry in the run's plugin copy, which differs from the committed one only in evidenceCommit, evidenceSummarySha256 "
                                     "and fixturesSha256 (placeholders during the run). Paths are <fixture> and <home>; ids are hashes only.",
                             "candidateManifestSha256": summary["sourceHashes"].get(MANIFEST_REL), "summary": sanitized(summary)}, indent=1) + "\n"
-                digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
-                candidate.update({"evidenceCommit": summary["repoHead"], "evidenceSummarySha256": digest(evidence), "fixturesSha256": digest(shapes)})
-                hexes = {"evidenceCommit": 40, "binarySha256": 64, "evidenceSummarySha256": 64, "fixturesSha256": 64}
-                for key, size in hexes.items():
-                    value = candidate[key]
-                    assert len(value) == size and all(ch in "0123456789abcdef" for ch in value) and value.strip("0"), f"candidate {key} is not a real {size}-hex value"
-                writes = [(candidate["fixtures"], shapes), (candidate["evidenceSummary"], evidence), (MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")]
-                staged, placed = [], []
-                try:
-                    for rel, text in writes:
-                        target = os.path.join(REPO, rel)
-                        temp = f"{target}.candidate-{os.getpid()}"
-                        with open(temp, "x") as f:
-                            f.write(text)
-                        staged.append((temp, target, os.path.exists(target) and open(target).read()))
-                    for temp, target, before in staged:
-                        os.replace(temp, target)
-                        placed.append((target, before))
-                except BaseException:
-                    # Back to the committed checkout: new files go, the manifest
-                    # gets its committed bytes back.
-                    for target, before in placed:
-                        if before is False:
-                            os.remove(target)
-                        else:
-                            with open(target, "w") as f:
-                                f.write(before)
-                    for temp, _, _ in staged:
-                        if os.path.exists(temp):
-                            os.remove(temp)
-                    raise
-                summary["candidateWritten"] = [rel for rel, _ in writes]
+                summary["candidateWritten"] = publish_candidate(REPO, manifest_bytes, candidate, summary["repoHead"], shapes, evidence)
             except Exception as error:  # noqa: BLE001 - green run, candidate not written
                 summary["passed"] = False
                 summary["failure"] = f"candidate not written: {error}"
