@@ -1,0 +1,32 @@
+{
+  "note": "The hook_additional_context record exactly as Claude Code 2.1.308 wrote it in a real profile with a second SessionStart hook that gives context (#1916, 08-11): one record that merges the context of every hook, key order and field types as measured. Values are neutral placeholders; <ownContext> and <otherHookContext> are filled by the test harness.",
+  "mergedContext": {
+    "parentUuid": "<uuid>",
+    "isSidechain": false,
+    "attachment": {
+      "type": "hook_additional_context",
+      "content": [
+        "<ownContext>",
+        "<otherHookContext>"
+      ],
+      "hookName": "SessionStart",
+      "toolUseID": "SessionStart",
+      "hookEvent": "SessionStart"
+    },
+    "type": "attachment",
+    "uuid": "<uuid>",
+    "timestamp": "<timestamp>",
+    "rendered": [
+      {
+        "content": "<rendered>"
+      }
+    ],
+    "renderedRole": "system",
+    "userType": "external",
+    "entrypoint": "sdk-ts",
+    "cwd": "<cwd>",
+    "sessionId": "<sessionId>",
+    "version": "2.1.308",
+    "gitBranch": "main"
+  }
+}

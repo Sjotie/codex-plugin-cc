@@ -565,18 +565,20 @@ def main():
         summary["proofLeaks"] = leaks
 
         def merged_context_seen():
-            # Every proven session's context record holds our line and the
-            # other hook's line: the merge the receipt check must see through.
-            seen = []
+            # Each proven session's transcript has a context record that merges
+            # our line with the other hook's line, the case the receipt check
+            # must see through. On resume Claude keeps only context that is not
+            # already in the transcript (the other hook's fixed line drops out),
+            # so not every record has both; the lengths are kept as observation.
+            per_transcript = []
             for path in watches:
                 if path in fault_paths:
                     continue
-                for r in read_jsonl(path):
-                    a = r.get("attachment") or {}
-                    if r.get("type") == "attachment" and a.get("type") == "hook_additional_context" and a.get("hookEvent") == "SessionStart":
-                        seen.append(len(a.get("content") or []))
-            summary["contextRecordLengths"] = seen
-            return bool(seen) and all(n >= 2 for n in seen)
+                lengths = [len(a.get("content") or []) for r in read_jsonl(path) for a in [r.get("attachment") or {}]
+                           if r.get("type") == "attachment" and a.get("type") == "hook_additional_context" and a.get("hookEvent") == "SessionStart"]
+                per_transcript.append({"transcriptSha": sha(path), "contextLengths": lengths})
+            summary["contextRecordLengths"] = per_transcript
+            return bool(per_transcript) and all(any(n >= 2 for n in t["contextLengths"]) for t in per_transcript)
 
         stops = [e for e in events("hook-exit", "Stop") if e["at"] < t_faults]
         ends = [e for e in events("hook-exit", "SessionEnd") if e["at"] < t_faults]

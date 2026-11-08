@@ -399,18 +399,21 @@ for(const prior of ["success","failed","absent"]){
 }
 
 // Claude Code merges the additionalContext of every SessionStart hook into one
-// record, so with a second context hook (any real profile) content holds more
-// than one string; measured on 2.1.308 (#1916). Still context, never a receipt.
+// record, so with a second context hook (any real profile) content holds one
+// string per hook. The record below is the literal 2.1.308 shape (#1916). It is
+// still context, never a receipt; anything but a non-empty array of strings
+// keeps refusing (a lone string: the test after this block).
+const MERGED = JSON.parse(fs.readFileSync(new URL("./fixtures/provider-receipts/claude-code-2.1.308-merged-context.json", import.meta.url), "utf8")).mergedContext;
 for(const [label,content,admitted] of [
-  ["two strings (merged hooks)",["Codex Companion session context refreshed.","another hook's context"],true],
+  ["two strings, as 2.1.308 writes it",["Codex Companion session context refreshed.","Another hook's context."],true],
   ["a non-string member",["Codex Companion session context refreshed.",{text:"object"}],false],
   ["an empty array",[],false]
 ]){
   test(`transport: merged additional-context with ${label} ${admitted?"stays context":"cannot hide the receipt"}`,options,t=>{
     const f=fixture(t),r=f.runHook({},undefined,{omit:true});assert.equal(r.status,0,r.stderr);
-    f.appendReceipt(r);
-    const context={type:"attachment",version:"2.1.301",sessionId:"session-current",cwd:f.workspace,isSidechain:false,
-      attachment:{type:"hook_additional_context",hookName:"SessionStart",hookEvent:"SessionStart",content,toolUseID:"fixture-hook"}};
+    f.appendReceipt(r,{record:{version:"2.1.308"}});
+    const values={uuid:"fixture-uuid",timestamp:new Date(0).toISOString(),rendered:"rendered context",cwd:f.workspace,sessionId:"session-current"};
+    const context=fill(MERGED,values);context.attachment={...context.attachment,content};
     fs.appendFileSync(f.transcript,JSON.stringify(context)+"\n");
     assert.equal(f.consume().acquired,admitted);
     assert.equal(f.activate("SessionEnd").acquired,admitted);
