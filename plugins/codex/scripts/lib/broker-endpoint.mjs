@@ -13,7 +13,13 @@ export function createBrokerEndpoint(sessionDir, platform = process.platform) {
     return `pipe:\\\\.\\pipe\\${pipeName}`;
   }
 
-  return `unix:${path.join(sessionDir, "broker.sock")}`;
+  const socketPath = path.join(sessionDir, "broker.sock");
+  const bytes = Buffer.byteLength(socketPath);
+  const limit = platform === "darwin" ? 104 : 108;
+  if (bytes >= limit) {
+    throw Object.assign(new Error(`Broker socket path ${JSON.stringify(socketPath)} needs ${bytes} bytes; ${platform} sun_path requires fewer than ${limit}. Use a shorter temporary directory.`), { code: "EBROKERSOCKETPATH" });
+  }
+  return `unix:${socketPath}`;
 }
 
 export function parseBrokerEndpoint(endpoint) {

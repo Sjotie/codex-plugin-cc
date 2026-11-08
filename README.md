@@ -501,3 +501,12 @@ check reports this requirement before `listen`; the long-path diagnostic has
 its own test. Generic hook tests also stub fixed-hook activation/revocation;
 the dedicated transport suite tests those real functions. Low-level race
 fixtures use native ps/lsof with an explicit test-owned process scope.
+
+On macOS and Linux, broker sockets stay in the normal temporary session
+directory when the path fits the native socket buffer (104 and 108 bytes,
+including the terminator). For longer paths the whole broker session uses a
+fresh directory in `/tmp/codex-broker-<uid>`. This fallback root must be a real
+directory owned by that uid with mode 0700; symlinks and unsafe permissions
+are refused. Normal shutdown removes the session, and later starts sweep dead
+orphan sessions in this root too. If the fallback cannot be used, the error
+names the original socket path, byte count, limit and fallback failure.

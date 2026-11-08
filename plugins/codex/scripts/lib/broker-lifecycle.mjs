@@ -40,8 +40,35 @@ export function isBrokerRuntimeCurrent(session, runtime) {
   );
 }
 
-export function createBrokerSessionDir(prefix = BROKER_SESSION_DIR_PREFIX) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+// A stable private root lets the next process sweep an orphan after SIGKILL.
+// Never follow a pre-created symlink or trust another uid's directory in /tmp.
+function shortBrokerRoot({ create = false, root = path.join("/tmp", `codex-broker-${process.getuid()}`) } = {}) {
+  if (create) {
+    try { fs.mkdirSync(root, { mode: 0o700 }); }
+    catch (error) { if (error.code !== "EEXIST") throw error; }
+  }
+  const stat = fs.lstatSync(root);
+  if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700) {
+    throw new Error(`Unsafe broker fallback directory ${root}: expected own uid and mode 0700, without symlinks`);
+  }
+  return root;
+}
+
+export function createBrokerSessionDir(prefix = BROKER_SESSION_DIR_PREFIX, { fallbackRoot } = {}) {
+  let root = os.tmpdir();
+  try {
+    createBrokerEndpoint(path.join(root, `${prefix}XXXXXX`));
+  } catch (error) {
+    if (error.code !== "EBROKERSOCKETPATH") throw error;
+    try {
+      root = shortBrokerRoot({ create: true, root: fallbackRoot });
+      createBrokerEndpoint(path.join(root, `${prefix}XXXXXX`));
+      return fs.mkdtempSync(path.join(root, prefix));
+    } catch (fallbackError) {
+      throw Object.assign(new Error(`${error.message} Short broker fallback failed: ${fallbackError.code ?? fallbackError.message}`, { cause: fallbackError }), { code: "EBROKERSOCKETPATH" });
+    }
+  }
+  return fs.mkdtempSync(path.join(root, prefix));
 }
 
 function connectToEndpoint(endpoint) {
@@ -269,8 +296,12 @@ export async function ensureBrokerSession(cwd, options = {}) {
 
   // #1962: a SIGKILLed broker cannot remove its own directory; clear those before adding one.
   await sweepOrphanedBrokerSessionDirs(options.sweep).catch(() => {});
+  if (!options.sweep && process.platform !== "win32") {
+    try { await sweepOrphanedBrokerSessionDirs({ tmpdir: shortBrokerRoot({ root: options.fallbackRoot }) }); }
+    catch { /* Absent or unsafe fallback roots are never swept. */ }
+  }
 
-  const sessionDir = createBrokerSessionDir();
+  const sessionDir = createBrokerSessionDir(undefined, { fallbackRoot: options.fallbackRoot });
   const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
   const endpoint = endpointFactory(sessionDir, options.platform);
   const pidFile = path.join(sessionDir, "broker.pid");
