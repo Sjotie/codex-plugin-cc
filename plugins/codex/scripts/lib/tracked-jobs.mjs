@@ -38,13 +38,19 @@ function finalPublishAdmissionWaitMs() {
 async function publishFinal(logFile, publish) {
   const waitMs = finalPublishAdmissionWaitMs();
   const start = performance.now();
+  let awaitingAdmission = false;
   for (;;) {
     try {
       return publish({ deadlineMs: 0 });
     } catch (error) {
       const elapsed = performance.now() - start;
       const lockWait = error instanceof StateLockTimeout && !(error instanceof StateLockRefused);
-      if (lockWait && (elapsed < ORDINARY_LOCK_DEADLINE_MS || (error.refusal === "transient" && elapsed < waitMs))) {
+      // A compact finishing its pending attempt briefly holds the authority.
+      // BUSY says nothing about admission: keep the pending wait's original
+      // deadline across that handover. Every attempt still validates anew;
+      // a definitive refusal or a non-lock error always stops immediately.
+      if (lockWait && error.refusal === "transient") awaitingAdmission = true;
+      if (lockWait && (elapsed < ORDINARY_LOCK_DEADLINE_MS || (awaitingAdmission && elapsed < waitMs))) {
         await new Promise((resolve) => setTimeout(resolve, elapsed < ORDINARY_LOCK_DEADLINE_MS ? LOCK_RETRY_MS : ADMISSION_RETRY_MS));
         continue;
       }
