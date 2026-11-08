@@ -784,12 +784,12 @@ function removeJobFile(jobFile) {
   }
 }
 
+// Pure path helpers: they create nothing, so a read that only looks up a job
+// file leaves the state root as it was (#1916). A writer calls ensureStateDir.
 export function resolveJobLogFile(cwd, jobId) {
-  ensureStateDir(cwd);
   return path.join(resolveJobsDir(cwd), `${jobId}.log`);
 }
 
 export function resolveJobFile(cwd, jobId) {
-  ensureStateDir(cwd);
   return path.join(resolveJobsDir(cwd), `${jobId}.json`);
 }

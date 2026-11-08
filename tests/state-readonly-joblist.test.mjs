@@ -21,9 +21,15 @@ const { buildSingleJobSnapshot, buildStatusSnapshot, readStoredJob } = await imp
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
 
+// Names plus, for files, bytes and mtime: a read path that rewrites a file in
+// place also counts as a change.
 function tree(dir) {
   if (!fs.existsSync(dir)) return null;
-  return fs.readdirSync(dir, { recursive: true }).map(String).sort();
+  return fs.readdirSync(dir, { recursive: true }).map(String).sort().map((name) => {
+    const file = path.join(dir, name);
+    const st = fs.statSync(file);
+    return st.isFile() ? `${name} ${st.mtimeMs} ${fs.readFileSync(file, "base64")}` : `${name}/`;
+  });
 }
 
 function companion(workspace, args) {
@@ -74,7 +80,7 @@ test("path helpers only compute paths", () => {
 test("listing jobs and status leave a state root without jobs/ unchanged", () => {
   const { workspace, stateDir } = indexOnlyWorkspace();
   const before = tree(stateDir);
-  assert.deepEqual(before, ["state.json"]);
+  assert.deepEqual(fs.readdirSync(stateDir), ["state.json"]);
 
   assert.equal(listJobsReadOnly(workspace).length, 1);
   assert.equal(listJobs(workspace).length, 1);

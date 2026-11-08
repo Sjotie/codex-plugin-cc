@@ -4,6 +4,7 @@ import process from "node:process";
 import { StateLockRefused, StateLockTimeout } from "./fenced-lock.mjs";
 import { isTerminalJobStatus } from "./job-status.mjs";
 import {
+  ensureStateDir,
   readJobFile,
   resolveJobFile,
   resolveJobLogFile,
@@ -97,6 +98,7 @@ export function appendLogBlock(logFile, title, body) {
 }
 
 export function createJobLogFile(workspaceRoot, jobId, title) {
+  ensureStateDir(workspaceRoot);
   const logFile = resolveJobLogFile(workspaceRoot, jobId);
   fs.writeFileSync(logFile, "", "utf8");
   if (title) {

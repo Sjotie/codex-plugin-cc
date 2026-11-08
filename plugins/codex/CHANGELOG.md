@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Reading the job list no longer creates the state `jobs/` directory
+  (Homebase #1916, Sol P3 on sjotie.24). `resolveJobFile` and
+  `resolveJobLogFile` only compute a path; the writers (`writeJobFile`, the
+  locked job write, `createJobLogFile`) create the directory themselves. A
+  `status` or list over an index whose jobs need no reconciliation leaves the
+  state root byte-for-byte as it was; a missing `jobs/` after such a call is
+  normal. Reconciling a job (for example a dead worker) still writes under the
+  lock, as before.
+
 ## 1.0.7-sjotie.26 (fork, Homebase #4648; 2026-11-03)
 
 - A command that starts work (`task`, `review`, `adversarial-review`) checks

@@ -82,6 +82,8 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
   const workspace = makeTempDir();
   const stateFile = resolveStateFile(workspace);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  // The path helpers create nothing (#1916): this test writes artifacts itself.
+  fs.mkdirSync(path.dirname(resolveJobFile(workspace, "x")), { recursive: true });
 
   const jobs = Array.from({ length: 51 }, (_, index) => {
     const jobId = `job-${index}`;
@@ -146,6 +148,8 @@ test("saveState keeps the newest resumable task per session and active jobs when
   const workspace = makeTempDir();
   const stateFile = resolveStateFile(workspace);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  // The path helpers create nothing (#1916): this test writes artifacts itself.
+  fs.mkdirSync(path.dirname(resolveJobFile(workspace, "x")), { recursive: true });
 
   const now = Date.now();
   const at = (minutes) => new Date(now - (70 - minutes) * 60_000).toISOString();
@@ -219,6 +223,8 @@ test("saveState prunes resumable tasks from old sessions but keeps a recent one"
   const workspace = makeTempDir();
   const stateFile = resolveStateFile(workspace);
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  // The path helpers create nothing (#1916): this test writes artifacts itself.
+  fs.mkdirSync(path.dirname(resolveJobFile(workspace, "x")), { recursive: true });
 
   const now = Date.now();
   const daysAgo = (days) => new Date(now - days * 24 * 60 * 60_000).toISOString();
