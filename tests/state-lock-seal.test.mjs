@@ -121,7 +121,7 @@ test("N27b: an old process from before the fence holds the seal; the timeout nam
   const o = idleOld(s, t, { sub: "task --json secret prompt text" });
   const r = await acquireOnce(s, "w");
   assert.equal(r.acquired, false);
-  assert.match(r.message, new RegExp(`pid ${o.pid} \\(codex-companion\\.mjs task --json secret prompt text`));
+  assert.match(r.message, new RegExp(`pid ${o.pid} \\(codex-companion\\.mjs task${process.platform === "darwin" ? "" : " --json secret prompt text"}`));
   assert.match(r.message, /state-lock stop-old/);
   const rec = record(s);
   assert.equal(rec.S0.length, 1);
@@ -132,7 +132,7 @@ test("N27b: an old process from before the fence holds the seal; the timeout nam
   assert.equal((await acquireOnce(s, "w2")).acquired, true);
 });
 
-test("N27c: a recorded process that became a zombie counts as gone", async (t) => {
+test("N27c: a recorded process that became a zombie counts as gone", { skip: process.platform !== "linux" && "requires /proc (linux)" }, async (t) => {
   const s = scenario(t);
   // sh forks the old-looking child and then becomes sleep, which never reaps it.
   const parent = spawn("sh", ["-c", `sh -c 'sleep 2; :' /plugin/scripts/codex-companion.mjs task-worker & echo $!; exec sleep 30`], {
@@ -201,7 +201,7 @@ for (const [impl] of [["o1"], ["o2"]]) {
     s.signal("r.release");
     await r.exit; // r releases: F is empty while o is still in its section
     const w = s.start("w");
-    await new Promise((r2) => setTimeout(r2, 400));
+    await waitInS0(s, o.pid);
     assert.equal(s.has("w.entered"), false, "the new writer waits for the seal");
     assert.ok(record(s)?.S0.some((p) => p.pid === o.pid), "o is in S0");
     s.signal("o.release");

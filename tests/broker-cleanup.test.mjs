@@ -64,7 +64,7 @@ function startBroker(t, { binDir, sessionDir, isolatePath = false }) {
   const child = spawn(
     process.execPath,
     [BROKER, "serve", "--endpoint", endpoint, "--cwd", makeTempDir(), "--pid-file", path.join(sessionDir, "broker.pid")],
-    { env: { ...(isolatePath ? { ...process.env, PATH: binDir } : buildEnv(binDir)), CODEX_COMPANION_BROKER_TMPDIR: path.dirname(sessionDir) }, stdio: "ignore" }
+    { env: { ...(isolatePath ? { ...process.env, PATH: binDir } : buildEnv(binDir)), CODEX_COMPANION_BROKER_TMPDIR: path.dirname(sessionDir) }, stdio: ["ignore", "ignore", "inherit"] }
   );
   t.after(() => {
     if (child.exitCode === null) {

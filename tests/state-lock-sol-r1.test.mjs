@@ -38,7 +38,7 @@ test('independent: unrelated commit must not hide a crashed restore JSON',()=>{
   assert.equal(actual.status,'running');
 });
 
-test('independent: a process acquiring marker after target selection must get no signal',()=>{
+test('independent: a process acquiring marker after target selection must get no signal',{skip:process.platform !== 'linux' && 'requires /proc (linux)'},()=>{
   const dir=path.join(tmp,'late-marker'); fs.mkdirSync(dir);
   const fence=path.join(dir,'state.lock'); fs.mkdirSync(fence);
   const target={pid:4242,start:'100',script:'codex-companion.mjs',sub:'task-worker',comm:'node'};

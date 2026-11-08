@@ -25,7 +25,13 @@ const readline = require("node:readline");
 	}
 
 function saveState(state) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  const temporary = STATE_PATH + "." + process.pid + "." + crypto.randomBytes(8).toString("hex") + ".tmp";
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(state, null, 2));
+    fs.renameSync(temporary, STATE_PATH);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 }
 
 function requiresExperimental(field, message, state) {

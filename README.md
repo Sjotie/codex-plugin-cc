@@ -477,3 +477,27 @@ Yes. If you already use Codex, the plugin picks up the same [configuration](#com
 Yes. Because the plugin uses your local Codex CLI, your existing sign-in method and config still apply.
 
 If you need to point the built-in OpenAI provider at a different endpoint, set `openai_base_url` in your [Codex config](https://developers.openai.com/codex/config-advanced/#config-and-state-locations).
+
+## Running the tests
+
+Use Node 22.15 or newer (the test preload uses `module.registerHooks`), then
+`bun install --frozen-lockfile` and `bun run test`. No credentials, Claude login,
+or live Codex service are needed. Inside an agent session, clear inherited
+`CODEX_COMPANION_SESSION_ID` and `CLAUDE_PLUGIN_DATA` before starting.
+
+On macOS the generic state/CLI tests use the explicit
+`tests/generic-admission-setup.mjs` preload. It supplies a base certificate for
+a synthetic test-owned process domain, restricted to temporary state paths;
+the real fenced-lock storage and locking still run. These tests do not prove
+Claude SessionStart receipt transport. The dedicated `state-lock-macos` and `state-lock-session-start` suites
+retain their own admission/receipt fixtures and native checks. Linux uses its
+normal procfs lock path and needs no admission fixture. Run the package test
+command to include this setup; invoking generic test files directly without
+the preload on macOS refuses state writes.
+
+The runner allocates a fresh short native temporary root on macOS, since nested
+fixture socket paths can exceed the 104-byte `sun_path` buffer. A path-budget
+check reports this requirement before `listen`; the long-path diagnostic has
+its own test. Generic hook tests also stub fixed-hook activation/revocation;
+the dedicated transport suite tests those real functions. Low-level race
+fixtures use native ps/lsof with an explicit test-owned process scope.

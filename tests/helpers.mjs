@@ -29,7 +29,7 @@ if (!String(process.env.NODE_OPTIONS ?? "").includes("scan-scope.mjs")) {
 await import("./fenced-lock/scan-scope.mjs");
 
 export function makeTempDir(prefix = "codex-plugin-test-") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
 export function writeExecutable(filePath, source) {

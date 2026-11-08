@@ -129,7 +129,7 @@ for (const [name, bin] of RUNTIMES) {
         "-e",
         `const { DatabaseSync } = await import("node:sqlite");
          const db = new DatabaseSync(process.argv[1]); db.exec("BEGIN EXCLUSIVE");
-         process.stdout.write("held\\n"); process.stdin.resume(); process.stdin.on("end", () => process.exit(0));`,
+         process.stdout.write("held\\n"); process.stdin.resume(); process.stdin.on("end", () => { db.close(); process.exit(0); });`,
         db
       ], { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, NODE_NO_WARNINGS: "1" } })
     );
