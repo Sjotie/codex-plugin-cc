@@ -98,3 +98,26 @@ test('a broker starts under long TMPDIR and removes its fallback session on shut
   while (fs.existsSync(session.sessionDir) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(fs.existsSync(session.sessionDir), false, 'normal broker shutdown cleaned the fallback');
 });
+
+for (const kind of ['symlink', 'mode0755', 'foreign-uid']) {
+  test(`fallback root rejects ${kind} without creating a session`, { skip: process.platform === 'win32' }, t => {
+    const parent = makeTempDir('guard-');
+    t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+    const target = path.join(parent, 'target');
+    fs.mkdirSync(target, { mode: 0o700 });
+    const fallbackRoot = kind === 'symlink' ? path.join(parent, 'link') : target;
+    if (kind === 'symlink') fs.symlinkSync(target, fallbackRoot);
+    if (kind === 'mode0755') fs.chmodSync(target, 0o755);
+    const long = path.join(parent, 'long-'.repeat(30));
+    fs.mkdirSync(long);
+    t.mock.method(os, 'tmpdir', () => long);
+    if (kind === 'foreign-uid') {
+      const lstat = fs.lstatSync;
+      t.mock.method(fs, 'lstatSync', (p, ...args) => String(p) === fallbackRoot
+        ? { isDirectory: () => true, uid: process.getuid() + 1, mode: 0o700 }
+        : lstat.call(fs, p, ...args));
+    }
+    assert.throws(() => createBrokerSessionDir(undefined, { fallbackRoot }), /Unsafe broker fallback directory/);
+    assert.deepEqual(fs.readdirSync(target), [], 'refusal left target untouched');
+  });
+}
