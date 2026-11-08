@@ -38,8 +38,12 @@ to docs/releases/claude-code-X.Y.Z-receipt-evidence.json, and completes the
 entry with evidenceCommit (HEAD, which holds the exact product and harness
 bytes) and both hashes. Commit those three files and send them to review. The
 candidate lives only in the run's own copy of the plugin, so a red, failed or
-killed run leaves the checkout untouched. Without the flag the entry must
-already be listed, with this binary's hash.
+killed run leaves the checkout untouched. The writes never overwrite: when the
+manifest changed during the run (its bytes differ from the start), already
+lists the version, one of the two files already exists, or a target directory
+resolves outside the checkout (a symlink), the run fails and nothing is
+written; the run's evidence stays in its fixture directory. Without the flag
+the entry must already be listed, with this binary's hash.
 
 Options: --expect-version X.Y.Z (required; must equal `claude --version`),
 --prepare-candidate, --auto-window TOKENS (default 20000), --max-fills N
@@ -131,42 +135,78 @@ def record_shapes(raw, version):
 
 def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
     """Completes the candidate entry and writes the fixtures, the evidence and
-    the manifest (read at the start of the run, plus the candidate) to the
-    checkout. Returns the written paths."""
-    manifest = json.loads(manifest_bytes)
-    manifest["entries"].append(candidate)
+    the manifest (as read at the start of the run, plus the candidate) to the
+    checkout. Returns the written paths.
+
+    Exclusive: it refuses, and leaves everything as it was, when the manifest
+    changed during the run, already lists the version, a target file already
+    exists, or a target's directory resolves outside the checkout."""
     digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
     candidate.update({"evidenceCommit": head, "evidenceSummarySha256": digest(evidence), "fixturesSha256": digest(shapes)})
     hexes = {"evidenceCommit": 40, "binarySha256": 64, "evidenceSummarySha256": 64, "fixturesSha256": 64}
     for key, size in hexes.items():
         value = candidate[key]
         assert len(value) == size and all(ch in "0123456789abcdef" for ch in value) and value.strip("0"), f"candidate {key} is not a real {size}-hex value"
-    writes = [(candidate["fixtures"], shapes), (candidate["evidenceSummary"], evidence), (MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")]
-    staged, placed = [], []
+    root = os.path.realpath(repo)
+
+    def inside(rel):
+        parent = os.path.realpath(os.path.dirname(os.path.join(root, rel)))
+        if parent != root and not parent.startswith(root + os.sep):
+            raise RuntimeError(f"{rel}: its directory resolves outside the checkout; refusing to write there")
+        target = os.path.join(parent, os.path.basename(rel))
+        if os.path.islink(target):
+            raise RuntimeError(f"{rel} is a symlink; refusing to write through it")
+        return target
+
+    def exists_refusal(rel):
+        return RuntimeError(f"{rel} already exists; a candidate never overwrites it (remove or commit it, then rerun)")
+
+    def unchanged(path):
+        with open(path, "rb") as f:
+            if f.read() != manifest_bytes:
+                raise RuntimeError(f"{MANIFEST_REL} changed during the run; nothing written (rerun from the current checkout)")
+
+    manifest_target = inside(MANIFEST_REL)
+    new_files = [(inside(candidate["fixtures"]), candidate["fixtures"], shapes), (inside(candidate["evidenceSummary"]), candidate["evidenceSummary"], evidence)]
+    for target, rel, _ in new_files:
+        if os.path.lexists(target):
+            raise exists_refusal(rel)
+    unchanged(manifest_target)
+    manifest = json.loads(manifest_bytes)
+    key = lambda e: (e.get("version"), e.get("platform"), e.get("arch"))
+    if any(key(e) == key(candidate) for e in manifest["entries"]):
+        raise RuntimeError(f"{candidate['version']} is already listed for {candidate['platform']}/{candidate['arch']}; nothing written")
+    manifest["entries"].append(candidate)
+    created, temp = [], None
     try:
-        for rel, text in writes:
-            target = os.path.join(repo, rel)
+        for target, rel, text in new_files:
             temp = f"{target}.candidate-{os.getpid()}"
             with open(temp, "x") as f:
                 f.write(text)
-            staged.append((temp, target, os.path.exists(target) and open(target).read()))
-        for temp, target, before in staged:
-            os.replace(temp, target)
-            placed.append((target, before))
-    except BaseException:
-        # Back to the committed checkout: new files go, the manifest
-        # gets its committed bytes back.
-        for target, before in placed:
-            if before is False:
-                os.remove(target)
-            else:
-                with open(target, "w") as f:
-                    f.write(before)
-        for temp, _, _ in staged:
-            if os.path.exists(temp):
+            try:
+                # A hard link never replaces an existing name: exclusive and whole.
+                os.link(temp, target)
+            except FileExistsError:
+                raise exists_refusal(rel) from None
+            finally:
                 os.remove(temp)
+                temp = None
+            created.append(target)
+        temp = f"{manifest_target}.candidate-{os.getpid()}"
+        with open(temp, "x") as f:
+            f.write(json.dumps(manifest, indent=2) + "\n")
+        unchanged(manifest_target)
+        os.replace(temp, manifest_target)
+        temp = None
+    except BaseException:
+        # Back to the committed checkout: this run's new files go; the
+        # manifest was not replaced.
+        for target in created:
+            os.remove(target)
+        if temp and os.path.exists(temp):
+            os.remove(temp)
         raise
-    return [rel for rel, _ in writes]
+    return [candidate["fixtures"], candidate["evidenceSummary"], MANIFEST_REL]
 
 
 def sanitized(summary):
