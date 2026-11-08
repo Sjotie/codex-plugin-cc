@@ -15,11 +15,30 @@ const env = { ...process.env, TMPDIR: root };
 for (const key of ['CODEX_COMPANION_SESSION_ID', 'CLAUDE_PLUGIN_DATA']) delete env[key];
 try {
   assertSocketPathBudget(root);
-  const result = spawnSync(process.execPath, ['--import', path.join(here, 'generic-admission-setup.mjs'),
-    '--test', ...(process.platform === 'darwin' ? ['--test-concurrency=2'] : []), ...process.argv.slice(2), ...fs.readdirSync(here).filter(name => name.endsWith('.test.mjs')).map(name => path.join(here, name))],
-  { env, stdio: 'inherit', timeout: 15 * 60 * 1000 });
-  if (result.error) console.error(result.error.message);
-  process.exitCode = result.status ?? 1;
+  const files = fs.readdirSync(here).filter(name => name.endsWith('.test.mjs'));
+  let groups = [{ name: 'all', files, concurrency: null }];
+  if (process.platform === 'darwin') {
+    const requested = process.env.CODEX_TEST_FILE_CONCURRENCY;
+    if (requested !== undefined && (!/^[1-9]\d*$/.test(requested) || !Number.isSafeInteger(Number(requested)))) {
+      throw new Error('CODEX_TEST_FILE_CONCURRENCY must be a positive integer');
+    }
+    const concurrency = requested === undefined ? Math.max(1, Math.floor(os.availableParallelism() / 2)) : Number(requested);
+    const heavy = name => name.startsWith('state-lock-') || name === 'state-concurrency.test.mjs';
+    groups = [
+      { name: 'generic', files: files.filter(name => !heavy(name)), concurrency },
+      { name: 'native-lock-stress', files: files.filter(heavy), concurrency: 1 }
+    ];
+  }
+  for (const group of groups) {
+    if (!group.files.length) continue;
+    console.log(`TEST_GROUP ${group.name} files=${group.files.length} concurrency=${group.concurrency ?? 'node-default'}`);
+    const result = spawnSync(process.execPath, ['--import', path.join(here, 'generic-admission-setup.mjs'),
+      '--test', ...(group.concurrency === null ? [] : [`--test-concurrency=${group.concurrency}`]),
+      ...process.argv.slice(2), ...group.files.map(name => path.join(here, name))],
+    { env, stdio: 'inherit', timeout: 15 * 60 * 1000 });
+    if (result.error) console.error(result.error.message);
+    if (result.status !== 0) { process.exitCode = result.status ?? 1; break; }
+  }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
