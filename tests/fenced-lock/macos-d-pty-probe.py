@@ -105,8 +105,6 @@ def record_shapes(raw, version):
     # placeholder except the fixed identifiers, content neutral.
     fixed = {"type", "hookName", "hookEvent", "toolUseID", "renderedRole", "userType", "entrypoint", "version", "gitBranch"}
     def literal(value, key=None):
-        if key == "content":
-            return ["Codex Companion session context refreshed.", "Another hook's context."]
         if key == "version":
             return version
         if isinstance(value, dict):
@@ -124,7 +122,7 @@ def record_shapes(raw, version):
                                                          "exitCode": "<exitCode>", "command": a["command"], "stdout": "<stdout>"}},
         "additionalContext": {**base(context), "attachment": {"type": c["type"], "hookName": c["hookName"], "hookEvent": c["hookEvent"],
                                                                "content": ["<content>"], "toolUseID": "<toolUseID>"}},
-        "mergedContext": literal(context),
+        "mergedContext": {**literal(context), "attachment": {**literal(c), "content": ["Codex Companion session context refreshed.", "Another hook's context."]}},
     }
 
 
