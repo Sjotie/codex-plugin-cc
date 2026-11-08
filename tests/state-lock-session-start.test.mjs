@@ -398,6 +398,25 @@ for(const prior of ["success","failed","absent"]){
   });
 }
 
+// Claude Code merges the additionalContext of every SessionStart hook into one
+// record, so with a second context hook (any real profile) content holds more
+// than one string; measured on 2.1.308 (#1916). Still context, never a receipt.
+for(const [label,content,admitted] of [
+  ["two strings (merged hooks)",["Codex Companion session context refreshed.","another hook's context"],true],
+  ["a non-string member",["Codex Companion session context refreshed.",{text:"object"}],false],
+  ["an empty array",[],false]
+]){
+  test(`transport: merged additional-context with ${label} ${admitted?"stays context":"cannot hide the receipt"}`,options,t=>{
+    const f=fixture(t),r=f.runHook({},undefined,{omit:true});assert.equal(r.status,0,r.stderr);
+    f.appendReceipt(r);
+    const context={type:"attachment",version:"2.1.301",sessionId:"session-current",cwd:f.workspace,isSidechain:false,
+      attachment:{type:"hook_additional_context",hookName:"SessionStart",hookEvent:"SessionStart",content,toolUseID:"fixture-hook"}};
+    fs.appendFileSync(f.transcript,JSON.stringify(context)+"\n");
+    assert.equal(f.consume().acquired,admitted);
+    assert.equal(f.activate("SessionEnd").acquired,admitted);
+  });
+}
+
 test("transport: unproven string additional-context shape cannot hide unknown receipt",options,t=>{
   const f=prepared(t);const r=f.receipt({status:0,stdout:""});
   r.attachment={type:"hook_additional_context",hookName:"SessionStart",hookEvent:"SessionStart",content:"unproven string shape",toolUseID:"fixture-hook"};

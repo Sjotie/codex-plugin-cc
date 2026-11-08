@@ -318,7 +318,12 @@ def main():
     # (state-directory resolution and the hook's export are unchanged since
     # 258047f; the old harness hid it by redirecting CLAUDE_PLUGIN_DATA in its
     # preload) and is a separate #1916 todo. This probe measures D, not that.
-    json.dump({"sandbox": {"enabled": False}, "enabledPlugins": {}, "permissions": {"allow": ["Bash(node:*)", "Bash(cat:*)"]}}, open(settings, "w"))
+    # A second SessionStart hook that gives context, as every real profile
+    # has: Claude merges all hook context into one record (#1916), which the
+    # receipt check must see through. It is not the product's hook.
+    other_hook = node_file("other-context-hook.mjs", 'process.stdout.write(JSON.stringify({hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: "Another hook\'s context."}}) + "\\n");\n')
+    json.dump({"sandbox": {"enabled": False}, "enabledPlugins": {}, "permissions": {"allow": ["Bash(node:*)", "Bash(cat:*)"]},
+               "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": f"{shutil.which('node')} {other_hook}"}]}]}}, open(settings, "w"))
 
     # CLAUDE_CODE_CHILD_SESSION (set when this runs inside another Claude
     # session) makes the interactive Claude write no transcript at all
@@ -559,6 +564,20 @@ def main():
                     leaks += 1
         summary["proofLeaks"] = leaks
 
+        def merged_context_seen():
+            # Every proven session's context record holds our line and the
+            # other hook's line: the merge the receipt check must see through.
+            seen = []
+            for path in watches:
+                if path in fault_paths:
+                    continue
+                for r in read_jsonl(path):
+                    a = r.get("attachment") or {}
+                    if r.get("type") == "attachment" and a.get("type") == "hook_additional_context" and a.get("hookEvent") == "SessionStart":
+                        seen.append(len(a.get("content") or []))
+            summary["contextRecordLengths"] = seen
+            return bool(seen) and all(n >= 2 for n in seen)
+
         stops = [e for e in events("hook-exit", "Stop") if e["at"] < t_faults]
         ends = [e for e in events("hook-exit", "SessionEnd") if e["at"] < t_faults]
         summary["faultSessionHooks"] = [{"event": e["event"], "code": e.get("code")} for e in events("hook-exit") if e["at"] >= t_faults and e["event"] != "SessionStart"]
@@ -593,6 +612,7 @@ def main():
             "receiptFieldsPresent": all(s["receiptType"] == "hook_success" for s in positive) and
                 bool(positive_rows) and all(row["fieldTypes"] == want_fields and row["recordFields"] == want_record for row in positive_rows),
             "noProofInModelInput": leaks == 0,
+            "contextMergedWithOtherHook": merged_context_seen(),
         }
         summary["latencyMs"] = {label: s["latencyHookExitToReceiptMs"] for label, s in (("manual compact", manual), ("auto compact", auto)) if s}
         summary["passed"] = all(summary["checks"].values())

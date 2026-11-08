@@ -175,11 +175,13 @@ export function readSessionReceipt(locator, expected) {
     const a = r?.attachment;
     // This provider record conveys context, not hook completion. It can never
     // grant admission; only a separate, fully validated completion may do so.
+    // Claude merges the context of every SessionStart hook into this one
+    // record, so it holds one string per hook that gave context (#1916).
     if (a?.command !== SESSION_START_COMMAND && r?.type === "attachment" && typeof r.version === "string" && providerVersionProven(r.version) &&
       r.sessionId === locator.sessionId && r.isSidechain === false && path.isAbsolute(r.cwd ?? "") &&
       fs.realpathSync(r.cwd) === locator.cwd && a?.type === "hook_additional_context" &&
       a.hookEvent === "SessionStart" && a.hookName === "SessionStart" &&
-      Array.isArray(a.content) && a.content.length === 1 && typeof a.content[0] === "string" && typeof a.toolUseID === "string" &&
+      Array.isArray(a.content) && a.content.length > 0 && a.content.every((item) => typeof item === "string") && typeof a.toolUseID === "string" &&
       !Object.hasOwn(a, "command") && !Object.hasOwn(a, "exitCode")) continue;
     if (a?.command === SESSION_START_COMMAND || (r?.type === "attachment" && (a?.hookEvent === "SessionStart" || a?.hookName === "SessionStart" || String(a?.hookName ?? "").startsWith("SessionStart:")))) {
       // Other configured hooks have their own command and cannot confirm or
