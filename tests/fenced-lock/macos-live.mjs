@@ -89,9 +89,12 @@ try {
     if (hookOnly) {
       const envFile = path.join(root, `${mode}.env`);
       fs.writeFileSync(envFile, "");
+      // The session transport (#1916) needs the native session id, a
+      // transcript path and the source; locators go to an owned config root.
+      const sessionId = `native-hook-${process.pid}-${mode}`;
       const run = spawnSync(process.execPath, [observer, lib, root, mode], {
-        cwd: root, env: { ...runEnv, CLAUDE_ENV_FILE: envFile },
-        input: JSON.stringify({ cwd: root, session_id: `native-hook-${process.pid}-${mode}`, hook_event_name: "SessionStart" }),
+        cwd: root, env: { ...runEnv, CLAUDE_ENV_FILE: envFile, CLAUDE_CODE_SESSION_ID: sessionId, CLAUDE_CONFIG_DIR: path.join(root, "claude-config") },
+        input: JSON.stringify({ cwd: root, session_id: sessionId, transcript_path: path.join(root, `${mode}.transcript.jsonl`), source: "startup", hook_event_name: "SessionStart" }),
         encoding: "utf8", timeout: 40_000, stdio: ["pipe", stdout, stderr]
       });
       claudeExit = { code: run.status, signal: run.signal, error: run.error?.code ?? null };
