@@ -54,6 +54,24 @@ function requireProvenVersion(version) {
   if (!providerVersionProven(version)) fail(`provider version unproven (${PROVIDER} ${typeof version === "string" ? version.slice(0, 32) : "unknown"} on ${process.platform}/${process.arch})`);
 }
 
+// Early visibility only, never admission: the receipt in the transcript stays
+// the authority. A native install runs `.../versions/<version>`; any other
+// executable path gives no version and so no warning. Returns null when the
+// running version is proven or unknown, otherwise a text naming the version
+// and the route to a proof.
+export function unprovenRunningVersionNotice(execPath = process.env.CLAUDE_CODE_EXECPATH) {
+  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(execPath ?? ""))?.[0];
+  if (!version) return null;
+  let proven;
+  try { proven = providerVersionProven(version); } catch { proven = false; }
+  if (proven) return null;
+  return `Codex Companion: Claude Code ${version} on ${process.platform}/${process.arch} has no receipt proof in this plugin's ` +
+    "provider-receipts.json, so every Codex state write here (rescue, review, setup, status updates) refuses with " +
+    "'provider version unproven' until a plugin release lists it. Retrying does not help. The fix is a native receipt proof " +
+    `in the plugin checkout: uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version ${version} --prepare-candidate, ` +
+    "then review and release.";
+}
+
 export function resolveAdmissionStateDir(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonical = workspaceRoot;

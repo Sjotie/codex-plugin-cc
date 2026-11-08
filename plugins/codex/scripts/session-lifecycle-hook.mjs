@@ -16,6 +16,7 @@ import {
 } from "./lib/broker-lifecycle.mjs";
 import { loadState, beginSessionStateLockStart, completeSessionStateLockStart, activateFixedHookAdmission, completeFixedSessionEndAdmission, resolveStateFile, STATE_LOCK_ADMISSION_ENV, updateJobRecord } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
+import { unprovenRunningVersionNotice } from "./lib/session-admission.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
@@ -141,9 +142,14 @@ function handleSessionStart(input, started) {
     // Ready-state alone never authorizes a consumer before that receipt.
     // Written before the exports: if they fail, the failed receipt carries
     // this attempt's token, so waiting holders of C stop at once.
+    // An unproven running version cannot be admitted later anyway; say so now
+    // to the user and the agent instead of only at the first refused write.
+    // The proven route keeps its measured output unchanged.
+    const notice = unprovenRunningVersionNotice();
+    const context = `Codex Companion session context refreshed at ${new Date().toISOString()}.`;
     process.stdout.write(`${JSON.stringify({ continue: true, suppressOutput: true,
-      hookSpecificOutput: { hookEventName: "SessionStart",
-        additionalContext: `Codex Companion session context refreshed at ${new Date().toISOString()}.` },
+      ...(notice ? { systemMessage: notice } : {}),
+      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: notice ? `${context}\n${notice}` : context },
       codexStateLockAdmission: published.token })}\n`);
     appendEnvVar("CLAUDE_CODE_SESSION_ID", process.env.CLAUDE_CODE_SESSION_ID);
     appendEnvVar(STATE_LOCK_ADMISSION_ENV, JSON.stringify(published.envelope));

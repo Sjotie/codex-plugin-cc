@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased (fork, Homebase #1916)
+
+- macOS: when the running Claude Code (native install) is not a proven
+  provider version, SessionStart now says so to the user (`systemMessage`)
+  and to the agent (one additional-context line), naming the version and the
+  proof command. Nothing is admitted by it; the proven route's output is
+  unchanged.
+- `tests/fenced-lock/macos-d-pty-probe.py --prepare-candidate` is the receipt
+  proof for a new version in one command: it adds the candidate entry for the
+  run and, only when green, writes the fixtures, the evidence and the
+  completed entry; otherwise it restores the manifest.
+
 ## 1.0.7-sjotie.27.1 (fork, Homebase #1916; 2026-11-08)
 
 - macOS: state writes work again in real profiles. Claude Code merges the

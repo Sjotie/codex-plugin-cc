@@ -20,14 +20,29 @@ to the moment its receipt line R (this attempt's token) is in the transcript.
 It also checks that no capability or attempt id reaches model input: in every
 transcript these ids appear only in the raw stdout of the fixed hook's record.
 
-Run on the Mac, from the plugin checkout, with an existing Claude login:
+Run on the Mac, from the plugin checkout, with an existing Claude login. For a
+new Claude Code version, one command does the whole proof (about ten minutes,
+one short session); as a Factory job, keep the fixture out of the job's TMPDIR,
+which is removed when the job ends:
 
-    uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version 2.1.308
+    factory-job run --name receipt-X.Y.Z --kind net -- \\
+      env TMPDIR="$FACTORY_SCRATCH_DIR/1916" \\
+      uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version X.Y.Z --prepare-candidate
 
-Options: --expect-version X.Y.Z (required; must equal `claude --version` and
-have a darwin/arm64 manifest entry whose binarySha256 is this binary's),
---auto-window TOKENS (default 20000), --max-fills N (default 60),
---auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
+--prepare-candidate (the version must not be listed yet; plugins/codex and this
+harness must be committed) adds the candidate entry with the measured binary
+hash, so the product admits the version for the run. Only a fully green run
+keeps it: it then writes the measured sanitized record shapes to
+tests/fixtures/provider-receipts/claude-code-X.Y.Z.json, the sanitized summary
+to docs/releases/claude-code-X.Y.Z-receipt-evidence.json, and completes the
+entry with evidenceCommit (HEAD, which holds the exact product and harness
+bytes) and both hashes. Commit those three files and send them to review. A red
+or aborted run restores the manifest byte for byte. Without the flag the entry
+must already be listed, with this binary's hash.
+
+Options: --expect-version X.Y.Z (required; must equal `claude --version`),
+--prepare-candidate, --auto-window TOKENS (default 20000), --max-fills N
+(default 60), --auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
 <fixture>/summary.json and prints its path; remove the directory when done.
 Exit status 0 only when every check passed. It stops only the Claude process
 it started itself. Each step waits for the turn's Stop hook before the next
@@ -64,6 +79,47 @@ def sha(text, n=16):
 def file_sha(path):
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
+
+
+MANIFEST_REL = "plugins/codex/scripts/lib/provider-receipts.json"
+ADAPTER = "session-start-hook-success-v1"
+PREPARED = {"bytes": None, "kept": False}
+
+
+def candidate_paths(version):
+    return {"evidenceSummary": f"docs/releases/claude-code-{version}-receipt-evidence.json",
+            "fixtures": f"tests/fixtures/provider-receipts/claude-code-{version}.json"}
+
+
+def write_json(rel, value, indent=2):
+    with open(os.path.join(REPO, rel), "w") as f:
+        f.write(json.dumps(value, indent=indent) + "\n")
+
+
+def record_shapes(raw, version):
+    """The adapter-read fields of the measured records, values as placeholders."""
+    success, context = raw["hookSuccess"], raw["additionalContext"]
+    a, c = success["attachment"], context["attachment"]
+    assert a["hookName"] == "SessionStart:startup" and a["command"] == COMMAND, "unexpected success receipt shape"
+    assert isinstance(c.get("content"), list) and len(c["content"]) == 1 and isinstance(c.get("toolUseID"), str), "unexpected context record shape"
+    base = lambda r: {"type": r["type"], "version": version, "sessionId": "<sessionId>", "cwd": "<cwd>", "isSidechain": r["isSidechain"]}
+    return {
+        "note": f"Sanitized shapes of the Claude Code {version} SessionStart transcript records that the receipt adapter {ADAPTER} reads (#1916), "
+                "measured on darwin/arm64 by tests/fenced-lock/macos-d-pty-probe.py --prepare-candidate. Placeholders in <angle brackets> are "
+                "filled by the test harness; no captured ids, paths or tokens.",
+        "hookSuccess": {**base(success), "attachment": {"type": a["type"], "hookEvent": a["hookEvent"], "hookName": "SessionStart:<source>",
+                                                         "exitCode": "<exitCode>", "command": a["command"], "stdout": "<stdout>"}},
+        "additionalContext": {**base(context), "attachment": {"type": c["type"], "hookName": c["hookName"], "hookEvent": c["hookEvent"],
+                                                               "content": ["<content>"], "toolUseID": "<toolUseID>"}},
+    }
+
+
+def sanitized(summary):
+    """The summary with the fixture root and the home directory as placeholders."""
+    text = json.dumps(summary)
+    for path, label in ((summary["root"], "<fixture>"), (os.path.realpath(os.path.expanduser("~")), "<home>"), (os.path.expanduser("~"), "<home>")):
+        text = text.replace(path, label)
+    return json.loads(text)
 
 
 def read_jsonl(path):
@@ -225,6 +281,8 @@ class TranscriptWatch(threading.Thread):
     def __init__(self, path):
         super().__init__(daemon=True)
         self.path, self.seen, self.offset, self.running = path, {}, 0, True
+        # First raw success receipt and context record, for --prepare-candidate.
+        self.raw = {}
 
     def run(self):
         partial = b""
@@ -243,6 +301,8 @@ class TranscriptWatch(threading.Thread):
                 try:
                     r = json.loads(line)
                     a = r.get("attachment") or {}
+                    if r.get("type") == "attachment" and a.get("type") == "hook_additional_context" and a.get("hookEvent") == "SessionStart":
+                        self.raw.setdefault("additionalContext", r)
                     if a.get("command") != COMMAND:
                         continue
                     try:
@@ -250,6 +310,8 @@ class TranscriptWatch(threading.Thread):
                     except ValueError:
                         token, parsed = {}, False
                     key = token.get("attemptId") or f"untokened-{len(self.seen)}"
+                    if token and a.get("type") == "hook_success" and a.get("exitCode") == 0:
+                        self.raw.setdefault("hookSuccess", r)
                     self.seen.setdefault(key, {"seenAt": now, "type": a.get("type"), "exitCode": a.get("exitCode"), "hookName": a.get("hookName"), "durationMs": a.get("durationMs"), "version": r.get("version"), "source": token.get("source"),
                                                "stdoutParsed": parsed, "stdoutHasToken": bool(token), "fieldTypes": {k: type(v).__name__ for k, v in a.items() if k in ("type", "hookEvent", "hookName", "exitCode", "command", "stdout")},
                                                "recordFields": {k: type(r.get(k)).__name__ for k in ("type", "version", "sessionId", "cwd", "isSidechain")}})
@@ -262,6 +324,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
     ap.add_argument("--expect-version", required=True)
+    ap.add_argument("--prepare-candidate", action="store_true")
     ap.add_argument("--auto-window", type=int, default=20000)
     ap.add_argument("--max-fills", type=int, default=60)
     ap.add_argument("--auto-minutes", type=float, default=25)
@@ -274,9 +337,24 @@ def main():
     assert version.split(" ")[0] == expected, f"Claude Code {expected} required, found {version!r}"
     claude_bin = os.path.realpath(shutil.which(args.claude) or args.claude)
     # The product admits only manifest versions, so the entry under test must
-    # already be in this checkout; its binary hash must be the measured binary.
-    manifest = json.load(open(os.path.join(REPO, "plugins/codex/scripts/lib/provider-receipts.json")))
-    entry = [e for e in manifest["entries"] if (e["version"], e["platform"], e["arch"]) == (expected, "darwin", "arm64")]
+    # be in this checkout; its binary hash must be the measured binary.
+    manifest_path = os.path.join(REPO, MANIFEST_REL)
+    manifest_bytes = open(manifest_path, "rb").read()
+    manifest = json.loads(manifest_bytes)
+    listed = lambda m: [e for e in m["entries"] if (e["version"], e["platform"], e["arch"]) == (expected, "darwin", "arm64")]
+    candidate = None
+    if args.prepare_candidate:
+        assert not listed(manifest), f"{expected} is already listed; --prepare-candidate is for a version without an entry"
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "plugins/codex", os.path.relpath(__file__, REPO)], cwd=REPO, capture_output=True, text=True, check=True).stdout
+        assert not dirty.strip(), "commit plugins/codex and this harness first: evidenceCommit must hold the exact bytes of the run"
+        # Placeholders until the run is green; validated like any entry.
+        candidate = {"provider": "claude-code", "version": expected, "platform": "darwin", "arch": "arm64", "receiptAdapter": ADAPTER,
+                     "binarySha256": file_sha(claude_bin), "evidenceCommit": "0" * 40, "evidenceSummary": candidate_paths(expected)["evidenceSummary"],
+                     "evidenceSummarySha256": "0" * 64, "fixtures": candidate_paths(expected)["fixtures"], "fixturesSha256": "0" * 64}
+        manifest["entries"].append(candidate)
+        PREPARED["bytes"] = manifest_bytes
+        write_json(MANIFEST_REL, manifest)
+    entry = listed(manifest)
     assert len(entry) == 1, f"provider-receipts.json needs exactly one darwin/arm64 entry for {expected}"
     assert entry[0]["binarySha256"] == file_sha(claude_bin), "manifest binarySha256 is not the measured Claude binary"
 
@@ -627,9 +705,34 @@ def main():
         term.stop()
         summary["ownClaudeStopped"] = term.exited()
         persist()
+        if candidate is not None and summary.get("passed"):
+            # Green: the measured shapes, the sanitized evidence and the
+            # completed entry. Anything else leaves the manifest restored.
+            startup_watch = watches.get(start.get("transcriptPath")) if start else None
+            shapes = record_shapes(startup_watch.raw if startup_watch else {}, expected)
+            write_json(candidate["fixtures"], shapes)
+            evidence = {"ticket": 1916, "kind": "native-provider-receipt-proof", "provider": "claude-code", "version": expected, "platform": "darwin", "arch": "arm64",
+                        "receiptAdapter": ADAPTER, "evidenceCommit": summary["repoHead"],
+                        "note": "Written by macos-d-pty-probe.py --prepare-candidate. Product and harness are the bytes of evidenceCommit plus the candidate "
+                                "manifest entry, which differs from the committed one only in evidenceCommit, evidenceSummarySha256 and fixturesSha256 "
+                                "(placeholders during the run). Paths are <fixture> and <home>; ids are hashes only.",
+                        "candidateManifestSha256": summary["sourceHashes"].get(MANIFEST_REL), "summary": sanitized(summary)}
+            write_json(candidate["evidenceSummary"], evidence, indent=1)
+            candidate.update({"evidenceCommit": summary["repoHead"], "evidenceSummarySha256": file_sha(os.path.join(REPO, candidate["evidenceSummary"])),
+                              "fixturesSha256": file_sha(os.path.join(REPO, candidate["fixtures"]))})
+            write_json(MANIFEST_REL, manifest)
+            PREPARED["kept"] = True
+            print(json.dumps({"candidate": {"version": expected, "written": [MANIFEST_REL, candidate["fixtures"], candidate["evidenceSummary"]]}}))
         print(json.dumps({"summary": os.path.join(root, "summary.json"), "passed": summary.get("passed"), "latencyMs": summary.get("latencyMs"), "failure": summary.get("failure"), "failedChecks": [k for k, v in summary.get("checks", {}).items() if not v]}))
     sys.exit(0 if summary.get("passed") else 1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # --prepare-candidate: a red, failed or aborted run never leaves an
+        # unproven entry behind.
+        if PREPARED["bytes"] is not None and not PREPARED["kept"]:
+            with open(os.path.join(REPO, MANIFEST_REL), "wb") as f:
+                f.write(PREPARED["bytes"])

@@ -760,6 +760,35 @@ for (const e of JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex
   });
 }
 
+// An unproven running version is visible at SessionStart (user and agent);
+// the warning grants nothing, and the proven route keeps its exact output.
+for (const [label, execPath, warned] of [
+  ["unproven native version", "/opt/claude/versions/0.0.1", true],
+  ["proven native version", "/opt/claude/versions/2.1.308", false],
+  ["non-native executable", "/usr/local/bin/node", false]
+]) {
+  test(`D: SessionStart with ${label} ${warned ? "warns" : "stays silent"}`, options, (t) => {
+    const f = fixture(t);
+    f.env.CLAUDE_CODE_EXECPATH = execPath;
+    const r = f.runHook({}, undefined, { omit: true });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(Object.hasOwn(out, "systemMessage"), warned);
+    const context = out.hookSpecificOutput.additionalContext;
+    if (warned) {
+      assert.match(out.systemMessage, /Claude Code 0\.0\.1 .*provider version unproven.*--expect-version 0\.0\.1 --prepare-candidate/s);
+      assert.equal(context.split("\n")[1], out.systemMessage);
+      // The warning is no admission: the receipt of this version still refuses.
+      f.appendReceipt(r, { record: { version: "0.0.1" } });
+      assert.equal(f.consume().acquired, false);
+    } else {
+      assert.match(context, /^Codex Companion session context refreshed at [^\n]+\.$/);
+      f.appendReceipt(r);
+      assert.equal(f.consume().acquired, true);
+    }
+  });
+}
+
 // The queued job the consume helper seeds, as a worker would receive it.
 function seedJob(f) {
   const seeded = f.consume({}, "seed-job");

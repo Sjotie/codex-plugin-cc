@@ -39,11 +39,16 @@ native coverage; this candidate is not permission to publish or install it.
 On macOS this candidate accepts only the Claude Code versions listed with
 their proof in `plugins/codex/scripts/lib/provider-receipts.json` (now
 **2.1.301 and 2.1.308 on darwin/arm64**): another version, platform or process
-architecture refuses with `provider version unproven`. A new version gets its
-own entry only after a green native run of
-`uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version <version>`
-on the Mac, with the candidate entry (its binary hash) already in the
-manifest; the run's sanitized summary becomes the entry's evidence. Stop and SessionEnd
+architecture refuses with `provider version unproven`. When Claude Code runs
+from a native install (`.../versions/<version>`) whose version is not listed,
+SessionStart says so at once, to the user (`systemMessage`) and to the agent
+(one context line), with the route below; this warning grants nothing. A new
+version gets its own entry only after a green native run on the Mac of
+`uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version <version> --prepare-candidate`,
+which adds the candidate entry with the measured binary hash for the run and,
+only when every check is green, writes the measured record shapes, the
+sanitized evidence and the completed entry (see the harness for the
+`factory-job` form). Stop and SessionEnd
 recover only the current session capability from the same authority, with a
 fresh check of Claude's successful SessionStart receipt. A seal alone grants
 nothing.
