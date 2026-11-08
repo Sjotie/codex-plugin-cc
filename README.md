@@ -506,3 +506,8 @@ The generic admission fixture publishes one shared certificate atomically in
 the fixture fence. Consumers reuse it only while the fence/authority identities
 and sealed record hash match. Certificate reuse still acquires the real state
 lock; it avoids preparing admission again while another writer holds that lock.
+
+On macOS the runner limits execution to two test files at a time. Individual
+concurrency tests still start all 50 writers; this avoids running that stress
+check alongside thirteen other native process/lock suites on a 14-core host.
+The product's lock deadline remains unchanged.

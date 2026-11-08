@@ -16,7 +16,7 @@ for (const key of ['CODEX_COMPANION_SESSION_ID', 'CLAUDE_PLUGIN_DATA']) delete e
 try {
   assertSocketPathBudget(root);
   const result = spawnSync(process.execPath, ['--import', path.join(here, 'generic-admission-setup.mjs'),
-    '--test', ...process.argv.slice(2), ...fs.readdirSync(here).filter(name => name.endsWith('.test.mjs')).map(name => path.join(here, name))],
+    '--test', ...(process.platform === 'darwin' ? ['--test-concurrency=2'] : []), ...process.argv.slice(2), ...fs.readdirSync(here).filter(name => name.endsWith('.test.mjs')).map(name => path.join(here, name))],
   { env, stdio: 'inherit', timeout: 15 * 60 * 1000 });
   if (result.error) console.error(result.error.message);
   process.exitCode = result.status ?? 1;
