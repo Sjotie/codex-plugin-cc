@@ -20,12 +20,12 @@
   (a second publication waits 30 s, then refuses). A manifest that changed
   during the run, a version already listed, an existing fixture or evidence
   file, or a target directory outside the checkout (symlink) fails the run
-  with nothing written. SIGTERM/SIGHUP/SIGINT are blocked during the commit:
-  before it they roll back, during it they are handled after it with the
-  publication complete. A rollback removes only files that are still the ones
-  this run created. A red, failed or killed run leaves the checkout
-  untouched; SIGKILL during the commit can leave the two new files, which the
-  next run names. macOS and Linux only.
+  with nothing written. SIGTERM/SIGHUP/SIGINT are only recorded meanwhile:
+  before the commit they roll back, during it they are handled after it with
+  the publication complete. A rollback removes only files that are still the
+  ones this run created. A red, failed or killed run leaves the checkout
+  untouched; SIGKILL during publication can leave the new files or temps,
+  which the next run names at its start. macOS and Linux only.
 
 ## 1.0.7-sjotie.27.1 (fork, Homebase #1916; 2026-11-08)
 

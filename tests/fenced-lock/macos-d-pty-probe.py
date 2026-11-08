@@ -44,12 +44,12 @@ then refuses): when the manifest changed during the run (its bytes differ from
 the start), already lists the version, one of the two files already exists,
 or a target directory resolves outside the checkout (a symlink), the run fails
 and nothing is written; the run's evidence stays in its fixture directory.
-SIGTERM, SIGHUP and SIGINT are blocked during the commit: one before it rolls
-back, one during it is handled once the publication is complete. A rollback
-removes only files that are still the ones this run created. SIGKILL during
-the commit can leave the two new files; the next run then refuses and names
-them. macOS and Linux only (flock, pthread_sigmask). Without the flag the
-entry must already be listed, with this binary's hash.
+SIGTERM, SIGHUP and SIGINT are only recorded during publication: one before
+the commit rolls back, one during it is handled once the publication is
+complete. A rollback removes only files that are still the ones this run
+created. SIGKILL can leave the new files or `.candidate-<pid>` temps; the next
+run refuses at its start and names them. macOS and Linux only (flock).
+Without the flag the entry must already be listed, with this binary's hash.
 
 Options: --expect-version X.Y.Z (required; must equal `claude --version`),
 --prepare-candidate, --auto-window TOKENS (default 20000), --max-fills N
@@ -143,6 +143,21 @@ PUBLISH_LOCK_WAIT_S = 30
 PUBLISH_SIGNALS = ("SIGTERM", "SIGHUP", "SIGINT")
 
 
+def candidate_leftovers(repo, candidate):
+    """What an earlier killed publication can leave: the two new files and
+    `.candidate-<pid>` / `.rollback-<pid>` temps next to the three targets."""
+    found = []
+    for rel in (candidate["fixtures"], candidate["evidenceSummary"], MANIFEST_REL):
+        directory = os.path.join(repo, os.path.dirname(rel))
+        base = os.path.basename(rel)
+        if rel != MANIFEST_REL and os.path.lexists(os.path.join(repo, rel)):
+            found.append(rel)
+        if os.path.isdir(directory):
+            found += sorted(os.path.join(os.path.dirname(rel), n) for n in os.listdir(directory)
+                            if n.startswith(base + ".candidate-") or n.startswith(base + ".rollback-"))
+    return found
+
+
 def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
     """Completes the candidate entry and writes the fixtures, the evidence and
     the manifest (as read at the start of the run, plus the candidate) to the
@@ -153,17 +168,21 @@ def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
     publication waits PUBLISH_LOCK_WAIT_S and then refuses (a lock file would
     dirty plugins/codex and block the next run's clean check). Under it, the
     run refuses with nothing written when the manifest changed during the run,
-    already lists the version, a target file exists, or a target directory
-    resolves outside the checkout. The commit itself (link the two new files,
-    compare the manifest once more, rename it) runs with SIGTERM, SIGHUP and
-    SIGINT blocked: a signal before it rolls back, one during it is handled
-    after it, with the publication complete. A rollback removes only files
-    whose (st_dev, st_ino) is still what this run created; anything else is
-    left and named. SIGKILL can still leave the two new files (the next run
-    then refuses and names them). Needs flock and pthread_sigmask: refuses on
+    already lists the version, a target file or a leftover temp exists, or a
+    target directory resolves outside the checkout.
+
+    SIGTERM, SIGHUP and SIGINT only get recorded while this runs, whichever
+    thread they reach, so nothing is interrupted halfway: one recorded before
+    the commit (the lock wait included) rolls back, one during the commit
+    (link the two new files, compare the manifest once more, rename it) is
+    handled after it, with the publication complete. A failing commit keeps
+    its own error. A rollback first renames a path aside atomically and
+    removes it only when (st_dev, st_ino) is what this run created; anything
+    else goes back and is named. SIGKILL can leave the new files and temps;
+    the next run refuses at its start and names them. Needs flock: refuses on
     Windows."""
-    if os.name == "nt" or not hasattr(signal, "pthread_sigmask"):
-        raise RuntimeError("publishing a candidate needs flock and pthread_sigmask (macOS or Linux); refused here")
+    if os.name == "nt":
+        raise RuntimeError("publishing a candidate needs flock (macOS or Linux); refused here")
     import fcntl
 
     digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
@@ -192,13 +211,14 @@ def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
             if f.read() != manifest_bytes:
                 raise RuntimeError(f"{MANIFEST_REL} changed during the run; nothing written (rerun from the current checkout)")
 
-    signals = [getattr(signal, name) for name in PUBLISH_SIGNALS]
     received = []
 
-    def interrupted(signum, _frame):
+    def record(signum, _frame):
         received.append(signum)
-        if not committed:
-            raise RuntimeError(f"signal {signum} during publication; rolled back")
+
+    def not_interrupted():
+        if received:
+            raise RuntimeError(f"signal {received[0]} during publication, before its commit; nothing written")
 
     owned = {}  # path -> (st_dev, st_ino) of what this run created there
 
@@ -206,33 +226,38 @@ def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
         st = os.lstat(path)
         owned[path] = (st.st_dev, st.st_ino)
 
-    def report(foreign):
-        if foreign:
-            print(f"publish_candidate: left in place, not created by this run: {', '.join(foreign)}", file=sys.stderr)
-
     def rollback():
         foreign = []
         for path, ident in list(owned.items()):
             owned.pop(path)
+            aside = f"{path}.rollback-{os.getpid()}"
             try:
-                st = os.lstat(path)
+                os.rename(path, aside)
             except FileNotFoundError:
                 continue
+            st = os.lstat(aside)
             if (st.st_dev, st.st_ino) == ident:
-                os.remove(path)
-            else:
+                os.remove(aside)
+                continue
+            try:
+                os.link(aside, path)
+                os.remove(aside)
                 foreign.append(path)
-        return foreign
+            except FileExistsError:
+                foreign.append(f"{path} (now at {aside})")
+        if foreign:
+            print(f"publish_candidate: left in place, not created by this run: {', '.join(foreign)}", file=sys.stderr)
 
-    committed = False
-    handlers = {sig: signal.signal(sig, interrupted) for sig in signals}
+    handlers = {sig: signal.signal(sig, record) for sig in (getattr(signal, n) for n in PUBLISH_SIGNALS)}
     lock = None
+    committed = False
     try:
         manifest_target = inside(MANIFEST_REL)
         new_files = [(inside(candidate["fixtures"]), candidate["fixtures"], shapes), (inside(candidate["evidenceSummary"]), candidate["evidenceSummary"], evidence)]
         lock = os.open(os.path.dirname(manifest_target), os.O_RDONLY)
         deadline = time.monotonic() + PUBLISH_LOCK_WAIT_S
         while True:
+            not_interrupted()
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
@@ -240,48 +265,41 @@ def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"another candidate publication holds the lock on {os.path.dirname(MANIFEST_REL)} for over {PUBLISH_LOCK_WAIT_S} s; nothing written") from None
                 time.sleep(0.05)
-        for target, rel, _ in new_files:
-            if os.path.lexists(target):
-                raise exists_refusal(rel)
+        leftovers = candidate_leftovers(root, candidate)
+        if leftovers:
+            raise RuntimeError(f"left by an earlier publication: {', '.join(leftovers)}; a candidate never overwrites (remove them, then rerun)")
         unchanged(manifest_target)
         manifest = json.loads(manifest_bytes)
         key = lambda e: (e.get("version"), e.get("platform"), e.get("arch"))
         if any(key(e) == key(candidate) for e in manifest["entries"]):
             raise RuntimeError(f"{candidate['version']} is already listed for {candidate['platform']}/{candidate['arch']}; nothing written")
         manifest["entries"].append(candidate)
-        # From here to commit or rollback no signal interrupts: one that comes
-        # in waits for the unblock below.
-        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
-        try:
-            temps = []
-            for target, _, text in new_files + [(manifest_target, MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")]:
-                temp = f"{target}.candidate-{os.getpid()}"
-                with open(temp, "x") as f:
-                    own(temp)
-                    f.write(text)
-                temps.append(temp)
-            for (target, rel, _), temp in zip(new_files, temps):
-                try:
-                    # A hard link never replaces an existing name: exclusive and whole.
-                    os.link(temp, target)
-                except FileExistsError:
-                    raise exists_refusal(rel) from None
-                own(target)
-            unchanged(manifest_target)
-            os.replace(temps[2], manifest_target)
-            owned.pop(temps[2])
-            committed = True
-        finally:
-            if not committed:
-                report(rollback())
-            # A signal that came in meanwhile is delivered here: after the
-            # commit it is only recorded; otherwise the rollback is done.
-            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+        temps = []
+        for target, _, text in new_files + [(manifest_target, MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")]:
+            temp = f"{target}.candidate-{os.getpid()}"
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            own(temp)
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            temps.append(temp)
+        not_interrupted()
+        # The commit: from here a signal is only handled after it.
+        for (target, rel, _), temp in zip(new_files, temps):
+            try:
+                # A hard link never replaces an existing name: exclusive and whole.
+                os.link(temp, target)
+            except FileExistsError:
+                raise exists_refusal(rel) from None
+            own(target)
+        unchanged(manifest_target)
+        os.replace(temps[2], manifest_target)
+        committed = True
+        owned.pop(temps[2])
         for temp in temps[:2]:
             os.remove(temp)
     except BaseException:
         if not committed:
-            report(rollback())
+            rollback()
         raise
     finally:
         for sig, handler in handlers.items():
@@ -526,6 +544,8 @@ def main():
     if args.prepare_candidate:
         assert not listed(manifest), f"{expected} is already listed; --prepare-candidate is for a version without an entry"
         dirty = subprocess.run(["git", "status", "--porcelain", "--", "plugins/codex", os.path.relpath(__file__, REPO)], cwd=REPO, capture_output=True, text=True, check=True).stdout
+        leftovers = candidate_leftovers(REPO, {"fixtures": candidate_paths(expected)["fixtures"], "evidenceSummary": candidate_paths(expected)["evidenceSummary"]})
+        assert not leftovers, f"left by an earlier publication: {', '.join(leftovers)}; remove them, then rerun"
         assert not dirty.strip(), "commit plugins/codex and this harness first: evidenceCommit must hold the exact bytes of the run"
         # Placeholders until the run is green; validated like any entry.
         candidate = {"provider": "claude-code", "version": expected, "platform": "darwin", "arch": "arm64", "receiptAdapter": ADAPTER,

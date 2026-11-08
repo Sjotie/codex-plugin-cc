@@ -125,7 +125,7 @@ for (const rel of [FIXTURES, EVIDENCE]) {
     fs.writeFileSync(path.join(c.repo, rel), "earlier\n");
     const r = publish(c, c.read(MANIFEST));
     assert.equal(r.ok, false);
-    assert.match(r.error, /already exists/);
+    assert.match(r.error, new RegExp(`left by an earlier publication: ${rel.replace(/[.]/g, "\\.")}`));
     assert.equal(c.read(rel), "earlier\n");
     assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
     for (const other of [FIXTURES, EVIDENCE].filter((x) => x !== rel)) assert.equal(c.exists(other), false);
@@ -177,22 +177,22 @@ test("publish: a manifest change while the new files are placed refuses and remo
 // The commit runs with SIGTERM/SIGHUP/SIGINT blocked: a signal that comes in
 // during it is handled after it, and the publication is complete.
 for (const [label, prelude] of [
-  ["right after the first link", `real_link = os.link
+  ...["SIGTERM", "SIGHUP", "SIGINT"].map((sig) => [`${sig} right after the first link`, `real_link = os.link
 def link(src, dst, *rest, **kw):
     real_link(src, dst, *rest, **kw)
-    os.kill(os.getpid(), signal.SIGTERM)
-os.link = link`],
-  ["right after the manifest rename", `real_replace = os.replace
+    os.kill(os.getpid(), signal.${sig})
+os.link = link`]),
+  ["SIGTERM right after the manifest rename", `real_replace = os.replace
 def replace(src, dst, *rest, **kw):
     real_replace(src, dst, *rest, **kw)
     os.kill(os.getpid(), signal.SIGTERM)
 os.replace = replace`]
 ]) {
-  test(`publish: SIGTERM ${label} completes the publication, then is handled`, options, (t) => {
+  test(`publish: ${label} completes the publication, then is handled`, options, (t) => {
     const c = checkout(t);
     const r = publish(c, c.read(MANIFEST), { prelude });
     assert.equal(r.ok, true, r.error);
-    assert.match(r.stderr, /signal 15 came in during the commit; the publication is complete/);
+    assert.match(r.stderr, /signal \d+ came in during the commit; the publication is complete/);
     assert.deepEqual(JSON.parse(c.read(MANIFEST)).entries.map((e) => e.version), ["2.1.301", VERSION]);
     assert.equal(c.exists(FIXTURES), true);
     assert.equal(c.exists(EVIDENCE), true);
@@ -208,7 +208,7 @@ def lexists(path):
     return real_lexists(path)
 os.path.lexists = lexists` });
   assert.equal(r.ok, false);
-  assert.match(r.error, /signal 15 during publication; rolled back/);
+  assert.match(r.error, /signal 15 during publication, before its commit; nothing written/);
   assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
   assert.equal(c.exists(FIXTURES), false);
   assert.equal(c.exists(EVIDENCE), false);
@@ -257,7 +257,10 @@ os.replace = replace`;
   const ready = () => fs.readdirSync(c.root).filter((n) => n.startsWith("ready-"));
   let atRelease;
   try {
-    for (let i = 0; i < 300 && ready().length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    // The first to reach the rename may take a while on a loaded machine; then
+    // give the other a fixed interval in which it must not get there too.
+    for (let i = 0; i < 6000 && ready().length < 1; i++) await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 1500));
     atRelease = ready().length;
   } finally {
     fs.writeFileSync(path.join(c.root, "release"), "");
@@ -275,7 +278,7 @@ os.replace = replace`;
 test("publish: a lock held past the wait refuses with nothing written", options, async (t) => {
   const c = checkout(t);
   const holder = spawn(python, ["-I", "-B", "-c", `import fcntl, os, sys, time
-fd = os.open(sys.argv[1], os.O_RDONLY); fcntl.flock(fd, fcntl.LOCK_EX); print("held", flush=True); time.sleep(5)`, path.join(c.repo, path.dirname(MANIFEST))], { stdio: ["ignore", "pipe", "inherit"] });
+fd = os.open(sys.argv[1], os.O_RDONLY); fcntl.flock(fd, fcntl.LOCK_EX); print("held", flush=True); time.sleep(600)`, path.join(c.repo, path.dirname(MANIFEST))], { stdio: ["ignore", "pipe", "inherit"] });
   t.after(() => holder.kill());
   await new Promise((resolve) => holder.stdout.once("data", resolve));
   const r = publish(c, c.read(MANIFEST), { prelude: "m.PUBLISH_LOCK_WAIT_S = 0.3" });
@@ -284,4 +287,76 @@ fd = os.open(sys.argv[1], os.O_RDONLY); fcntl.flock(fd, fcntl.LOCK_EX); print("h
   assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
   assert.equal(c.exists(FIXTURES), false);
   assert.deepEqual(leftovers(c), []);
+});
+
+test("publish: a signal during a commit that then fails keeps the real error and rolls back", options, (t) => {
+  const c = checkout(t);
+  const changed = manifestText("2.1.301", "8.8.8");
+  const r = publish(c, c.read(MANIFEST), { prelude: `real_link = os.link
+def link(src, dst, *rest, **kw):
+    real_link(src, dst, *rest, **kw)
+    os.kill(os.getpid(), signal.SIGTERM)
+    open(os.path.join(a["repo"], "plugins/codex/scripts/lib/provider-receipts.json"), "w").write(${JSON.stringify(changed)})
+os.link = link` });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /provider-receipts\.json changed during the run; nothing written/);
+  assert.equal(c.read(MANIFEST), changed);
+  assert.equal(c.exists(FIXTURES), false);
+  assert.equal(c.exists(EVIDENCE), false);
+  assert.deepEqual(leftovers(c), []);
+});
+
+test("publish: SIGTERM while waiting for the lock refuses with nothing written", options, async (t) => {
+  const c = checkout(t);
+  const holder = spawn(python, ["-I", "-B", "-c", `import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY); fcntl.flock(fd, fcntl.LOCK_EX); print("held", flush=True); time.sleep(600)`, path.join(c.repo, path.dirname(MANIFEST))], { stdio: ["ignore", "pipe", "inherit"] });
+  t.after(() => holder.kill());
+  await new Promise((resolve) => holder.stdout.once("data", resolve));
+  const r = publish(c, c.read(MANIFEST), { prelude: `import threading
+threading.Timer(0.3, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()` });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /signal 15 during publication, before its commit; nothing written/);
+  assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
+  assert.equal(c.exists(FIXTURES), false);
+});
+
+test("publish: a second publication after the first finished refuses", options, (t) => {
+  const c = checkout(t);
+  const start = c.read(MANIFEST);
+  assert.equal(publish(c, start).ok, true);
+  const after = c.read(MANIFEST);
+  const r = publish(c, start);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /left by an earlier publication/);
+  assert.equal(c.read(MANIFEST), after);
+});
+
+test("publish: a temp left by a killed publication is named, not overwritten", options, (t) => {
+  const c = checkout(t);
+  const stray = `${MANIFEST}.candidate-4242`;
+  fs.writeFileSync(path.join(c.repo, stray), "stray\n");
+  const r = publish(c, c.read(MANIFEST));
+  assert.equal(r.ok, false);
+  assert.match(r.error, new RegExp(`left by an earlier publication: ${stray.replace(/[.]/g, "\\.")}`));
+  assert.equal(fs.readFileSync(path.join(c.repo, stray), "utf8"), "stray\n");
+  assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
+});
+
+test("publish: a signal that reaches another thread during the commit is handled after it", options, (t) => {
+  const c = checkout(t);
+  // The probe has live helper threads (transcript watches, the pty pump).
+  const r = publish(c, c.read(MANIFEST), { prelude: `import threading
+helper = threading.Thread(target=lambda: time.sleep(5), daemon=True)
+helper.start()
+real_link = os.link
+def link(src, dst, *rest, **kw):
+    real_link(src, dst, *rest, **kw)
+    signal.pthread_kill(helper.ident, signal.SIGTERM)
+    time.sleep(0.05)
+os.link = link` });
+  assert.equal(r.ok, true, r.error);
+  assert.match(r.stderr, /signal 15 came in during the commit; the publication is complete/);
+  assert.equal(c.exists(FIXTURES), true);
+  assert.equal(c.exists(EVIDENCE), true);
+  assert.deepEqual(JSON.parse(c.read(MANIFEST)).entries.map((e) => e.version), ["2.1.301", VERSION]);
 });
