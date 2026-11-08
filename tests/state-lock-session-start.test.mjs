@@ -72,7 +72,8 @@ function fixture(t, repo = defaultRepo) {
     fs.readFileSync=function(file,...rest){
       if(file===0&&process.env.ADMISSION_STDIN_HOLD)while(!fs.existsSync(process.env.ADMISSION_STDIN_HOLD))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
       const c=JSON.parse(read.call(this,process.env.ADMISSION_FIXTURE,'utf8'));
-      if(c.denyAfterReceipt && String(file)===c.transcript && ++receiptReads>1)throw Object.assign(new Error('receipt became unreadable'),{code:'EPERM'});
+      // The product canonicalizes the transcript; TMPDIR can contain symlinks.
+      if(c.denyAfterReceipt && typeof file==='string' && fs.existsSync(file) && fs.realpathSync(file)===fs.realpathSync(c.transcript) && ++receiptReads>1)throw Object.assign(new Error('receipt became unreadable'),{code:'EPERM'});
       return read.call(this,file,...rest);};
     const initial=JSON.parse(read(process.env.ADMISSION_FIXTURE,'utf8'));
     if(initial.brokerWitness)net.createConnection=function(){fs.appendFileSync(initial.brokerWitness,'attempted\\n');throw new Error('fixture broker connection blocked');};
