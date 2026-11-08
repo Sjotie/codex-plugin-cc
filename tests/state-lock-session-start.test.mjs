@@ -1,7 +1,7 @@
 // Route 2 integration, with a deterministic ps fixture in child processes.
 // The real, unfiltered hook + Claude sandbox route lives in macos-live.mjs.
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import fs from "node:fs";
@@ -84,6 +84,8 @@ function fixture(t, repo = defaultRepo) {
   delete env[CERT];
   env.CLAUDE_CODE_SESSION_ID = "session-current";
   delete env.CODEX_COMPANION_SESSION_ID;
+  // Only the notice tests name a running binary; the outer session's own must not leak in.
+  delete env.CLAUDE_CODE_EXECPATH;
   const hookInput = (extra = {}) => ({ cwd: workspace, session_id: "session-current", transcript_path: transcript, source: "startup", ...extra });
   const receipt = (result, extra = {}) => {
     const r = fill(RECORDS.hookSuccess, { sessionId: extra.sessionId ?? "session-current", cwd: workspace, source: extra.source ?? "startup", exitCode: result.status ?? 1, stdout: result.stdout });
@@ -762,8 +764,9 @@ for (const e of JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex
 
 // An unproven running version is visible at SessionStart (user and agent),
 // once per new capability (not on compact); the notice grants nothing, and the
-// proven route keeps its exact output. A launcher symlink to versions/<v> is
-// followed; a broken manifest is named as such.
+// proven route keeps its exact output. Only the running binary's own path
+// counts: a launcher symlink is not followed, since its target can already be
+// a newer binary than the one running. A version proven elsewhere is named so.
 const versionLink = (t, version) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "execpath-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -772,16 +775,17 @@ const versionLink = (t, version) => {
   fs.symlinkSync(path.join(dir, "versions", version), path.join(dir, "claude"));
   return path.join(dir, "claude");
 };
-for (const [label, execPath, source, warned] of [
-  ["unproven native version", () => "/opt/claude/versions/0.0.1", "startup", /Claude Code 0\.0\.1 .*'admission refused'.*source repository.*--expect-version 0\.0\.1 --prepare-candidate/s],
-  ["unproven version behind the launcher symlink", (t) => versionLink(t, "0.0.1"), "startup", /Claude Code 0\.0\.1 /],
+for (const [label, execPath, source, warned, extraEnv = {}] of [
+  ["unproven native version", () => "/opt/claude/versions/0.0.1", "startup", /Claude Code 0\.0\.1 .*json, so .*'admission refused'.*source repository.*--expect-version 0\.0\.1 --prepare-candidate/s],
+  ["a version proven only on another arch", () => "/opt/claude/versions/2.1.308", "startup", /Claude Code 2\.1\.308 on darwin\/x64 .*\(it is proven only on darwin\/arm64\), so /s, { ADMISSION_FIXTURE_ARCH: "x64" }],
+  ["a launcher symlink to an unproven version", (t) => versionLink(t, "0.0.1"), "startup", null],
   ["unproven native version on compact", () => "/opt/claude/versions/0.0.1", "compact", null],
   ["proven native version", () => "/opt/claude/versions/2.1.308", "startup", null],
   ["non-native executable", () => "/usr/local/bin/node", "startup", null]
 ]) {
   test(`D: SessionStart with ${label} ${warned ? "warns" : "stays silent"}`, options, (t) => {
     const f = source === "compact" ? prepared(t) : fixture(t);
-    f.env.CLAUDE_CODE_EXECPATH = execPath(t);
+    Object.assign(f.env, extraEnv, { CLAUDE_CODE_EXECPATH: execPath(t) });
     const r = f.runHook({}, JSON.stringify(f.hookInput({ source })), { omit: true });
     if (source === "compact") {
       // The predecessor's receipt is proven, so the compact succeeds; it keeps
@@ -800,7 +804,7 @@ for (const [label, execPath, source, warned] of [
       assert.match(out.systemMessage, warned);
       assert.equal(context.split("\n")[1], out.systemMessage);
       // The notice is no admission: the receipt of this version still refuses.
-      f.appendReceipt(r, { record: { version: "0.0.1" } });
+      f.appendReceipt(r, { record: { version: path.basename(f.env.CLAUDE_CODE_EXECPATH) } });
       assert.equal(f.consume().acquired, false);
     } else {
       assert.match(context, /^Codex Companion session context refreshed at [^\n]+\.$/);
@@ -809,6 +813,22 @@ for (const [label, execPath, source, warned] of [
     }
   });
 }
+
+// Why the notice may only appear where admission refuses anyway: Claude
+// records a systemMessage as its own hook_system_message record after the
+// receipt (shape measured on 2.1.308), and that later record refuses at once.
+test("D: a hook_system_message after a proven receipt refuses at once, not as pending", options, (t) => {
+  const f = fixture(t);
+  const r = f.runHook({}, undefined, { omit: true });
+  assert.equal(r.status, 0, r.stderr);
+  f.appendReceipt(r);
+  assert.equal(f.classify(), "acquired");
+  const proven = f.receipt(r);
+  fs.appendFileSync(f.transcript, JSON.stringify({ ...proven, uuid: randomUUID(), attachment: {
+    type: "hook_system_message", content: "Codex Companion: notice", hookName: "SessionStart:startup",
+    toolUseID: randomUUID(), hookEvent: "SessionStart" } }) + "\n");
+  assert.equal(f.classify(), "definitive");
+});
 
 test("D: SessionStart with a malformed provider manifest names the manifest, not the version", options, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "manifest-notice-"));

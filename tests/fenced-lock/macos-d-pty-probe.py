@@ -103,10 +103,13 @@ def record_shapes(raw, version):
     base = lambda r: {"type": r["type"], "version": version, "sessionId": "<sessionId>", "cwd": "<cwd>", "isSidechain": r["isSidechain"]}
     # The merged record literally, key order as measured; every string value a
     # placeholder except the fixed identifiers, content neutral.
-    fixed = {"type", "hookName", "hookEvent", "toolUseID", "renderedRole", "userType", "entrypoint", "version", "gitBranch"}
+    # gitBranch is the probe's own fresh fixture repository, not a captured one.
+    fixed = {"type", "hookName", "hookEvent", "renderedRole", "userType", "entrypoint", "version", "gitBranch"}
     def literal(value, key=None):
         if key == "version":
             return version
+        if key == "toolUseID":
+            return value if value == "SessionStart" else "<toolUseID>"
         if isinstance(value, dict):
             return {k: literal(v, k) for k, v in value.items()}
         if isinstance(value, list):
@@ -403,7 +406,7 @@ def main():
             f.write(f"filler line {i:04d} for the auto compact window of the D probe; it carries no instruction.\n")
     node = shutil.which("node")
     commands = os.path.join(plugin, "commands")
-    for name, line, what in (("d-probe", f"{node} {probe}", "the D admission probe"), ("d-worker", f"{node} {worker}", "the D background worker"), ("d-fill", f"cat {filler}", "the filler output")):
+    for name, line, what in (("d-probe", f"{shlex.quote(node)} {shlex.quote(probe)}", "the D admission probe"), ("d-worker", f"{shlex.quote(node)} {shlex.quote(worker)}", "the D background worker"), ("d-fill", f"cat {shlex.quote(filler)}", "the filler output")):
         open(os.path.join(commands, f"{name}.md"), "w").write(f"---\ndescription: {what}\nallowed-tools: Bash(node:*), Bash(cat:*)\n---\nRun exactly this Bash command once, then say only OK. Do not run other commands.\n\n```bash\n{line}\n```\n")
     settings = os.path.join(root, "settings.json")
     # Bash sandbox off: Claude gives plugin hooks CLAUDE_PLUGIN_DATA under
@@ -427,7 +430,7 @@ def main():
                 "NODE_OPTIONS": f"--import=file://{bootstrap}", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(args.auto_window)})
     argv = [args.claude, "--plugin-dir", plugin, "--setting-sources", "", "--settings", settings, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash"]
 
-    summary = {"root": root, "claudeVersion": version, "claudeBinarySha256": file_sha(claude_bin), "arch": platform.machine(), "repoHead": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip(),
+    summary = {"root": root, "claudeVersion": version, "claudeBinarySha256": file_sha(claude_bin), "arch": platform.machine(), "repoHead": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip(),
                "sourceHashes": source_hashes, "harnessSha256": file_sha(__file__), "autoWindow": args.auto_window, "phases": [], "checks": {}}
     events_path = os.path.join(root, "events.jsonl")
 
@@ -737,10 +740,36 @@ def main():
                             "candidateManifestSha256": summary["sourceHashes"].get(MANIFEST_REL), "summary": sanitized(summary)}, indent=1) + "\n"
                 digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
                 candidate.update({"evidenceCommit": summary["repoHead"], "evidenceSummarySha256": digest(evidence), "fixturesSha256": digest(shapes)})
-                for rel, text in ((candidate["fixtures"], shapes), (candidate["evidenceSummary"], evidence), (MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")):
-                    with open(os.path.join(REPO, rel), "w") as f:
-                        f.write(text)
-                summary["candidateWritten"] = [candidate["fixtures"], candidate["evidenceSummary"], MANIFEST_REL]
+                hexes = {"evidenceCommit": 40, "binarySha256": 64, "evidenceSummarySha256": 64, "fixturesSha256": 64}
+                for key, size in hexes.items():
+                    value = candidate[key]
+                    assert len(value) == size and all(ch in "0123456789abcdef" for ch in value) and value.strip("0"), f"candidate {key} is not a real {size}-hex value"
+                writes = [(candidate["fixtures"], shapes), (candidate["evidenceSummary"], evidence), (MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")]
+                staged, placed = [], []
+                try:
+                    for rel, text in writes:
+                        target = os.path.join(REPO, rel)
+                        temp = f"{target}.candidate-{os.getpid()}"
+                        with open(temp, "x") as f:
+                            f.write(text)
+                        staged.append((temp, target, os.path.exists(target) and open(target).read()))
+                    for temp, target, before in staged:
+                        os.replace(temp, target)
+                        placed.append((target, before))
+                except BaseException:
+                    # Back to the committed checkout: new files go, the manifest
+                    # gets its committed bytes back.
+                    for target, before in placed:
+                        if before is False:
+                            os.remove(target)
+                        else:
+                            with open(target, "w") as f:
+                                f.write(before)
+                    for temp, _, _ in staged:
+                        if os.path.exists(temp):
+                            os.remove(temp)
+                    raise
+                summary["candidateWritten"] = [rel for rel, _ in writes]
             except Exception as error:  # noqa: BLE001 - green run, candidate not written
                 summary["passed"] = False
                 summary["failure"] = f"candidate not written: {error}"

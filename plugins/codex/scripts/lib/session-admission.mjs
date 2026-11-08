@@ -55,24 +55,27 @@ function requireProvenVersion(version) {
 }
 
 // Early visibility only, never admission: the receipt in the transcript stays
-// the authority. A native install runs `.../versions/<version>` (also behind a
-// launcher symlink); any other executable gives no version and so no notice.
+// the authority. A native install runs `.../versions/<version>` itself; a
+// symlink is not followed, because the launcher's target can be a newer binary
+// than the one running, and a notice here makes the receipt check refuse at
+// once. Any other executable gives no version and so no notice.
 // Returns null when the running version is proven or unknown, otherwise a text
 // naming what refuses and the route to a fix.
 export function unprovenRunningVersionNotice(execPath = process.env.CLAUDE_CODE_EXECPATH) {
-  let real = execPath ?? "";
-  try { real = fs.realpathSync(real); } catch { /* the name as given */ }
-  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(real))?.[0];
+  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(execPath ?? ""))?.[0];
   if (!version) return null;
   const refuses = "so every Codex state write here (rescue, review, setup, job updates) refuses with 'admission refused'. Retrying does not help.";
+  let elsewhere;
   try {
     if (providerVersionProven(version)) return null;
+    elsewhere = provenEntries().filter((e) => e.version === version).map((e) => `${e.platform}/${e.arch}`);
   } catch {
     return `Codex Companion: this plugin's provider-receipts.json is missing or malformed, ${refuses} ` +
       "Reinstall or update the plugin; the manifest is reviewed data and is not repaired here.";
   }
+  const where = elsewhere.length ? ` (it is proven only on ${[...new Set(elsewhere)].join(", ")})` : "";
   return `Codex Companion: Claude Code ${version} on ${process.platform}/${process.arch} has no receipt proof in this plugin's ` +
-    `provider-receipts.json, ${refuses} The fix is a plugin release that lists it, after a native receipt proof in the ` +
+    `provider-receipts.json${where}, ${refuses} The fix is a plugin release that lists it, after a native receipt proof on this platform in the ` +
     `codex-plugin-cc source repository (not the installed plugin): uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version ${version} --prepare-candidate.`;
 }
 

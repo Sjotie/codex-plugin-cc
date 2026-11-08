@@ -6,15 +6,18 @@
   provider version, SessionStart now says so to the user (`systemMessage`)
   and to the agent (one additional-context line), naming the version and the
   route to a fix (a malformed manifest is named as such), once per new
-  capability (not on compact). It follows a launcher symlink to
-  `versions/<version>`. Nothing is admitted by it; the proven route's output
-  is unchanged.
+  capability (not on compact). Only the running binary's own
+  `versions/<version>` path counts; a launcher symlink is not followed, since
+  its target can already be a newer binary than the one running. A version
+  proven only on another platform/arch is named as such. Nothing is admitted
+  by it; the proven route's output is unchanged.
 - `tests/fenced-lock/macos-d-pty-probe.py --prepare-candidate` is the receipt
   proof for a new version in one command: the candidate entry lives only in
   the run's own plugin copy; only a fully green run writes the measured
   fixtures (including the merged context record), the evidence and the
-  completed entry to the checkout. A red, failed or killed run leaves the
-  checkout untouched.
+  completed entry to the checkout, after checking the entry's commit and
+  hashes, via temporary files and renames. A red, failed or killed run
+  leaves the checkout untouched; a failed write puts it back as committed.
 
 ## 1.0.7-sjotie.27.1 (fork, Homebase #1916; 2026-11-08)
 
