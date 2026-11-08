@@ -62,10 +62,11 @@ SessionEnd revokes it after persistent cancellation. A Stop or SessionEnd
 activation stays bound to the attempt it started under. A worker's final
 result goes to its job log first and the final publication waits up to three
 minutes (`CODEX_COMPANION_FINAL_PUBLISH_WAIT_MS`) while a SessionStart attempt
-is still pending. Once that wait starts, a busy authority during the handover
-uses the same deadline; it does not reset the wait. A definitive admission
-refusal or a publication I/O error stops it at once. Without a pending
-admission, a busy authority keeps the ordinary ten-second deadline. The design and its
+is still pending. Once that wait starts, later lock timeouts (including BUSY
+and unclassified errors during admission validation) use the same deadline;
+they do not reset the wait. A definitive admission refusal or an error outside
+lock acquisition stops it at once. Without a pending admission, lock timeouts
+keep the ordinary ten-second deadline. The design and its
 limits are in [design D](docs/releases/sjotie.23-compact-d-design.md); the
 earlier [compact diagnosis](docs/releases/sjotie.23-compact-diagnosis.md)
 records why the generation design failed after compact. **Native release gate

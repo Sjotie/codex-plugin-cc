@@ -33,8 +33,9 @@ function finalPublishAdmissionWaitMs() {
 // The result is already in the job log. Each try is one complete lock
 // attempt (everything validated again under the authority); between tries
 // the event loop runs, so signals are handled. A definitive refusal stops at
-// once; a transient one keeps trying up to the wait above, anything else up
-// to the ordinary deadline.
+// once. After a transient refusal, subsequent lock timeouts (BUSY or an
+// unclassified validation error) share that wait; without one they use the
+// ordinary deadline. Errors outside lock acquisition stop immediately.
 async function publishFinal(logFile, publish) {
   const waitMs = finalPublishAdmissionWaitMs();
   const start = performance.now();
@@ -46,8 +47,8 @@ async function publishFinal(logFile, publish) {
       const elapsed = performance.now() - start;
       const lockWait = error instanceof StateLockTimeout && !(error instanceof StateLockRefused);
       // A compact finishing its pending attempt briefly holds the authority.
-      // BUSY says nothing about admission: keep the pending wait's original
-      // deadline across that handover. Every attempt still validates anew;
+      // BUSY and unclassified lock timeouts say nothing about admission: keep
+      // the pending wait's original deadline. Every attempt validates anew;
       // a definitive refusal or a non-lock error always stops immediately.
       if (lockWait && error.refusal === "transient") awaitingAdmission = true;
       if (lockWait && (elapsed < ORDINARY_LOCK_DEADLINE_MS || (awaitingAdmission && elapsed < waitMs))) {
