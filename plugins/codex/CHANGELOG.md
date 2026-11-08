@@ -5,12 +5,16 @@
 - macOS: when the running Claude Code (native install) is not a proven
   provider version, SessionStart now says so to the user (`systemMessage`)
   and to the agent (one additional-context line), naming the version and the
-  proof command. Nothing is admitted by it; the proven route's output is
-  unchanged.
+  route to a fix (a malformed manifest is named as such), once per new
+  capability (not on compact). It follows a launcher symlink to
+  `versions/<version>`. Nothing is admitted by it; the proven route's output
+  is unchanged.
 - `tests/fenced-lock/macos-d-pty-probe.py --prepare-candidate` is the receipt
-  proof for a new version in one command: it adds the candidate entry for the
-  run and, only when green, writes the fixtures, the evidence and the
-  completed entry; otherwise it restores the manifest.
+  proof for a new version in one command: the candidate entry lives only in
+  the run's own plugin copy; only a fully green run writes the measured
+  fixtures (including the merged context record), the evidence and the
+  completed entry to the checkout. A red, failed or killed run leaves the
+  checkout untouched.
 
 ## 1.0.7-sjotie.27.1 (fork, Homebase #1916; 2026-11-08)
 

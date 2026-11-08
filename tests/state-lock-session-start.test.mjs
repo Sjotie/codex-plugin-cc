@@ -760,25 +760,46 @@ for (const e of JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex
   });
 }
 
-// An unproven running version is visible at SessionStart (user and agent);
-// the warning grants nothing, and the proven route keeps its exact output.
-for (const [label, execPath, warned] of [
-  ["unproven native version", "/opt/claude/versions/0.0.1", true],
-  ["proven native version", "/opt/claude/versions/2.1.308", false],
-  ["non-native executable", "/usr/local/bin/node", false]
+// An unproven running version is visible at SessionStart (user and agent),
+// once per new capability (not on compact); the notice grants nothing, and the
+// proven route keeps its exact output. A launcher symlink to versions/<v> is
+// followed; a broken manifest is named as such.
+const versionLink = (t, version) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "execpath-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, "versions"));
+  fs.writeFileSync(path.join(dir, "versions", version), "");
+  fs.symlinkSync(path.join(dir, "versions", version), path.join(dir, "claude"));
+  return path.join(dir, "claude");
+};
+for (const [label, execPath, source, warned] of [
+  ["unproven native version", () => "/opt/claude/versions/0.0.1", "startup", /Claude Code 0\.0\.1 .*'admission refused'.*source repository.*--expect-version 0\.0\.1 --prepare-candidate/s],
+  ["unproven version behind the launcher symlink", (t) => versionLink(t, "0.0.1"), "startup", /Claude Code 0\.0\.1 /],
+  ["unproven native version on compact", () => "/opt/claude/versions/0.0.1", "compact", null],
+  ["proven native version", () => "/opt/claude/versions/2.1.308", "startup", null],
+  ["non-native executable", () => "/usr/local/bin/node", "startup", null]
 ]) {
   test(`D: SessionStart with ${label} ${warned ? "warns" : "stays silent"}`, options, (t) => {
-    const f = fixture(t);
-    f.env.CLAUDE_CODE_EXECPATH = execPath;
-    const r = f.runHook({}, undefined, { omit: true });
+    const f = source === "compact" ? prepared(t) : fixture(t);
+    f.env.CLAUDE_CODE_EXECPATH = execPath(t);
+    const r = f.runHook({}, JSON.stringify(f.hookInput({ source })), { omit: true });
+    if (source === "compact") {
+      // The predecessor's receipt is proven, so the compact succeeds; it keeps
+      // C and does not repeat the notice.
+      assert.equal(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.equal(Object.hasOwn(out, "systemMessage"), false);
+      assert.match(out.hookSpecificOutput.additionalContext, /^Codex Companion session context refreshed at [^\n]+\.$/);
+      return;
+    }
     assert.equal(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout);
-    assert.equal(Object.hasOwn(out, "systemMessage"), warned);
+    assert.equal(Object.hasOwn(out, "systemMessage"), Boolean(warned));
     const context = out.hookSpecificOutput.additionalContext;
     if (warned) {
-      assert.match(out.systemMessage, /Claude Code 0\.0\.1 .*provider version unproven.*--expect-version 0\.0\.1 --prepare-candidate/s);
+      assert.match(out.systemMessage, warned);
       assert.equal(context.split("\n")[1], out.systemMessage);
-      // The warning is no admission: the receipt of this version still refuses.
+      // The notice is no admission: the receipt of this version still refuses.
       f.appendReceipt(r, { record: { version: "0.0.1" } });
       assert.equal(f.consume().acquired, false);
     } else {
@@ -788,6 +809,20 @@ for (const [label, execPath, warned] of [
     }
   });
 }
+
+test("D: SessionStart with a malformed provider manifest names the manifest, not the version", options, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "manifest-notice-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.cpSync(path.join(defaultRepo, "plugins"), path.join(root, "plugins"), { recursive: true });
+  fs.writeFileSync(path.join(root, "plugins/codex/scripts/lib/provider-receipts.json"), "{");
+  const f = fixture(t, root);
+  f.env.CLAUDE_CODE_EXECPATH = "/opt/claude/versions/2.1.308";
+  const r = f.runHook({}, undefined, { omit: true });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.match(out.systemMessage, /provider-receipts\.json is missing or malformed/);
+  assert.equal(out.systemMessage.includes("2.1.308"), false);
+});
 
 // The queued job the consume helper seeds, as a worker would receive it.
 function seedJob(f) {

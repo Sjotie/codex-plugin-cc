@@ -55,21 +55,25 @@ function requireProvenVersion(version) {
 }
 
 // Early visibility only, never admission: the receipt in the transcript stays
-// the authority. A native install runs `.../versions/<version>`; any other
-// executable path gives no version and so no warning. Returns null when the
-// running version is proven or unknown, otherwise a text naming the version
-// and the route to a proof.
+// the authority. A native install runs `.../versions/<version>` (also behind a
+// launcher symlink); any other executable gives no version and so no notice.
+// Returns null when the running version is proven or unknown, otherwise a text
+// naming what refuses and the route to a fix.
 export function unprovenRunningVersionNotice(execPath = process.env.CLAUDE_CODE_EXECPATH) {
-  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(execPath ?? ""))?.[0];
+  let real = execPath ?? "";
+  try { real = fs.realpathSync(real); } catch { /* the name as given */ }
+  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(real))?.[0];
   if (!version) return null;
-  let proven;
-  try { proven = providerVersionProven(version); } catch { proven = false; }
-  if (proven) return null;
+  const refuses = "so every Codex state write here (rescue, review, setup, job updates) refuses with 'admission refused'. Retrying does not help.";
+  try {
+    if (providerVersionProven(version)) return null;
+  } catch {
+    return `Codex Companion: this plugin's provider-receipts.json is missing or malformed, ${refuses} ` +
+      "Reinstall or update the plugin; the manifest is reviewed data and is not repaired here.";
+  }
   return `Codex Companion: Claude Code ${version} on ${process.platform}/${process.arch} has no receipt proof in this plugin's ` +
-    "provider-receipts.json, so every Codex state write here (rescue, review, setup, status updates) refuses with " +
-    "'provider version unproven' until a plugin release lists it. Retrying does not help. The fix is a native receipt proof " +
-    `in the plugin checkout: uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version ${version} --prepare-candidate, ` +
-    "then review and release.";
+    `provider-receipts.json, ${refuses} The fix is a plugin release that lists it, after a native receipt proof in the ` +
+    `codex-plugin-cc source repository (not the installed plugin): uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version ${version} --prepare-candidate.`;
 }
 
 export function resolveAdmissionStateDir(cwd) {

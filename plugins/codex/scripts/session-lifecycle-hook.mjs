@@ -145,7 +145,12 @@ function handleSessionStart(input, started) {
     // An unproven running version cannot be admitted later anyway; say so now
     // to the user and the agent instead of only at the first refused write.
     // The proven route keeps its measured output unchanged.
-    const notice = unprovenRunningVersionNotice();
+    // Claude records a systemMessage as its own hook_system_message record
+    // (measured on 2.1.308); the receipt check then refuses at once instead
+    // of waiting, which is right: the notice only appears when it would
+    // refuse anyway (unproven version or broken manifest).
+    // Once per new capability: a compact keeps C and would only repeat it.
+    const notice = input.source === "compact" ? null : unprovenRunningVersionNotice();
     const context = `Codex Companion session context refreshed at ${new Date().toISOString()}.`;
     process.stdout.write(`${JSON.stringify({ continue: true, suppressOutput: true,
       ...(notice ? { systemMessage: notice } : {}),

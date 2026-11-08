@@ -36,9 +36,10 @@ keeps it: it then writes the measured sanitized record shapes to
 tests/fixtures/provider-receipts/claude-code-X.Y.Z.json, the sanitized summary
 to docs/releases/claude-code-X.Y.Z-receipt-evidence.json, and completes the
 entry with evidenceCommit (HEAD, which holds the exact product and harness
-bytes) and both hashes. Commit those three files and send them to review. A red
-or aborted run restores the manifest byte for byte. Without the flag the entry
-must already be listed, with this binary's hash.
+bytes) and both hashes. Commit those three files and send them to review. The
+candidate lives only in the run's own copy of the plugin, so a red, failed or
+killed run leaves the checkout untouched. Without the flag the entry must
+already be listed, with this binary's hash.
 
 Options: --expect-version X.Y.Z (required; must equal `claude --version`),
 --prepare-candidate, --auto-window TOKENS (default 20000), --max-fills N
@@ -60,6 +61,7 @@ import platform
 import pty
 import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -83,7 +85,6 @@ def file_sha(path):
 
 MANIFEST_REL = "plugins/codex/scripts/lib/provider-receipts.json"
 ADAPTER = "session-start-hook-success-v1"
-PREPARED = {"bytes": None, "kept": False}
 
 
 def candidate_paths(version):
@@ -91,18 +92,30 @@ def candidate_paths(version):
             "fixtures": f"tests/fixtures/provider-receipts/claude-code-{version}.json"}
 
 
-def write_json(rel, value, indent=2):
-    with open(os.path.join(REPO, rel), "w") as f:
-        f.write(json.dumps(value, indent=indent) + "\n")
-
-
 def record_shapes(raw, version):
     """The adapter-read fields of the measured records, values as placeholders."""
     success, context = raw["hookSuccess"], raw["additionalContext"]
     a, c = success["attachment"], context["attachment"]
     assert a["hookName"] == "SessionStart:startup" and a["command"] == COMMAND, "unexpected success receipt shape"
-    assert isinstance(c.get("content"), list) and len(c["content"]) == 1 and isinstance(c.get("toolUseID"), str), "unexpected context record shape"
+    content = c.get("content")
+    assert isinstance(content, list) and len(content) >= 2 and all(isinstance(x, str) for x in content) and isinstance(c.get("toolUseID"), str), \
+        "unexpected context record shape (the probe's second hook must give a merged record)"
     base = lambda r: {"type": r["type"], "version": version, "sessionId": "<sessionId>", "cwd": "<cwd>", "isSidechain": r["isSidechain"]}
+    # The merged record literally, key order as measured; every string value a
+    # placeholder except the fixed identifiers, content neutral.
+    fixed = {"type", "hookName", "hookEvent", "toolUseID", "renderedRole", "userType", "entrypoint", "version", "gitBranch"}
+    def literal(value, key=None):
+        if key == "content":
+            return ["Codex Companion session context refreshed.", "Another hook's context."]
+        if key == "version":
+            return version
+        if isinstance(value, dict):
+            return {k: literal(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [literal(v) for v in value]
+        if isinstance(value, str) and key not in fixed:
+            return f"<{key or 'value'}>"
+        return value
     return {
         "note": f"Sanitized shapes of the Claude Code {version} SessionStart transcript records that the receipt adapter {ADAPTER} reads (#1916), "
                 "measured on darwin/arm64 by tests/fenced-lock/macos-d-pty-probe.py --prepare-candidate. Placeholders in <angle brackets> are "
@@ -111,6 +124,7 @@ def record_shapes(raw, version):
                                                          "exitCode": "<exitCode>", "command": a["command"], "stdout": "<stdout>"}},
         "additionalContext": {**base(context), "attachment": {"type": c["type"], "hookName": c["hookName"], "hookEvent": c["hookEvent"],
                                                                "content": ["<content>"], "toolUseID": "<toolUseID>"}},
+        "mergedContext": literal(context),
     }
 
 
@@ -339,8 +353,7 @@ def main():
     # The product admits only manifest versions, so the entry under test must
     # be in this checkout; its binary hash must be the measured binary.
     manifest_path = os.path.join(REPO, MANIFEST_REL)
-    manifest_bytes = open(manifest_path, "rb").read()
-    manifest = json.loads(manifest_bytes)
+    manifest = json.load(open(manifest_path))
     listed = lambda m: [e for e in m["entries"] if (e["version"], e["platform"], e["arch"]) == (expected, "darwin", "arm64")]
     candidate = None
     if args.prepare_candidate:
@@ -351,9 +364,9 @@ def main():
         candidate = {"provider": "claude-code", "version": expected, "platform": "darwin", "arch": "arm64", "receiptAdapter": ADAPTER,
                      "binarySha256": file_sha(claude_bin), "evidenceCommit": "0" * 40, "evidenceSummary": candidate_paths(expected)["evidenceSummary"],
                      "evidenceSummarySha256": "0" * 64, "fixtures": candidate_paths(expected)["fixtures"], "fixturesSha256": "0" * 64}
+        # Only the run's own copy of the plugin gets the candidate (below);
+        # the checkout is written only after a fully green run.
         manifest["entries"].append(candidate)
-        PREPARED["bytes"] = manifest_bytes
-        write_json(MANIFEST_REL, manifest)
     entry = listed(manifest)
     assert len(entry) == 1, f"provider-receipts.json needs exactly one darwin/arm64 entry for {expected}"
     assert entry[0]["binarySha256"] == file_sha(claude_bin), "manifest binarySha256 is not the measured Claude binary"
@@ -369,6 +382,11 @@ def main():
         os.makedirs(os.path.dirname(target), exist_ok=True)
         shutil.copyfile(os.path.join(REPO, rel), target)
         source_hashes[rel] = file_sha(target)
+    if candidate is not None:
+        copy = os.path.join(plugin, MANIFEST_REL[len("plugins/codex/"):])
+        with open(copy, "w") as f:
+            f.write(json.dumps(manifest, indent=2) + "\n")
+        source_hashes[MANIFEST_REL] = file_sha(copy)
     hooks = json.load(open(os.path.join(plugin, "hooks/hooks.json")))
     assert hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] == COMMAND, "fixed SessionStart command changed"
 
@@ -401,7 +419,7 @@ def main():
     # receipt check must see through. It is not the product's hook.
     other_hook = node_file("other-context-hook.mjs", 'process.stdout.write(JSON.stringify({hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: "Another hook\'s context."}}) + "\\n");\n')
     json.dump({"sandbox": {"enabled": False}, "enabledPlugins": {}, "permissions": {"allow": ["Bash(node:*)", "Bash(cat:*)"]},
-               "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": f"{shutil.which('node')} {other_hook}"}]}]}}, open(settings, "w"))
+               "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": f"{shlex.quote(node)} {shlex.quote(other_hook)}"}]}]}}, open(settings, "w"))
 
     # CLAUDE_CODE_CHILD_SESSION (set when this runs inside another Claude
     # session) makes the interactive Claude write no transcript at all
@@ -652,11 +670,12 @@ def main():
             for path in watches:
                 if path in fault_paths:
                     continue
-                lengths = [len(a.get("content") or []) for r in read_jsonl(path) for a in [r.get("attachment") or {}]
-                           if r.get("type") == "attachment" and a.get("type") == "hook_additional_context" and a.get("hookEvent") == "SessionStart"]
-                per_transcript.append({"transcriptSha": sha(path), "contextLengths": lengths})
+                contents = [a.get("content") or [] for r in read_jsonl(path) for a in [r.get("attachment") or {}]
+                            if r.get("type") == "attachment" and a.get("type") == "hook_additional_context" and a.get("hookEvent") == "SessionStart"]
+                both = [c for c in contents if any(str(x).startswith("Codex Companion session context refreshed") for x in c) and "Another hook's context." in c]
+                per_transcript.append({"transcriptSha": sha(path), "contextLengths": [len(c) for c in contents], "mergedOursAndOther": len(both)})
             summary["contextRecordLengths"] = per_transcript
-            return bool(per_transcript) and all(any(n >= 2 for n in t["contextLengths"]) for t in per_transcript)
+            return bool(per_transcript) and all(t["mergedOursAndOther"] > 0 for t in per_transcript)
 
         stops = [e for e in events("hook-exit", "Stop") if e["at"] < t_faults]
         ends = [e for e in events("hook-exit", "SessionEnd") if e["at"] < t_faults]
@@ -706,33 +725,32 @@ def main():
         summary["ownClaudeStopped"] = term.exited()
         persist()
         if candidate is not None and summary.get("passed"):
-            # Green: the measured shapes, the sanitized evidence and the
-            # completed entry. Anything else leaves the manifest restored.
-            startup_watch = watches.get(start.get("transcriptPath")) if start else None
-            shapes = record_shapes(startup_watch.raw if startup_watch else {}, expected)
-            write_json(candidate["fixtures"], shapes)
-            evidence = {"ticket": 1916, "kind": "native-provider-receipt-proof", "provider": "claude-code", "version": expected, "platform": "darwin", "arch": "arm64",
-                        "receiptAdapter": ADAPTER, "evidenceCommit": summary["repoHead"],
-                        "note": "Written by macos-d-pty-probe.py --prepare-candidate. Product and harness are the bytes of evidenceCommit plus the candidate "
-                                "manifest entry, which differs from the committed one only in evidenceCommit, evidenceSummarySha256 and fixturesSha256 "
-                                "(placeholders during the run). Paths are <fixture> and <home>; ids are hashes only.",
-                        "candidateManifestSha256": summary["sourceHashes"].get(MANIFEST_REL), "summary": sanitized(summary)}
-            write_json(candidate["evidenceSummary"], evidence, indent=1)
-            candidate.update({"evidenceCommit": summary["repoHead"], "evidenceSummarySha256": file_sha(os.path.join(REPO, candidate["evidenceSummary"])),
-                              "fixturesSha256": file_sha(os.path.join(REPO, candidate["fixtures"]))})
-            write_json(MANIFEST_REL, manifest)
-            PREPARED["kept"] = True
-            print(json.dumps({"candidate": {"version": expected, "written": [MANIFEST_REL, candidate["fixtures"], candidate["evidenceSummary"]]}}))
-        print(json.dumps({"summary": os.path.join(root, "summary.json"), "passed": summary.get("passed"), "latencyMs": summary.get("latencyMs"), "failure": summary.get("failure"), "failedChecks": [k for k, v in summary.get("checks", {}).items() if not v]}))
+            # Green: the checkout gets the measured shapes, the sanitized
+            # evidence and the completed entry, all built before any write.
+            # A red or aborted run never touched the checkout.
+            try:
+                startup_watch = watches.get(start.get("transcriptPath"))
+                shapes = json.dumps(record_shapes(startup_watch.raw if startup_watch else {}, expected), indent=2) + "\n"
+                evidence = json.dumps({"ticket": 1916, "kind": "native-provider-receipt-proof", "provider": "claude-code", "version": expected, "platform": "darwin", "arch": "arm64",
+                            "receiptAdapter": ADAPTER, "evidenceCommit": summary["repoHead"],
+                            "note": "Written by macos-d-pty-probe.py --prepare-candidate. Product and harness are the bytes of evidenceCommit plus the candidate "
+                                    "manifest entry in the run's plugin copy, which differs from the committed one only in evidenceCommit, evidenceSummarySha256 "
+                                    "and fixturesSha256 (placeholders during the run). Paths are <fixture> and <home>; ids are hashes only.",
+                            "candidateManifestSha256": summary["sourceHashes"].get(MANIFEST_REL), "summary": sanitized(summary)}, indent=1) + "\n"
+                digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
+                candidate.update({"evidenceCommit": summary["repoHead"], "evidenceSummarySha256": digest(evidence), "fixturesSha256": digest(shapes)})
+                for rel, text in ((candidate["fixtures"], shapes), (candidate["evidenceSummary"], evidence), (MANIFEST_REL, json.dumps(manifest, indent=2) + "\n")):
+                    with open(os.path.join(REPO, rel), "w") as f:
+                        f.write(text)
+                summary["candidateWritten"] = [candidate["fixtures"], candidate["evidenceSummary"], MANIFEST_REL]
+            except Exception as error:  # noqa: BLE001 - green run, candidate not written
+                summary["passed"] = False
+                summary["failure"] = f"candidate not written: {error}"
+            persist()
+        print(json.dumps({"summary": os.path.join(root, "summary.json"), "passed": summary.get("passed"), "latencyMs": summary.get("latencyMs"), "failure": summary.get("failure"), "failedChecks": [k for k, v in summary.get("checks", {}).items() if not v],
+                          "candidateWritten": summary.get("candidateWritten")}))
     sys.exit(0 if summary.get("passed") else 1)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
-        # --prepare-candidate: a red, failed or aborted run never leaves an
-        # unproven entry behind.
-        if PREPARED["bytes"] is not None and not PREPARED["kept"]:
-            with open(os.path.join(REPO, MANIFEST_REL), "wb") as f:
-                f.write(PREPARED["bytes"])
+    main()
