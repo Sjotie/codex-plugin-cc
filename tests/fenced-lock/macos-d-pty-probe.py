@@ -38,7 +38,7 @@ to docs/releases/claude-code-X.Y.Z-receipt-evidence.json, and completes the
 entry with evidenceCommit (HEAD, which holds the exact product and harness
 bytes) and both hashes. Commit those three files and send them to review. The
 candidate lives only in the run's own copy of the plugin, so a red, failed or
-killed run leaves the checkout untouched. The writes never overwrite: when the
+killed run leaves the checkout untouched. The writes do not overwrite: when the
 manifest changed during the run (its bytes differ from the start), already
 lists the version, one of the two files already exists, or a target directory
 resolves outside the checkout (a symlink), the run fails and nothing is
@@ -140,13 +140,18 @@ def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
 
     Exclusive: it refuses, and leaves everything as it was, when the manifest
     changed during the run, already lists the version, a target file already
-    exists, or a target's directory resolves outside the checkout."""
+    exists, or a target's directory resolves outside the checkout. The two new
+    files never replace a name; the manifest is compared with the start just
+    before its rename (no lock: a write in that last moment is not seen).
+    SIGTERM and SIGHUP during the writes roll back like any error; SIGKILL
+    can leave the two new files, which the next run then names."""
     digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
     candidate.update({"evidenceCommit": head, "evidenceSummarySha256": digest(evidence), "fixturesSha256": digest(shapes)})
     hexes = {"evidenceCommit": 40, "binarySha256": 64, "evidenceSummarySha256": 64, "fixturesSha256": 64}
     for key, size in hexes.items():
         value = candidate[key]
-        assert len(value) == size and all(ch in "0123456789abcdef" for ch in value) and value.strip("0"), f"candidate {key} is not a real {size}-hex value"
+        if not (len(value) == size and all(ch in "0123456789abcdef" for ch in value) and value.strip("0")):
+            raise RuntimeError(f"candidate {key} is not a real {size}-hex value")
     root = os.path.realpath(repo)
 
     def inside(rel):
@@ -178,34 +183,47 @@ def publish_candidate(repo, manifest_bytes, candidate, head, shapes, evidence):
         raise RuntimeError(f"{candidate['version']} is already listed for {candidate['platform']}/{candidate['arch']}; nothing written")
     manifest["entries"].append(candidate)
     created, temp = [], None
+
+    def interrupted(signum, _frame):
+        raise RuntimeError(f"signal {signum} during publication")
+
+    def exclusive_temp(target, text):
+        # Only a temp file this run created is ever removed again.
+        nonlocal temp
+        name = f"{target}.candidate-{os.getpid()}"
+        with open(name, "x") as f:
+            temp = name
+            f.write(text)
+
+    handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         for target, rel, text in new_files:
-            temp = f"{target}.candidate-{os.getpid()}"
-            with open(temp, "x") as f:
-                f.write(text)
+            exclusive_temp(target, text)
             try:
                 # A hard link never replaces an existing name: exclusive and whole.
                 os.link(temp, target)
+                created.append(target)
             except FileExistsError:
                 raise exists_refusal(rel) from None
             finally:
                 os.remove(temp)
                 temp = None
-            created.append(target)
-        temp = f"{manifest_target}.candidate-{os.getpid()}"
-        with open(temp, "x") as f:
-            f.write(json.dumps(manifest, indent=2) + "\n")
+        exclusive_temp(manifest_target, json.dumps(manifest, indent=2) + "\n")
         unchanged(manifest_target)
         os.replace(temp, manifest_target)
         temp = None
     except BaseException:
         # Back to the committed checkout: this run's new files go; the
         # manifest was not replaced.
-        for target in created:
-            os.remove(target)
-        if temp and os.path.exists(temp):
-            os.remove(temp)
+        for path in created + ([temp] if temp else []):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         raise
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
     return [candidate["fixtures"], candidate["evidenceSummary"], MANIFEST_REL]
 
 

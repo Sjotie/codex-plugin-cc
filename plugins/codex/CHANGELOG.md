@@ -16,11 +16,12 @@
   the run's own plugin copy; only a fully green run writes the measured
   fixtures (including the merged context record), the evidence and the
   completed entry to the checkout, after checking the entry's commit and
-  hashes. It never overwrites: a manifest that changed during the run, a
-  version already listed, an existing fixture or evidence file, or a target
-  directory outside the checkout (symlink) fails the run with nothing
-  written. A red, failed or killed run leaves the checkout untouched; a
-  failed write puts it back as committed.
+  hashes. It does not overwrite: a manifest that changed during the run
+  (compared just before its rename; there is no lock), a version already
+  listed, an existing fixture or evidence file, or a target directory outside
+  the checkout (symlink) fails the run with nothing written. A red, failed or
+  killed run leaves the checkout untouched; a failed or SIGTERM'd write puts
+  it back as committed.
 
 ## 1.0.7-sjotie.27.1 (fork, Homebase #1916; 2026-11-08)
 

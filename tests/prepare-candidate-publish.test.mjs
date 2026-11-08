@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const probe = fileURLToPath(new URL("./fenced-lock/macos-d-pty-probe.py", import.meta.url));
 const python = spawnSync("python3", ["--version"]).status === 0 ? "python3" : null;
-const options = { skip: python ? false : "python3 not available" };
+const options = { skip: process.platform === "win32" ? "the probe is macOS-only (pty)" : python ? false : "python3 not available" };
 const MANIFEST = "plugins/codex/scripts/lib/provider-receipts.json";
 const VERSION = "9.9.9";
 const FIXTURES = `tests/fixtures/provider-receipts/claude-code-${VERSION}.json`;
@@ -33,10 +33,10 @@ function checkout(t) {
 }
 
 // Calls publish_candidate with the manifest bytes as read at the run's start.
-function publish(c, startBytes, { failManifestReplace = false } = {}) {
+function publish(c, startBytes, { failManifestReplace = false, changeAfterLink = null } = {}) {
   const input = path.join(c.root, "input.json");
   const candidate = { ...entry(VERSION), evidenceCommit: "0".repeat(40), evidenceSummarySha256: "0".repeat(64), fixturesSha256: "0".repeat(64) };
-  fs.writeFileSync(input, JSON.stringify({ probe, repo: c.repo, startBytes, candidate, failManifestReplace }));
+  fs.writeFileSync(input, JSON.stringify({ probe, repo: c.repo, startBytes, candidate, failManifestReplace, changeAfterLink }));
   const driver = `
 import importlib.util, json, os, sys
 a = json.load(open(sys.argv[1]))
@@ -48,6 +48,12 @@ if a["failManifestReplace"]:
             raise OSError("injected: manifest replace failed")
         return real(src, dst, *rest, **kw)
     os.replace = replace
+if a["changeAfterLink"]:
+    real_link = os.link
+    def link(src, dst, *rest, **kw):
+        real_link(src, dst, *rest, **kw)
+        open(os.path.join(a["repo"], "plugins/codex/scripts/lib/provider-receipts.json"), "w").write(a["changeAfterLink"])
+    os.link = link
 try:
     written = m.publish_candidate(a["repo"], a["startBytes"].encode(), a["candidate"], "e" * 40, '{"shapes": 1}\\n', '{"evidence": 1}\\n')
     print(json.dumps({"ok": True, "written": written}))
@@ -135,6 +141,18 @@ test("publish: a failing manifest write rolls back the files already placed", op
   assert.equal(r.ok, false);
   assert.match(r.error, /injected/);
   assert.equal(c.read(MANIFEST), manifestText("2.1.301"));
+  assert.equal(c.exists(FIXTURES), false);
+  assert.equal(c.exists(EVIDENCE), false);
+  assert.deepEqual(leftovers(c), []);
+});
+
+test("publish: a manifest change while the new files are placed refuses and removes them", options, (t) => {
+  const c = checkout(t);
+  const changed = manifestText("2.1.301", "8.8.8");
+  const r = publish(c, c.read(MANIFEST), { changeAfterLink: changed });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /provider-receipts\.json changed during the run/);
+  assert.equal(c.read(MANIFEST), changed);
   assert.equal(c.exists(FIXTURES), false);
   assert.equal(c.exists(EVIDENCE), false);
   assert.deepEqual(leftovers(c), []);
