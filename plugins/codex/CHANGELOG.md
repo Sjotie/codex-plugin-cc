@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.7-sjotie.27 (fork, Homebase #1916; 2026-11-08)
 
 - Reading the job list no longer creates the state `jobs/` directory
   (Homebase #1916, Sol P3 on sjotie.24). `resolveJobFile` and
