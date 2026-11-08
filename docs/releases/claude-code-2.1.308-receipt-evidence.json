@@ -1,0 +1,505 @@
+{
+ "ticket": 1916,
+ "kind": "native-provider-receipt-proof",
+ "provider": "claude-code",
+ "version": "2.1.308",
+ "platform": "darwin",
+ "arch": "arm64",
+ "receiptAdapter": "session-start-hook-success-v1",
+ "evidenceCommit": "ebbc627663f40960e157f78a1b57b31c5ab3584c",
+ "note": "Product and harness are the bytes of evidenceCommit, plus the candidate manifest entry for 2.1.308 that the product needs to admit it. The candidate (sha256 in sourceHashes) differs from the committed entry only in evidenceCommit and evidenceSummarySha256, which were placeholders during the run. Account: an existing logged-in Claude profile; CLAUDE_PLUGIN_DATA is assigned by Claude to the inline test plugin. Fault sessions: Stop/End run without a proven receipt and are observations (faultSessionHooks). Paths are replaced by <fixture> and <home>; ids are hashes only.",
+ "candidateManifestSha256": "2ef7ddc2ae5c8a8f603537534aff185eb42b57ec1a7342762306a00d19972c9c",
+ "summary": {
+  "root": "<fixture>",
+  "claudeVersion": "2.1.308 (Claude Code)",
+  "claudeBinarySha256": "ca923c86ac84b30574a82331a05b6e066c27477a926ceaffe46a845a33e4dd37",
+  "arch": "arm64",
+  "repoHead": "1db02222a72b01eb8e925c50532a9b589f3fdd67",
+  "sourceHashes": {
+   "plugins/codex/.claude-plugin/plugin.json": "8b5d26acda43c3401658fdb264fa3bf48afd4cb206a8285776c0cc46c3c13fb6",
+   "plugins/codex/CHANGELOG.md": "6141a15c3faab85ee080037ee4cb64712534658540e1bb61d7310e6f184ce7be",
+   "plugins/codex/LICENSE": "e591c02a0b2ea7717d99e15bd51ea05d879bbf5a4452d66d15b51a7107d3821a",
+   "plugins/codex/NOTICE": "6728b3dff175efe673c1d6a402f5d9f548127a20960a6efdf9047dae1e36ecfb",
+   "plugins/codex/agents/codex-rescue.md": "100b3e21707c93ed7c12bed68fbc210e606df5949a860574ec00df0c416f9f50",
+   "plugins/codex/commands/adversarial-review.md": "6c6ec17b0dcc39c45541321f663aa1e856e7ad3a4f7343281bd98886ef40c2c6",
+   "plugins/codex/commands/cancel.md": "e01ce5fbed90f4e65e21b39052cc018f091ad9cb8756629483ef09d6d00fba20",
+   "plugins/codex/commands/rescue.md": "583d4e954d76cfe151da17ddf459dbc93f3d68f0fcd1463fc9a1aa40bb607ad1",
+   "plugins/codex/commands/result.md": "2d996b04f51c6618e76fa142524a0cdf42ccf04fb70cd65bdc74f237de00873d",
+   "plugins/codex/commands/review.md": "4e333e9172e5abca130f49b248b10d899743c959c43192ca20cfe535c7473cae",
+   "plugins/codex/commands/setup.md": "e2d2c2671d7ea86691687030d6f8f6f3f054445cec06207d874732a2c6e0d2fa",
+   "plugins/codex/commands/status.md": "56e9223f6dc2e165b53dd13a64aabfa10fb36cf68a28a3537867fa573be7774a",
+   "plugins/codex/commands/transfer.md": "ce2047c1d766bb371e96d24a8ff0eebdbc5be2e208b26cb0a7653c92b78db596",
+   "plugins/codex/commands/wait.md": "ca96f4ff4ab159a4a61711d78c4877d09c54e4e422e7c902c4df112e3f17ab06",
+   "plugins/codex/hooks/hooks.json": "6ba33b3f6a75ba4271a76160b0465e7050a607a02e1ec212a7c0f3b9cd3cb35a",
+   "plugins/codex/prompts/adversarial-review.md": "f3b28a6c4c7501fd03ebab228050ac53c552a8f43c8aa517e924cb348aaefe0f",
+   "plugins/codex/prompts/stop-review-gate.md": "3f38828d9c80aa5a156ba6d58fba4b88eb3eac49b2e2b4bc5a3453e0e43d2e04",
+   "plugins/codex/schemas/review-output.schema.json": "7acea366c7ca8deb86c6f3106676fe2a83bbc30840e9e8c0110cccb85bfdf476",
+   "plugins/codex/scripts/app-server-broker.mjs": "a83ffa791914fd4516fa37aa5238947fb011ac14ebd42a525fc3f5945db26bb6",
+   "plugins/codex/scripts/codex-companion.mjs": "6b3c1e75066837434c20d3cda4b67aafb27d6f428d81c44cd7a43ce0664fbb84",
+   "plugins/codex/scripts/lib/app-policy.mjs": "5d0fd19ca7ddd85aa6089a740058f31c481a3a78ccb3f5c20ffe53cbb562137b",
+   "plugins/codex/scripts/lib/app-server-protocol.d.ts": "13be07f0af9fa59eb4c3b8b76b7bea206c8865e2e8e25e08097120e05f137c4d",
+   "plugins/codex/scripts/lib/app-server.mjs": "bc5c9999f79790e392e8f50755d5b3d94dc2934c0efb5065d2c83bcee1a9e2c6",
+   "plugins/codex/scripts/lib/args.mjs": "83277d6e544961a339609c54358cc2c9bd74c3153822ea0aeb0fa65dd83ceea7",
+   "plugins/codex/scripts/lib/broker-endpoint.mjs": "1b08324b6690241eb50411145d914aa4305e31265a82a7e065508933bc1eacb5",
+   "plugins/codex/scripts/lib/broker-lifecycle.mjs": "735e95e242d00a608c55ee4e4210ccd6f4921703be8ba276887eb58e5c43dc79",
+   "plugins/codex/scripts/lib/broker-session-cleanup.mjs": "66f89fb4eeeeecd354b627b3a196722bfe531ae3d613cfd5b98c5b22c22d1aad",
+   "plugins/codex/scripts/lib/claude-session-transfer.mjs": "1e8980803c416357cfd7647bceac3a0da4749f19dbdde0bc5241dcbbcf25350a",
+   "plugins/codex/scripts/lib/codex.mjs": "89deb00182bb06231dd63bb2b631457d28d911452210fb5bc557547513039b8a",
+   "plugins/codex/scripts/lib/fenced-lock.mjs": "c21d02184edc4fd6a74fdefdd1efd0d5dde52e853bac8aa2adf45b28b8e4009b",
+   "plugins/codex/scripts/lib/fenced-lock.protocol-1": "a6c51a60de872adb0f219ae08c64703e05262792b5080e329fafd6b7edbe8470",
+   "plugins/codex/scripts/lib/fenced-lock.source.json": "41f425dfe785ebef0dbeaf834d48e0c5815475f96d120ecfff7846c039bd4bca",
+   "plugins/codex/scripts/lib/fs.mjs": "921cdff3269e1dae9b620c72d8c6959742d46048baba3a83fc6636d1de675dc7",
+   "plugins/codex/scripts/lib/git.mjs": "0f7489e662c952f7be2fa81d53cae2ec9eb15415dc58977a5e3c1bdb845f2114",
+   "plugins/codex/scripts/lib/job-control.mjs": "d59e1c5890dd5f780bbd006f49a937ed9f8919625a99eba821b7d14bc83f2f14",
+   "plugins/codex/scripts/lib/job-status.mjs": "0d02b0a929f32caa21d4caa087a314c328a0c20a1e6e87ea43e6d823ef109e31",
+   "plugins/codex/scripts/lib/process.mjs": "40053f9a6ccf48a02f62d1f07a428745014447d4655c982cb5537465a584e422",
+   "plugins/codex/scripts/lib/prompts.mjs": "9b97876584a5e62b88a1761a8733160b79c19be21fbb39df88ff183c4785abad",
+   "plugins/codex/scripts/lib/provider-receipts.json": "2ef7ddc2ae5c8a8f603537534aff185eb42b57ec1a7342762306a00d19972c9c",
+   "plugins/codex/scripts/lib/render.mjs": "5f20dd040ffaa253fe9bbc000ad8adc4b52b7dd2eee3df22074379277d9d677a",
+   "plugins/codex/scripts/lib/seal-wait.mjs": "99131079033f128f082a955113d2ad2e4192fccaa3189f67088225769919909d",
+   "plugins/codex/scripts/lib/session-admission.mjs": "c1b71f0b9c7354ad951c79299802ff5bb14f6679f8bfbcc4528e89273e3ceb93",
+   "plugins/codex/scripts/lib/state-lock-cli.mjs": "9a9f6e7260cb954416b5cfb372231642cd881089d9750c7b863d01193d8cb142",
+   "plugins/codex/scripts/lib/state.mjs": "b374457b994b12851097ca19be49032edd56d5636a7e4a8e0099717e4ba0c802",
+   "plugins/codex/scripts/lib/tracked-jobs.mjs": "be24ef9c279354c295e3edc7ca2f79f5e74269d112bbfe485aeb30d90d347a3e",
+   "plugins/codex/scripts/lib/workspace.mjs": "7dbdcb927818da4105f65dd0c826caa4dd1781b8050905f8f83f472ce4201e2e",
+   "plugins/codex/scripts/session-lifecycle-hook.mjs": "3a2dabeed244e6b6d76ea39726fd5d461929c31cb8e292a3e82abc6e52f92414",
+   "plugins/codex/scripts/stop-review-gate-hook.mjs": "6890ccd516e1fe38470b15de6f4d41d8a7afe9d2587ac3cfcd444dac2f304bdb",
+   "plugins/codex/skills/await-task/SKILL.md": "f33bb43160dbff79fbe8a20c59a89d57742858573249e6c5e9e6459dedd3afd7",
+   "plugins/codex/skills/codex-cli-runtime/SKILL.md": "6dd37b5ae6601c4809bc118d49a105a30dda3249864e204940adda826929f5e2",
+   "plugins/codex/skills/codex-result-handling/SKILL.md": "698f263298804318a9a25f7b285b2b406251a1f5dfdfd28159830bad494f5c65",
+   "plugins/codex/skills/gpt-5-4-prompting/SKILL.md": "48222490b629e0e5cf7372253b864cc03b7780ce7afeaab4129f3dd2efdbf5d9",
+   "plugins/codex/skills/gpt-5-4-prompting/references/codex-prompt-antipatterns.md": "ebf38d5d60244b0b80a35734d76a4c452abf96e9f1e4a4b8be78aa13a1ab2ab9",
+   "plugins/codex/skills/gpt-5-4-prompting/references/codex-prompt-recipes.md": "fcc000e51cb967731c1b667fe27d024b0c51158a0d5d692792b23e6b46172331",
+   "plugins/codex/skills/gpt-5-4-prompting/references/prompt-blocks.md": "9df47d9ac08c28c6ae302febc2b788cf6105ca18998a9649d7c8ccd816a047e9"
+  },
+  "harnessSha256": "c7dfb3783f397d9300fef743e8b227089131c568b7105ff34265c5accd1972c6",
+  "autoWindow": 20000,
+  "phases": [
+   {
+    "phase": "after startup",
+    "probe": {
+     "at": 1794117764442,
+     "acquired": true,
+     "wrote": true,
+     "error": null,
+     "envelopeVersion": 3,
+     "capabilitySha": "05b4c4a7e745882c",
+     "sessionSha": "25b475dc49641848",
+     "transcriptPathSha": "32456f7d17209d16"
+    }
+   },
+   {
+    "phase": "startup",
+    "sessionStart": {
+     "source": "startup",
+     "transcriptExistsAtExit": false,
+     "attemptSha": "2e71be6f92651233",
+     "capabilitySha": "05b4c4a7e745882c",
+     "hookExitCode": 0,
+     "receiptRecordedWithFirstTurn": true,
+     "receiptType": "hook_success",
+     "receiptExitCode": 0,
+     "receiptDurationMs": 292,
+     "receiptVersion": "2.1.308"
+    }
+   },
+   {
+    "phase": "manual compact",
+    "sessionStart": {
+     "source": "compact",
+     "transcriptExistsAtExit": true,
+     "attemptSha": "40e4bd4dabbff875",
+     "capabilitySha": "05b4c4a7e745882c",
+     "hookExitCode": 0,
+     "latencyHookExitToReceiptMs": 122.0,
+     "receiptType": "hook_success",
+     "receiptExitCode": 0,
+     "receiptDurationMs": 97,
+     "receiptVersion": "2.1.308"
+    }
+   },
+   {
+    "phase": "after manual compact",
+    "probe": {
+     "at": 1794117787130,
+     "acquired": true,
+     "wrote": true,
+     "error": null,
+     "envelopeVersion": 3,
+     "capabilitySha": "05b4c4a7e745882c",
+     "sessionSha": "25b475dc49641848",
+     "transcriptPathSha": "32456f7d17209d16"
+    }
+   },
+   {
+    "phase": "auto compact",
+    "fills": 56,
+    "sessionStart": {
+     "source": "compact",
+     "transcriptExistsAtExit": true,
+     "attemptSha": "20afcbbeef865005",
+     "capabilitySha": "05b4c4a7e745882c",
+     "hookExitCode": 0,
+     "latencyHookExitToReceiptMs": 137.0,
+     "receiptType": "hook_success",
+     "receiptExitCode": 0,
+     "receiptDurationMs": 107,
+     "receiptVersion": "2.1.308"
+    }
+   },
+   {
+    "phase": "after auto compact",
+    "probe": {
+     "at": 1794118103772,
+     "acquired": true,
+     "wrote": true,
+     "error": null,
+     "envelopeVersion": 3,
+     "capabilitySha": "05b4c4a7e745882c",
+     "sessionSha": "25b475dc49641848",
+     "transcriptPathSha": "32456f7d17209d16"
+    }
+   },
+   {
+    "phase": "after clear",
+    "probe": {
+     "at": 1794118110422,
+     "acquired": true,
+     "wrote": true,
+     "error": null,
+     "envelopeVersion": 3,
+     "capabilitySha": "e3a918be5e3d4b1a",
+     "sessionSha": "8940c5ed96c4c406",
+     "transcriptPathSha": "051994bef36ed6e0"
+    }
+   },
+   {
+    "phase": "clear",
+    "sessionStart": {
+     "source": "clear",
+     "transcriptExistsAtExit": false,
+     "attemptSha": "8779c7f6e656b89b",
+     "capabilitySha": "e3a918be5e3d4b1a",
+     "hookExitCode": 0,
+     "receiptRecordedWithFirstTurn": true,
+     "receiptType": "hook_success",
+     "receiptExitCode": 0,
+     "receiptDurationMs": 104,
+     "receiptVersion": "2.1.308"
+    }
+   },
+   {
+    "phase": "after resume",
+    "probe": {
+     "at": 1794118118106,
+     "acquired": true,
+     "wrote": true,
+     "error": null,
+     "envelopeVersion": 3,
+     "capabilitySha": "534023b268c5b094",
+     "sessionSha": "8940c5ed96c4c406",
+     "transcriptPathSha": "051994bef36ed6e0"
+    }
+   },
+   {
+    "phase": "resume",
+    "sessionStart": {
+     "source": "resume",
+     "transcriptExistsAtExit": true,
+     "attemptSha": "d5cfbdfa3a4fa307",
+     "capabilitySha": "534023b268c5b094",
+     "hookExitCode": 0,
+     "receiptRecordedWithFirstTurn": true,
+     "receiptType": "hook_success",
+     "receiptExitCode": 0,
+     "receiptDurationMs": 95,
+     "receiptVersion": "2.1.308"
+    }
+   },
+   {
+    "phase": "fault exit-one",
+    "probe": {
+     "at": 1794118128437,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: latest provider receipt not proven)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "2b0ba2c4a59247f9",
+     "sessionSha": "e2f42c2377d78715",
+     "transcriptPathSha": "3d801ec329c68a4a"
+    }
+   },
+   {
+    "phase": "fault exit-one",
+    "probe": {
+     "at": 1794118128437,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: latest provider receipt not proven)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "2b0ba2c4a59247f9",
+     "sessionSha": "e2f42c2377d78715",
+     "transcriptPathSha": "3d801ec329c68a4a"
+    },
+    "recordedReceipts": [
+     {
+      "type": "hook_success",
+      "exitCode": 1,
+      "hookName": "SessionStart:startup",
+      "version": "2.1.308",
+      "stdoutParsed": true,
+      "stdoutHasToken": true
+     }
+    ]
+   },
+   {
+    "phase": "fault killed",
+    "probe": {
+     "at": 1794118141259,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: latest provider receipt not proven)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "7cb0756dea977d8a",
+     "sessionSha": "78504e65d4a36d2a",
+     "transcriptPathSha": "ef45f54f313e3d8a"
+    }
+   },
+   {
+    "phase": "fault killed",
+    "probe": {
+     "at": 1794118141259,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: latest provider receipt not proven)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "7cb0756dea977d8a",
+     "sessionSha": "78504e65d4a36d2a",
+     "transcriptPathSha": "ef45f54f313e3d8a"
+    },
+    "recordedReceipts": [
+     {
+      "type": "hook_success",
+      "exitCode": 1,
+      "hookName": "SessionStart:startup",
+      "version": "2.1.308",
+      "stdoutParsed": true,
+      "stdoutHasToken": true
+     }
+    ]
+   },
+   {
+    "phase": "fault partial",
+    "probe": {
+     "at": 1794118152189,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: provider receipt token mismatch)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "8dbb91d5a1a984f5",
+     "sessionSha": "0d4f215c4003c4ed",
+     "transcriptPathSha": "f9b822075999add1"
+    }
+   },
+   {
+    "phase": "fault partial",
+    "probe": {
+     "at": 1794118152189,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: provider receipt token mismatch)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "8dbb91d5a1a984f5",
+     "sessionSha": "0d4f215c4003c4ed",
+     "transcriptPathSha": "f9b822075999add1"
+    },
+    "recordedReceipts": [
+     {
+      "type": "hook_success",
+      "exitCode": 0,
+      "hookName": "SessionStart:startup",
+      "version": "2.1.308",
+      "stdoutParsed": false,
+      "stdoutHasToken": false
+     }
+    ]
+   }
+  ],
+  "checks": {
+   "startupProbeAdmitted": true,
+   "manualCompactKeepsC": true,
+   "bashAfterManualCompactAdmitted": true,
+   "autoCompactObserved": true,
+   "autoCompactKeepsC": true,
+   "bashAfterAutoCompactAdmitted": true,
+   "bashKeptOneEnvelope": true,
+   "workerPublishedOverCompact": true,
+   "workerLogKeptResult": true,
+   "stopHooksSucceeded": true,
+   "sessionEndSucceeded": true,
+   "clearEndedOldSession": true,
+   "bashAfterClearAdmitted": true,
+   "clearNewCapability": true,
+   "bashAfterResumeAdmitted": true,
+   "resumeNewCapability": true,
+   "exitOneRefused": true,
+   "killedRefused": true,
+   "partialRefused": true,
+   "faultReceiptsRecorded": true,
+   "receiptVersionProven": true,
+   "receiptFieldsPresent": true,
+   "noProofInModelInput": true
+  },
+  "transcriptPathShas": [
+   "32456f7d17209d16",
+   "051994bef36ed6e0",
+   "3d801ec329c68a4a",
+   "ef45f54f313e3d8a",
+   "f9b822075999add1"
+  ],
+  "autoCompactAttempt": {
+   "fills": 56,
+   "observed": true,
+   "window": 20000
+  },
+  "worker": {
+   "startedAt": 1794117770978,
+   "jobId": "d-worker-1794117770978",
+   "published": true,
+   "error": null,
+   "releasedAt": 1794118098895,
+   "finishedAt": 1794118099067,
+   "storedStatus": "completed",
+   "storedRendered": true,
+   "logHasResult": true
+  },
+  "faults": {
+   "exit-one": {
+    "probe": {
+     "at": 1794118128437,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: latest provider receipt not proven)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "2b0ba2c4a59247f9",
+     "sessionSha": "e2f42c2377d78715",
+     "transcriptPathSha": "3d801ec329c68a4a"
+    },
+    "recordedReceipts": [
+     {
+      "type": "hook_success",
+      "exitCode": 1,
+      "hookName": "SessionStart:startup",
+      "version": "2.1.308",
+      "stdoutParsed": true,
+      "stdoutHasToken": true
+     }
+    ]
+   },
+   "killed": {
+    "probe": {
+     "at": 1794118141259,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: latest provider receipt not proven)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "7cb0756dea977d8a",
+     "sessionSha": "78504e65d4a36d2a",
+     "transcriptPathSha": "ef45f54f313e3d8a"
+    },
+    "recordedReceipts": [
+     {
+      "type": "hook_success",
+      "exitCode": 1,
+      "hookName": "SessionStart:startup",
+      "version": "2.1.308",
+      "stdoutParsed": true,
+      "stdoutHasToken": true
+     }
+    ]
+   },
+   "partial": {
+    "probe": {
+     "at": 1794118152189,
+     "acquired": false,
+     "wrote": false,
+     "error": {
+      "code": "ESTATELOCKREFUSED",
+      "reason": "admission refused (Session admission refused: provider receipt token mismatch)"
+     },
+     "envelopeVersion": 3,
+     "capabilitySha": "8dbb91d5a1a984f5",
+     "sessionSha": "0d4f215c4003c4ed",
+     "transcriptPathSha": "f9b822075999add1"
+    },
+    "recordedReceipts": [
+     {
+      "type": "hook_success",
+      "exitCode": 0,
+      "hookName": "SessionStart:startup",
+      "version": "2.1.308",
+      "stdoutParsed": false,
+      "stdoutHasToken": false
+     }
+    ]
+   }
+  },
+  "proofLeaks": 0,
+  "faultSessionHooks": [
+   {
+    "event": "Stop",
+    "code": 0
+   },
+   {
+    "event": "SessionEnd",
+    "code": 1
+   },
+   {
+    "event": "Stop",
+    "code": 0
+   },
+   {
+    "event": "SessionEnd",
+    "code": 1
+   },
+   {
+    "event": "Stop",
+    "code": 0
+   },
+   {
+    "event": "SessionEnd",
+    "code": 1
+   }
+  ],
+  "latencyMs": {
+   "manual compact": 122.0,
+   "auto compact": 137.0
+  },
+  "passed": true,
+  "ownClaudeStopped": true
+ }
+}
