@@ -1,5 +1,5 @@
 {
-  "note": "Sanitized shapes of the Claude Code 2.1.308 SessionStart transcript records that the receipt adapter session-start-hook-success-v1 reads (#1916). Measured on darwin/arm64; 2.1.308 writes the hook_additional_context record after the hook_success records, and adds record fields (rendered, renderedRole) the adapter does not read. Placeholders in <angle brackets> are filled by the test harness; no captured ids, paths or tokens.",
+  "note": "Sanitized shapes of the Claude Code 2.1.308 SessionStart transcript records that the receipt adapter session-start-hook-success-v1 reads (#1916). Measured on darwin/arm64; 2.1.308 writes the hook_additional_context record after the hook_success records, and adds record fields (rendered, renderedRole) the adapter does not read. Placeholders in <angle brackets> are filled by the test harness; no captured ids, paths or tokens. mergedContext is that context record exactly as 2.1.308 writes it when a second SessionStart hook also gives context (measured 08-11 in a real profile): one record per SessionStart that merges every hook's context, key order and field types as measured, neutral content.",
   "hookSuccess": {
     "type": "attachment",
     "version": "2.1.308",
@@ -30,5 +30,34 @@
       ],
       "toolUseID": "<toolUseID>"
     }
+  },
+  "mergedContext": {
+    "parentUuid": "<uuid>",
+    "isSidechain": false,
+    "attachment": {
+      "type": "hook_additional_context",
+      "content": [
+        "Codex Companion session context refreshed.",
+        "Another hook's context."
+      ],
+      "hookName": "SessionStart",
+      "toolUseID": "SessionStart",
+      "hookEvent": "SessionStart"
+    },
+    "type": "attachment",
+    "uuid": "<uuid>",
+    "timestamp": "<timestamp>",
+    "rendered": [
+      {
+        "content": "<rendered>"
+      }
+    ],
+    "renderedRole": "system",
+    "userType": "external",
+    "entrypoint": "sdk-ts",
+    "cwd": "<cwd>",
+    "sessionId": "<sessionId>",
+    "version": "2.1.308",
+    "gitBranch": "main"
   }
 }

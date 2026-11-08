@@ -26,7 +26,7 @@
       "evidenceSummary": "docs/releases/claude-code-2.1.308-receipt-evidence.json",
       "evidenceSummarySha256": "1c1baaa3b7a028cf8c16c6e0e29ee2b27f879e1886fda4c9111c9b5a559b8f46",
       "fixtures": "tests/fixtures/provider-receipts/claude-code-2.1.308.json",
-      "fixturesSha256": "f66b5877da12ce501234447ae459ad65163eacee6df284cbe3260299f056b520"
+      "fixturesSha256": "98312c372913cd1a1f8f2dd8c0b4651afa533c2f2934a2f93c8af52c7017ad3a"
     }
   ]
 }

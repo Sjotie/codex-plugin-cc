@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.27.1 (fork, Homebase #1916; 2026-11-08)
+
+- macOS: state writes work again in real profiles. Claude Code merges the
+  additionalContext of every SessionStart hook into one
+  `hook_additional_context` record; with any second hook that gives context
+  (every real profile here) the receipt check took that record as the latest
+  receipt and refused with `latest provider receipt not proven`. A non-empty
+  array of strings is now context; a lone string, an empty array or a
+  non-string member still refuses, and the record never grants. Measured on
+  2.1.308: the native probe now runs with a second context hook and checks
+  that the context is merged (on resume Claude keeps only new context lines).
+
 ## 1.0.7-sjotie.27 (fork, Homebase #1916; 2026-11-08)
 
 - Reading the job list no longer creates the state `jobs/` directory

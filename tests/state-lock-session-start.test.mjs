@@ -400,21 +400,26 @@ for(const prior of ["success","failed","absent"]){
 
 // Claude Code merges the additionalContext of every SessionStart hook into one
 // record, so with a second context hook (any real profile) content holds one
-// string per hook. The record below is the literal 2.1.308 shape (#1916). It is
-// still context, never a receipt; anything but a non-empty array of strings
-// keeps refusing (a lone string: the test after this block).
-const MERGED = JSON.parse(fs.readFileSync(new URL("./fixtures/provider-receipts/claude-code-2.1.308-merged-context.json", import.meta.url), "utf8")).mergedContext;
-for(const [label,content,admitted] of [
-  ["two strings, as 2.1.308 writes it",["Codex Companion session context refreshed.","Another hook's context."],true],
-  ["a non-string member",["Codex Companion session context refreshed.",{text:"object"}],false],
-  ["an empty array",[],false]
+// string per hook; the literal 2.1.308 record is in its hashed fixture (#1916).
+// It is still context, never a receipt: after a failed or absent receipt it
+// grants nothing, and anything but a non-empty array of strings keeps refusing
+// (a lone string: the test after this block).
+const MERGED = JSON.parse(fs.readFileSync(new URL("./fixtures/provider-receipts/claude-code-2.1.308.json", import.meta.url), "utf8")).mergedContext;
+const mergedRecord = (f, content = MERGED.attachment.content) => {
+  const record = fill(MERGED, { uuid: "fixture-uuid", timestamp: new Date(0).toISOString(), rendered: "rendered context", cwd: f.workspace, sessionId: "session-current" });
+  return { ...record, attachment: { ...record.attachment, content } };
+};
+for(const [label,content,prior,admitted] of [
+  ["two strings, as 2.1.308 writes it",undefined,"success",true],
+  ["two strings after a failed receipt",undefined,"failed",false],
+  ["two strings and no receipt",undefined,"absent",false],
+  ["a non-string member",["Codex Companion session context refreshed.",{text:"object"}],"success",false],
+  ["an empty array",[],"success",false]
 ]){
-  test(`transport: merged additional-context with ${label} ${admitted?"stays context":"cannot hide the receipt"}`,options,t=>{
+  test(`transport: merged additional-context with ${label} ${admitted?"stays context":"grants nothing"}`,options,t=>{
     const f=fixture(t),r=f.runHook({},undefined,{omit:true});assert.equal(r.status,0,r.stderr);
-    f.appendReceipt(r,{record:{version:"2.1.308"}});
-    const values={uuid:"fixture-uuid",timestamp:new Date(0).toISOString(),rendered:"rendered context",cwd:f.workspace,sessionId:"session-current"};
-    const context=fill(MERGED,values);context.attachment={...context.attachment,content};
-    fs.appendFileSync(f.transcript,JSON.stringify(context)+"\n");
+    if(prior!=="absent")f.appendReceipt(r,{record:{version:"2.1.308"},...(prior==="failed"?{attachment:{exitCode:1}}:{})});
+    fs.appendFileSync(f.transcript,JSON.stringify(mergedRecord(f,content))+"\n");
     assert.equal(f.consume().acquired,admitted);
     assert.equal(f.activate("SessionEnd").acquired,admitted);
   });
@@ -745,7 +750,8 @@ for (const e of JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex
       const f = fixture(t), r = f.runHook({}, undefined, { omit: true });
       assert.equal(r.status, 0, r.stderr);
       const values = { sessionId: "session-current", cwd: f.workspace, source: "startup", exitCode: r.status, stdout: r.stdout, content: "context", toolUseID: "fixture-hook" };
-      const records = [fill(shapes.hookSuccess, values), fill(shapes.additionalContext, values)].map((record) => ({ ...record, version }));
+      const context = shapes.mergedContext ? { ...fill(shapes.mergedContext, { ...values, uuid: "fixture-uuid", timestamp: new Date(0).toISOString(), rendered: "rendered" }) } : fill(shapes.additionalContext, values);
+      const records = [fill(shapes.hookSuccess, values), context].map((record) => ({ ...record, version }));
       fs.writeFileSync(f.transcript, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
       const admitted = version === e.version;
       assert.equal(f.consume().acquired, admitted, `Bash under ${version}`);

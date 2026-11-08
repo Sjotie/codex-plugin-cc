@@ -83,9 +83,12 @@ that timestamp and excludes the generation token. The token stays in raw
 completion metadata. A suppressed custom-only output and static-context
 probes did not retain the current resume receipt; their failure is retained
 as evidence, not hidden by a fallback. The cause is unknown. The parser ignores
-only the measured one-string-array `hook_additional_context` record as
-noncompletion metadata; it still requires a separate exact successful
-completion. Missing, malformed or failed current completion refuses.
+only the measured `hook_additional_context` record as noncompletion metadata:
+a non-empty array of strings, one per SessionStart hook that gave context
+(Claude merges them into one record; measured on 2.1.308 with a second context
+hook, sjotie.27.1). A lone string, an empty array or a non-string member
+refuses. It still requires a separate exact successful completion. Missing,
+malformed or failed current completion refuses.
 
 The whole plugin remains **not landable and not ready for its final cross-family
 review** while the actual compact Bash path is unavailable. No disk lookup,
