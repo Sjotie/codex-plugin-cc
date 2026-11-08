@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.29 (fork, Factory #5075; 2026-11-08)
+
+- A worker's final result publication keeps its bounded admission wait when
+  a pending SessionStart is followed by a busy lock or an unclassified lock
+  timeout. Previously that handover could stop publication after the ordinary
+  ten-second deadline, leaving the result only in the job log. The original
+  admission deadline is preserved; definitive refusals still stop immediately.
+- Based on sjotie.28 (`0ee91a3`), with the reviewed publication fix through
+  `5ad7f6d`. Includes deterministic coverage of transient admission followed
+  by BUSY, deadline expiry, disabled admission waiting and immediate refusals.
+  The separate macOS full-suite admission-fixture issue (#5068) remains open.
+
 ## 1.0.7-sjotie.28 (fork, Homebase #1916; 2026-11-08)
 
 Native proof on darwin/arm64 with Claude Code 2.1.308:
