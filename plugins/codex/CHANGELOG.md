@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.30 (fork, Factory #5081; 2026-11-08)
+
+- Long temporary paths use a short private broker session directory instead
+  of failing with an opaque Unix-socket EINVAL. The fallback root is checked
+  for its owner, mode 0700 and absence of symlinks; shutdown and orphan cleanup
+  cover these sessions too.
+- Socket paths are checked by UTF-8 byte length for the macOS and Linux limits.
+  When the fallback is unavailable, the error names the original path, byte
+  count, limit and fallback failure.
+- Includes regression coverage for fallback binding and cleanup, unavailable
+  storage, real symlinks, unsafe permissions and foreign owners.
+
 ## 1.0.7-sjotie.29 (fork, Factory #5075; 2026-11-08)
 
 - A worker's final result publication keeps its bounded admission wait when
