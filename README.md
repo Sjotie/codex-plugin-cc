@@ -526,3 +526,8 @@ directory owned by that uid with mode 0700; symlinks and unsafe permissions
 are refused. Normal shutdown removes the session, and later starts sweep dead
 orphan sessions in this root too. If the fallback cannot be used, the error
 names the original socket path, byte count, limit and fallback failure.
+
+The generic admission fixture publishes one shared certificate atomically in
+the fixture fence. Consumers reuse it only while the fence/authority identities
+and sealed record hash match. Certificate reuse still acquires the real state
+lock; it avoids preparing admission again while another writer holds that lock.
