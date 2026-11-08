@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (fork, Homebase #1916)
+
+- macOS: Claude Code 2.1.308 on darwin/arm64 is a proven provider version
+  (`provider-receipts.json`). Since the Mac moved to 2.1.308 every state write
+  (rescue, review, setup) refused with `provider version unproven`. Evidence:
+  `docs/releases/claude-code-2.1.308-receipt-evidence.json`, from the native
+  probe, which now also covers `/clear`, resume, exit-one, killed and partial
+  SessionStart completions and checks that no proof reaches model input.
+
 ## 1.0.7-sjotie.26 (fork, Homebase #4648; 2026-11-03)
 
 - A command that starts work (`task`, `review`, `adversarial-review`) checks

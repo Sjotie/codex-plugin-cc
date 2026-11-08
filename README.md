@@ -38,8 +38,12 @@ only this hook route performs process proof. See the release checklist for
 native coverage; this candidate is not permission to publish or install it.
 On macOS this candidate accepts only the Claude Code versions listed with
 their proof in `plugins/codex/scripts/lib/provider-receipts.json` (now
-**2.1.301 on darwin/arm64**): another version, platform or process
-architecture refuses with `provider version unproven`. Stop and SessionEnd
+**2.1.301 and 2.1.308 on darwin/arm64**): another version, platform or process
+architecture refuses with `provider version unproven`. A new version gets its
+own entry only after a green native run of
+`uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version <version>`
+on the Mac, with the candidate entry (its binary hash) already in the
+manifest; the run's sanitized summary becomes the entry's evidence. Stop and SessionEnd
 recover only the current session capability from the same authority, with a
 fresh check of Claude's successful SessionStart receipt. A seal alone grants
 nothing.
