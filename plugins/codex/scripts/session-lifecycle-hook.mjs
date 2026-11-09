@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 
 import { isTerminalJobStatus, isWaitingJobStatus } from "./lib/job-status.mjs";
@@ -34,11 +35,68 @@ function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
 }
 
+let envFileTmpSeq = 0;
+
 function appendEnvVar(name, value, { allowEmpty = false } = {}) {
-  if (!process.env.CLAUDE_ENV_FILE || value == null || (!allowEmpty && value === "")) {
+  const envFile = process.env.CLAUDE_ENV_FILE;
+  if (!envFile || value == null || (!allowEmpty && value === "")) {
     return;
   }
-  fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
+
+  let existing = "";
+  let mode = null;
+  try {
+    const stat = fs.statSync(envFile);
+    mode = stat.mode & 0o7777;
+    existing = fs.readFileSync(envFile, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const lines = existing === "" ? [] : existing.split("\n");
+  if (lines.length > 0 && lines.at(-1) === "") {
+    lines.pop();
+  }
+
+  const prefix = `export ${name}=`;
+  const nextLine = `${prefix}${shellEscape(value)}`;
+  let replaced = false;
+  const updated = [];
+  for (const line of lines) {
+    if (line.startsWith(prefix)) {
+      if (!replaced) {
+        updated.push(nextLine);
+        replaced = true;
+      }
+    } else {
+      updated.push(line);
+    }
+  }
+  if (!replaced) {
+    updated.push(nextLine);
+  }
+
+  const content = `${updated.join("\n")}\n`;
+  const tmpFile = path.join(
+    path.dirname(envFile),
+    `.${path.basename(envFile)}.${process.pid}.${++envFileTmpSeq}.tmp`
+  );
+  try {
+    fs.writeFileSync(tmpFile, content, { encoding: "utf8", ...(mode !== null ? { mode } : {}) });
+    if (mode !== null) {
+      fs.chmodSync(tmpFile, mode);
+    }
+    fs.renameSync(tmpFile, envFile);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
+      // Ignore cleanup errors after a failed write or rename.
+    }
+    throw error;
+  }
 }
 
 const SESSION_ENDED_MESSAGE = "Stopped because the Claude session ended.";

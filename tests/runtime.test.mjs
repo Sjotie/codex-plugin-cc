@@ -1194,9 +1194,9 @@ test("session start hook exports the Claude session id, transcript path, and plu
   let exports = fs.readFileSync(envFile, "utf8");
   if (process.platform === "darwin") {
     const lines = exports.trimEnd().split("\n");
-    assert.equal(lines.shift(), "export CODEX_COMPANION_LOCK_ADMISSION=''");
-    const admissionLine = lines.pop();
+    const admissionLine = lines.shift();
     assert.match(admissionLine, /^export CODEX_COMPANION_LOCK_ADMISSION='\{/);
+    assert.equal(lines.some((line) => line.startsWith("export CODEX_COMPANION_LOCK_ADMISSION=")), false);
     const envelope = JSON.parse(admissionLine.slice("export CODEX_COMPANION_LOCK_ADMISSION='".length, -1));
     assert.equal(envelope.sessionId, "sess-current");
     assert.equal(envelope.version, 3);
@@ -1211,6 +1211,111 @@ test("session start hook exports the Claude session id, transcript path, and plu
     exports,
     `export CODEX_COMPANION_SESSION_ID='sess-current'\nexport CODEX_COMPANION_TRANSCRIPT_PATH='${transcriptPath}'\nexport CLAUDE_PLUGIN_DATA='${pluginDataDir}'\n`
   );
+});
+
+test("session start hook rewrites CLAUDE_ENV_FILE atomically across N=500 starts, preserving other lines, quotes, spaces, and mode", () => {
+  const repo = makeTempDir();
+  const envDir = makeTempDir();
+  const envFile = path.join(envDir, "claude-env.sh");
+  const otherBefore = "export OTHER_BEFORE='value with spaces, '\"'\"'single'\"'\"' and \"double\" quotes'";
+  const otherAfter = "export OTHER_AFTER=\"another value with spaces and 'quotes'\"";
+  fs.writeFileSync(
+    envFile,
+    `${otherBefore}\nexport CODEX_COMPANION_SESSION_ID='stale-session'\n${otherAfter}\n`,
+    { encoding: "utf8", mode: 0o640 }
+  );
+  fs.chmodSync(envFile, 0o640);
+  const initialIno = fs.statSync(envFile, { bigint: true }).ino;
+
+  const sessionId = "sess with spaces & 'single' and \"double\" quotes";
+  const transcriptPath = path.join(repo, "dir with spaces", "it's a \"quoted\" transcript.jsonl");
+  const pluginDataDir = path.join(repo, "plugin data 'single' and \"double\" quotes");
+
+  const driver = `
+    import fs from "node:fs";
+    import { pathToFileURL } from "node:url";
+
+    Object.defineProperty(process, "platform", { value: "linux" });
+    const [hookPath, envFile, cwd, sessionId, transcriptPath] = process.argv.slice(1);
+    process.argv = [process.execPath, hookPath, "SessionStart"];
+    const origReadFileSync = fs.readFileSync;
+    const sources = ["startup", "resume", "compact"];
+    let turn = 0;
+    fs.readFileSync = function (fd, ...rest) {
+      if (fd === 0) {
+        const source = sources[turn % sources.length];
+        return JSON.stringify({
+          hook_event_name: "SessionStart",
+          session_id: sessionId,
+          source,
+          transcript_path: transcriptPath,
+          cwd
+        });
+      }
+      return origReadFileSync.call(this, fd, ...rest);
+    };
+    const hookUrl = pathToFileURL(hookPath).href;
+    let sizeAfterOne = 0;
+    let contentAfterOne = "";
+    for (turn = 0; turn < 500; turn += 1) {
+      await import(\`\${hookUrl}?run=\${turn}\`);
+      if (turn === 0) {
+        contentAfterOne = origReadFileSync.call(fs, envFile, "utf8");
+        sizeAfterOne = fs.statSync(envFile).size;
+      }
+    }
+    const contentAfter500 = origReadFileSync.call(fs, envFile, "utf8");
+    const sizeAfter500 = fs.statSync(envFile).size;
+    process.stdout.write(JSON.stringify({ sizeAfterOne, sizeAfter500, contentAfterOne, contentAfter500 }));
+  `;
+
+  const run500 = run(
+    "node",
+    ["--input-type=module", "-e", driver, SESSION_HOOK, envFile, repo, sessionId, transcriptPath],
+    {
+      cwd: repo,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: "",
+        CLAUDE_ENV_FILE: envFile,
+        CLAUDE_PLUGIN_DATA: pluginDataDir
+      }
+    }
+  );
+  assert.equal(run500.status, 0, run500.stderr);
+  const { sizeAfterOne, sizeAfter500, contentAfterOne, contentAfter500 } = JSON.parse(run500.stdout);
+  assert.ok(sizeAfterOne > 0);
+  assert.equal(sizeAfter500, sizeAfterOne, `expected CLAUDE_ENV_FILE size after 500 starts (${sizeAfter500}) to equal size after 1 start (${sizeAfterOne})`);
+  assert.equal(contentAfter500, contentAfterOne);
+
+  const statAfter = fs.statSync(envFile, { bigint: true });
+  assert.notEqual(statAfter.ino, initialIno, "expected atomic temp-file + rename to replace the inode");
+  assert.equal(Number(statAfter.mode & 0o777n), 0o640, "expected file permissions to be preserved");
+  assert.deepEqual(fs.readdirSync(envDir), ["claude-env.sh"], "expected no temporary files left behind");
+
+  const finalLines = fs.readFileSync(envFile, "utf8").trimEnd().split("\n");
+  assert.equal(finalLines.length, 5);
+  assert.equal(finalLines[0], otherBefore);
+  assert.equal(finalLines[2], otherAfter);
+
+  const sourced = run(
+    "/bin/bash",
+    [
+      "-c",
+      'source "$1" && node -e \'console.log(JSON.stringify({ OTHER_BEFORE: process.env.OTHER_BEFORE, OTHER_AFTER: process.env.OTHER_AFTER, SESSION_ID: process.env.CODEX_COMPANION_SESSION_ID, TRANSCRIPT_PATH: process.env.CODEX_COMPANION_TRANSCRIPT_PATH, PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA }))\'',
+      "test-env",
+      envFile
+    ],
+    { cwd: repo, env: { ...process.env, NODE_OPTIONS: "" } }
+  );
+  assert.equal(sourced.status, 0, sourced.stderr);
+  assert.deepEqual(JSON.parse(sourced.stdout), {
+    OTHER_BEFORE: "value with spaces, 'single' and \"double\" quotes",
+    OTHER_AFTER: "another value with spaces and 'quotes'",
+    SESSION_ID: sessionId,
+    TRANSCRIPT_PATH: transcriptPath,
+    PLUGIN_DATA: pluginDataDir
+  });
 });
 
 test("write task output focuses on the Codex result without generic follow-up hints", () => {

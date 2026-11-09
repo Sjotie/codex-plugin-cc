@@ -58,7 +58,9 @@ function fixture(t, repo = defaultRepo) {
     };
     const rename=fs.renameSync;
     fs.renameSync=function(from,to,...rest){const r=rename.call(this,from,to,...rest);
-      if(String(to).endsWith('/fence.json') && JSON.parse(fs.readFileSync(process.env.ADMISSION_FIXTURE,'utf8')).crash) process.kill(process.pid,'SIGKILL');
+      const c=JSON.parse(fs.readFileSync(process.env.ADMISSION_FIXTURE,'utf8'));
+      if(String(to).endsWith('/fence.json') && c.crash) process.kill(process.pid,'SIGKILL');
+      if(to===process.env.CLAUDE_ENV_FILE && c.crashExport && fs.readFileSync(to,'utf8').includes("export CODEX_COMPANION_LOCK_ADMISSION='{")) process.kill(process.pid,'SIGKILL');
       return r;};
     const append=fs.appendFileSync;
     fs.appendFileSync=function(file,data,...rest){const r=append.call(this,file,data,...rest);
@@ -104,10 +106,14 @@ function fixture(t, repo = defaultRepo) {
   // The real hook, started now and fed its stdin later: it begins its attempt
   // before reading stdin, so the attempt stays pending until feed().
   let holds = 0;
-  const cleared = () => fs.readFileSync(env.CLAUDE_ENV_FILE, "utf8").split("\n").filter((l) => l === `export ${CERT}=''`).length;
+  const clearToken = () => {
+    const stat = fs.statSync(env.CLAUDE_ENV_FILE, { bigint: true });
+    const count = fs.readFileSync(env.CLAUDE_ENV_FILE, "utf8").split("\n").filter((l) => l === `export ${CERT}=''`).length;
+    return count > 0 ? `${stat.ino}:${count}` : null;
+  };
   const startHook = async (input = hookInput(), spec = {}, extraEnv = {}) => {
     fs.writeFileSync(config, JSON.stringify(spec));
-    const before = cleared();
+    const before = clearToken();
     // The input is on stdin at once, as from Claude; the preload holds the
     // hook's stdin read until the hold file exists.
     const holdFile = path.join(root, `stdin-hold-${++holds}`);
@@ -118,8 +124,9 @@ function fixture(t, repo = defaultRepo) {
     const exited = new Promise((resolve) => child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr })));
     t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; });
     // The hook clears the export only after its attempt is committed.
-    for (let i = 0; i < 500 && cleared() === before && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 10));
-    assert.equal(cleared(), before + 1, "hook did not begin its attempt");
+    for (let i = 0; i < 500 && (clearToken() ?? before) === before && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 10));
+    const after = clearToken();
+    assert.ok(after !== null && after !== before, "hook did not begin its attempt");
     return { feed: async (receiptOptions = {}) => { fs.writeFileSync(holdFile, ""); const result = await exited;
       if (!receiptOptions.omit) appendReceipt(result, { source: input.source, sessionId: input.session_id, ...receiptOptions }); return result; } };
   };
