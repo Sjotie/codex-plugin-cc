@@ -1460,6 +1460,39 @@ test("session start hook preserves CLAUDE_ENV_FILE symlink, retries or falls bac
   assert.match(concText, /export CONCURRENT_WRITER='preserved'\n/);
   assert.match(concText, /export CODEX_COMPANION_SESSION_ID='sess-conc'\n/);
   assert.deepEqual(fs.readdirSync(concDir), ["conc-env.sh"]);
+
+  // 4. Stale lock with a reused live PID (older than 30s mtime) is evicted instead of timing out.
+  const staleDir = makeTempDir();
+  const staleEnvFile = path.join(staleDir, "stale-env.sh");
+  fs.writeFileSync(staleEnvFile, "export STALE_KEEP='1'\n", "utf8");
+  const staleLockFile = `${staleEnvFile}.lock`;
+  fs.writeFileSync(staleLockFile, `${process.pid}\n`, "utf8");
+  const pastSeconds = Math.floor((Date.now() - 60_000) / 1000);
+  fs.utimesSync(staleLockFile, pastSeconds, pastSeconds);
+
+  const staleRes = run("node", [SESSION_HOOK, "SessionStart"], {
+    cwd: repo,
+    env: {
+      ...process.env,
+      NODE_OPTIONS: "",
+      CLAUDE_ENV_FILE: staleEnvFile,
+      CLAUDE_PLUGIN_DATA: pluginDataDir,
+      CLAUDE_CONFIG_DIR: path.join(repo, "claude-stale"),
+      CLAUDE_CODE_SESSION_ID: "sess-stale"
+    },
+    input: JSON.stringify({
+      hook_event_name: "SessionStart",
+      session_id: "sess-stale",
+      source: "startup",
+      transcript_path: transcriptPath,
+      cwd: repo
+    })
+  });
+  assert.equal(staleRes.status, 0, staleRes.stderr);
+  const staleText = fs.readFileSync(staleEnvFile, "utf8");
+  assert.match(staleText, /^export STALE_KEEP='1'\n/);
+  assert.match(staleText, /export CODEX_COMPANION_SESSION_ID='sess-stale'\n/);
+  assert.deepEqual(fs.readdirSync(staleDir), ["stale-env.sh"]);
 });
 
 test("write task output focuses on the Codex result without generic follow-up hints", () => {

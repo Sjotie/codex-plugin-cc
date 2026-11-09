@@ -38,6 +38,7 @@ function shellEscape(value) {
 let envFileTmpSeq = 0;
 const ENV_LOCK_WAIT_MS = 2000;
 const ENV_LOCK_RETRY_MS = 5;
+const ENV_LOCK_MAX_AGE_MS = 30000;
 const WIN32_RENAME_RETRIES = 3;
 const WIN32_RENAME_BACKOFF_MS = 10;
 
@@ -71,8 +72,13 @@ function resolveEnvFileTarget(envFile) {
 }
 
 function isLockHolderAlive(lockFile) {
+  let stat;
   let raw = "";
   try {
+    stat = fs.statSync(lockFile);
+    if (Date.now() - stat.mtimeMs > ENV_LOCK_MAX_AGE_MS) {
+      return false;
+    }
     raw = fs.readFileSync(lockFile, "utf8").trim();
   } catch (error) {
     if (error?.code === "ENOENT") {
@@ -82,11 +88,7 @@ function isLockHolderAlive(lockFile) {
   }
   const pid = Number.parseInt(raw, 10);
   if (!Number.isInteger(pid) || pid <= 0) {
-    try {
-      return Date.now() - fs.statSync(lockFile).mtimeMs < 100;
-    } catch {
-      return false;
-    }
+    return Date.now() - stat.mtimeMs < 100;
   }
   try {
     process.kill(pid, 0);
@@ -96,24 +98,49 @@ function isLockHolderAlive(lockFile) {
   }
 }
 
+function evictStaleLock(lockFile) {
+  const claimFile = `${lockFile}.stale.${process.pid}.${++envFileTmpSeq}`;
+  try {
+    fs.renameSync(lockFile, claimFile);
+  } catch {
+    return false;
+  }
+  if (isLockHolderAlive(claimFile)) {
+    try {
+      fs.renameSync(claimFile, lockFile);
+    } catch {
+      try {
+        fs.unlinkSync(claimFile);
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
+    return false;
+  }
+  try {
+    fs.unlinkSync(claimFile);
+  } catch {
+    // Ignore cleanup errors.
+  }
+  return true;
+}
+
 function withEnvFileLock(targetFile, fn) {
   const lockFile = `${targetFile}.lock`;
+  const ownerContent = `${process.pid}\n`;
   const deadline = Date.now() + ENV_LOCK_WAIT_MS;
   let acquired = false;
   while (!acquired) {
     try {
-      fs.writeFileSync(lockFile, `${process.pid}\n`, { encoding: "utf8", flag: "wx" });
-      acquired = true;
+      fs.writeFileSync(lockFile, ownerContent, { encoding: "utf8", flag: "wx" });
+      if (fs.readFileSync(lockFile, "utf8") === ownerContent) {
+        acquired = true;
+      }
     } catch (error) {
       if (error?.code !== "EEXIST") {
         throw error;
       }
-      if (!isLockHolderAlive(lockFile)) {
-        try {
-          fs.unlinkSync(lockFile);
-        } catch {
-          // Another contender may have already removed or replaced it.
-        }
+      if (!isLockHolderAlive(lockFile) && evictStaleLock(lockFile)) {
         continue;
       }
       if (Date.now() >= deadline) {
@@ -126,7 +153,9 @@ function withEnvFileLock(targetFile, fn) {
     return fn();
   } finally {
     try {
-      fs.unlinkSync(lockFile);
+      if (fs.readFileSync(lockFile, "utf8") === ownerContent) {
+        fs.unlinkSync(lockFile);
+      }
     } catch {
       // Ignore cleanup errors if the lock file was already removed.
     }
