@@ -1318,6 +1318,150 @@ test("session start hook rewrites CLAUDE_ENV_FILE atomically across N=500 starts
   });
 });
 
+test("session start hook preserves CLAUDE_ENV_FILE symlink, retries or falls back on win32 EPERM/EBUSY, and serializes concurrent writes", async () => {
+  const repo = makeTempDir();
+  const pluginDataDir = makeTempDir();
+  const transcriptPath = path.join(repo, "session.jsonl");
+
+  // 1. Symlink target is updated without replacing the symlink itself.
+  const symlinkDir = makeTempDir();
+  const realEnvFile = path.join(symlinkDir, "real-env.sh");
+  const symlinkEnvFile = path.join(symlinkDir, "link-env.sh");
+  fs.writeFileSync(realEnvFile, "export KEEP_SYMLINK='1'\n", { encoding: "utf8", mode: 0o640 });
+  fs.chmodSync(realEnvFile, 0o640);
+  fs.symlinkSync(realEnvFile, symlinkEnvFile);
+
+  const symlinkRun = run("node", [SESSION_HOOK, "SessionStart"], {
+    cwd: repo,
+    env: {
+      ...process.env,
+      CLAUDE_ENV_FILE: symlinkEnvFile,
+      CLAUDE_PLUGIN_DATA: pluginDataDir,
+      CLAUDE_CONFIG_DIR: path.join(repo, "claude-symlink"),
+      CLAUDE_CODE_SESSION_ID: "sess-symlink"
+    },
+    input: JSON.stringify({
+      hook_event_name: "SessionStart",
+      session_id: "sess-symlink",
+      source: "startup",
+      transcript_path: transcriptPath,
+      cwd: repo
+    })
+  });
+  assert.equal(symlinkRun.status, 0, symlinkRun.stderr);
+  assert.equal(fs.lstatSync(symlinkEnvFile).isSymbolicLink(), true, "expected CLAUDE_ENV_FILE symlink to remain a symbolic link");
+  const realContent = fs.readFileSync(realEnvFile, "utf8");
+  assert.match(realContent, /^export KEEP_SYMLINK='1'\n/);
+  assert.match(realContent, /export CODEX_COMPANION_SESSION_ID='sess-symlink'\n/);
+  assert.equal(fs.statSync(realEnvFile).mode & 0o777, 0o640);
+
+  // 2. Windows EBUSY retry and EPERM in-place fallback.
+  for (const mode of ["retry-ebusy", "fallback-eperm"]) {
+    const winDir = makeTempDir();
+    const winEnvFile = path.join(winDir, "win-env.sh");
+    fs.writeFileSync(winEnvFile, "export WIN_OTHER='kept'\nexport CODEX_COMPANION_SESSION_ID='old'\n", "utf8");
+    const winDriver = `
+      import fs from "node:fs";
+      import { pathToFileURL } from "node:url";
+
+      Object.defineProperty(process, "platform", { value: "win32" });
+      const [hookPath, envFile, cwd, transcriptPath, mode] = process.argv.slice(1);
+      process.argv = [process.execPath, hookPath, "SessionStart"];
+      const origReadFileSync = fs.readFileSync;
+      fs.readFileSync = function (fd, ...rest) {
+        if (fd === 0) {
+          return JSON.stringify({
+            hook_event_name: "SessionStart",
+            session_id: "sess-win32",
+            source: "startup",
+            transcript_path: transcriptPath,
+            cwd
+          });
+        }
+        return origReadFileSync.call(this, fd, ...rest);
+      };
+      const origRenameSync = fs.renameSync;
+      let attempts = 0;
+      fs.renameSync = function (from, to, ...rest) {
+        attempts += 1;
+        if (mode === "retry-ebusy" && attempts < 3) {
+          throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+        }
+        if (mode === "fallback-eperm") {
+          throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        }
+        return origRenameSync.call(this, from, to, ...rest);
+      };
+      await import(pathToFileURL(hookPath).href);
+      process.stdout.write(JSON.stringify({ attempts }));
+    `;
+    const winRes = run(
+      "node",
+      ["--input-type=module", "-e", winDriver, SESSION_HOOK, winEnvFile, repo, transcriptPath, mode],
+      {
+        cwd: repo,
+        env: {
+          ...process.env,
+          NODE_OPTIONS: "",
+          CLAUDE_ENV_FILE: winEnvFile,
+          CLAUDE_PLUGIN_DATA: pluginDataDir
+        }
+      }
+    );
+    assert.equal(winRes.status, 0, winRes.stderr);
+    const { attempts } = JSON.parse(winRes.stdout);
+    assert.ok(attempts >= 3, `expected rename retries in ${mode}, got ${attempts}`);
+    const winText = fs.readFileSync(winEnvFile, "utf8");
+    assert.match(winText, /^export WIN_OTHER='kept'\n/);
+    assert.match(winText, /export CODEX_COMPANION_SESSION_ID='sess-win32'\n/);
+    assert.deepEqual(fs.readdirSync(winDir), ["win-env.sh"]);
+  }
+
+  // 3. Concurrent writers on the same CLAUDE_ENV_FILE serialize via lockfile without losing updates.
+  const concDir = makeTempDir();
+  const concEnvFile = path.join(concDir, "conc-env.sh");
+  fs.writeFileSync(concEnvFile, "export INITIAL_LINE='1'\n", "utf8");
+  const lockFile = `${concEnvFile}.lock`;
+  // Hold the lock with the current live test PID briefly while spawning a hook writer,
+  // and verify the writer waits for the lock and preserves the concurrent update written before unlock.
+  fs.writeFileSync(lockFile, `${process.pid}\n`, "utf8");
+  const child = spawn(
+    process.execPath,
+    [SESSION_HOOK, "SessionStart"],
+    {
+      cwd: repo,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: "",
+        CLAUDE_ENV_FILE: concEnvFile,
+        CLAUDE_PLUGIN_DATA: pluginDataDir,
+        CLAUDE_CONFIG_DIR: path.join(repo, "claude-conc"),
+        CLAUDE_CODE_SESSION_ID: "sess-conc"
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    }
+  );
+  child.stdin.end(
+    JSON.stringify({
+      hook_event_name: "SessionStart",
+      session_id: "sess-conc",
+      source: "startup",
+      transcript_path: transcriptPath,
+      cwd: repo
+    })
+  );
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  // Simulate the first concurrent writer finishing its update just before releasing the lock.
+  fs.writeFileSync(concEnvFile, "export INITIAL_LINE='1'\nexport CONCURRENT_WRITER='preserved'\n", "utf8");
+  fs.unlinkSync(lockFile);
+  const exitCode = await new Promise((resolve) => child.once("close", resolve));
+  assert.equal(exitCode, 0);
+  const concText = fs.readFileSync(concEnvFile, "utf8");
+  assert.match(concText, /export CONCURRENT_WRITER='preserved'\n/);
+  assert.match(concText, /export CODEX_COMPANION_SESSION_ID='sess-conc'\n/);
+  assert.deepEqual(fs.readdirSync(concDir), ["conc-env.sh"]);
+});
+
 test("write task output focuses on the Codex result without generic follow-up hints", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
