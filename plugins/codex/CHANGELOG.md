@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.7-sjotie.31 (fork, Factory #5241; 2026-11-09)
+
+- The hook that rewrites the session env file follows a symlink to its real
+  target, writes under an exclusive lock and reads its own content back before
+  it reports success. A lock older than 30 s is moved aside and cleaned up
+  without racing another writer; Windows renames are retried.
+
 ## 1.0.7-sjotie.30 (fork, Factory #5081; 2026-11-08)
 
 - Long temporary paths use a short private broker session directory instead
