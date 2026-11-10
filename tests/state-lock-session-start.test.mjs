@@ -140,7 +140,7 @@ function fixture(t, repo = defaultRepo) {
         const h=lock.tryAcquire(); acquired=!!h; if(h) lock.release(h);
         if(acquired && ${write === true}) m.updateState(cwd,s=>{s.config.stopReviewGate=true;});
         if(acquired && ${write === "seed-job"}) {const job={id:'fixture-queued',sessionId:'session-current',status:'queued',phase:'queued',pid:null};m.upsertJob(cwd,job);m.writeJobFile(cwd,job.id,job);}
-      } catch(e){error={code:e.code,message:e.message};}
+      } catch(e){error={code:e.code,message:e.message,stackHasMessage:String(e.stack).includes(e.message)};}
       console.log(JSON.stringify({acquired,error,fence:m.resolveLockPath(cwd),psCalls:globalThis.admissionPsCalls}));`;
     const r = spawnSync("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "fixture", envFile, process.execPath, preload, code, cwd], {
       cwd, env: { ...env, ...extra }, encoding: "utf8"
@@ -850,32 +850,35 @@ test("D: a hook_system_message after a proven receipt refuses at once, not as pe
 });
 
 // #5266: what a refused consumer is told. Only the reason changes: every case
-// refuses, definitively (waiting cannot prove an unlisted version), and the
-// same transcript under a proven version still admits. The shape is the one
-// 2.1.321 wrote live: the fixed hook's success, then the merged context record.
+// refused before in the same class and still does, and the same transcript
+// under a proven version still admits. The first shape is the one 2.1.321
+// wrote live: the fixed hook's success, then the merged context record.
 const lastRecordsAs = (f, version, receipt) => {
   f.appendReceipt(receipt, { record: { version } });
   fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version }) + "\n");
 };
-for (const [label, setup, admitted] of [
-  ["receipt and merged context of an unproven version", (f, r) => lastRecordsAs(f, "0.0.1", r), false],
-  ["the same records of a proven version", (f, r) => lastRecordsAs(f, "2.1.308", r), true],
-  ["a proven receipt, then context of an unproven version", (f, r) => { f.appendReceipt(r, { record: { version: "2.1.308" } }); fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"); }, false],
-  ["an unattributed failed receipt of an unproven version", (f) => f.appendReceipt({ status: 1, stdout: "" }, { record: { version: "0.0.1" } }), false],
-  ["only merged context of an unproven version", (f) => fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"), false]
+const UNPROVEN = /provider version unproven \(claude-code 0\.0\.1 on darwin\/arm64\)/;
+for (const [label, setup, outcome, reason] of [
+  ["receipt and merged context of an unproven version", (f, r) => lastRecordsAs(f, "0.0.1", r), "definitive", UNPROVEN],
+  ["the same records of a proven version", (f, r) => lastRecordsAs(f, "2.1.308", r), "acquired"],
+  ["a proven receipt, then context of an unproven version", (f, r) => { f.appendReceipt(r, { record: { version: "2.1.308" } }); fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"); }, "definitive", UNPROVEN],
+  ["only merged context of an unproven version", (f) => fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"), "definitive", UNPROVEN],
+  // Unchanged: a failure without a token may be an earlier attempt's, so a
+  // consumer may still wait for this attempt's own receipt.
+  ["an unattributed failed receipt of an unproven version", (f) => f.appendReceipt({ status: 1, stdout: "" }, { record: { version: "0.0.1" } }), "transient", /session attempt receipt not recorded yet/]
 ]) {
-  test(`#5266: ${label} ${admitted ? "admits" : "refuses definitively and names the version"}`, options, (t) => {
+  test(`#5266: ${label} ${outcome === "acquired" ? "admits" : `refuses (${outcome})`}`, options, (t) => {
     const f = fixture(t);
     const r = f.runHook({}, undefined, { omit: true });
     assert.equal(r.status, 0, r.stderr);
     setup(f, r);
-    assert.equal(f.consume().acquired, admitted);
-    assert.equal(f.activate("SessionEnd").acquired, admitted);
-    if (admitted) { assert.equal(f.classify(), "acquired"); return; }
-    assert.equal(f.classify(), "definitive");
+    assert.equal(f.consume().acquired, outcome === "acquired");
+    assert.equal(f.activate("SessionEnd").acquired, outcome === "acquired");
+    assert.equal(f.classify(), outcome);
+    if (outcome === "acquired") return;
     const w = f.consume({}, "denied");
-    assert.equal(w.error?.code, "ESTATELOCKREFUSED", JSON.stringify(w));
-    assert.match(w.error.message, /provider version unproven \(claude-code 0\.0\.1 on darwin\/arm64\)/);
+    assert.equal(w.error?.code, outcome === "definitive" ? "ESTATELOCKREFUSED" : "ESTATELOCKTIMEOUT", JSON.stringify(w));
+    assert.match(w.error.message, reason);
   });
 }
 
@@ -889,8 +892,10 @@ test("#5266: a write for another workspace names the session's own root and stil
   assert.equal(f.consume({}, false, other).acquired, false);
   const w = f.consume({}, "denied", other);
   assert.ok(w.error, JSON.stringify(w));
-  assert.match(w.error.message, /admission belongs to the workspace this Claude session started in \(.*\bworkspace\)/);
-  assert.match(w.error.message, /start a Claude session in .*other-workspace/);
+  // Exact paths: the state directory's own name also contains "other-workspace".
+  assert.ok(w.error.message.includes(`started in (${fs.realpathSync(f.workspace)});`), w.error.message);
+  assert.ok(w.error.message.endsWith(`: for ${other}, start a Claude session in ${other}`), w.error.message);
+  assert.equal(w.error.stackHasMessage, true, "a logged stack shows the hint too");
   assert.equal(f.consume().acquired, true, "the session's own workspace still admits");
 });
 

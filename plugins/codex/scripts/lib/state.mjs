@@ -97,18 +97,19 @@ export function resolveLockPath(cwd) {
 }
 
 export function openStateLock(cwd) {
-  return openConsumerLock(cwd, resolveLockPath(cwd));
+  return openConsumerLock(cwd, resolveLockPath(cwd), resolveWorkspaceRoot(cwd));
 }
 
 // For state-lock --all: a state directory found on disk, without a workspace.
 export function openStateLockAt(stateDir) {
-  return openConsumerLock(stateDir, path.join(stateDir, LOCK_NAME));
+  return openConsumerLock(stateDir, path.join(stateDir, LOCK_NAME), null);
 }
 
-function openConsumerLock(cwd, fence) {
+// target: the workspace a refusal hint names (#5266), null when unknown.
+function openConsumerLock(cwd, fence, target) {
   const options = stateLockOptions(cwd);
   if (process.platform !== "darwin") return openFencedLock(fence, options);
-  const { refusalHint = null, ...lockOptions } = { ...options, ...consumerSessionOptions(fence, cwd) };
+  const { refusalHint = null, ...lockOptions } = { ...options, ...consumerSessionOptions(fence, target) };
   const lock = openFencedLock(fence, lockOptions);
   if (!refusalHint) return lock;
   // #5266: the lock reports only "admission certificate missing"; add why this
@@ -116,7 +117,9 @@ function openConsumerLock(cwd, fence) {
   return { ...lock, acquire: (...args) => {
     try { return lock.acquire(...args); }
     catch (error) {
-      if (error instanceof StateLockTimeout) error.message = `${error.message}; ${refusalHint}`;
+      const hint = error instanceof StateLockTimeout ? refusalHint() : null;
+      // V8 formats error.stack on first access, so the stack shows it too.
+      if (hint) error.message = `${error.message}; ${hint}`;
       throw error;
     }
   } };

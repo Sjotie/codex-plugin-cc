@@ -12,7 +12,7 @@ if (process.platform === 'darwin' && !dedicated) {
     if (url !== target) return result;
     let source = String(result.source);
     const seams = [
-      ['...consumerSessionOptions(fence, cwd)', '...genericAdmission(fence, options)'],
+      ['...consumerSessionOptions(fence, target)', '...genericAdmission(fence, options)'],
       ['    argvMatch: matchPluginArgv,', '    ...genericLockOptions({ argvMatch: matchPluginArgv }),'],
       ['export function activateFixedHookAdmission(input, event) {', 'export function activateFixedHookAdmission(input, event) { return null;'],
       ['export function completeFixedSessionEndAdmission(envelope) {', 'export function completeFixedSessionEndAdmission(envelope) { return;']

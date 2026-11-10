@@ -221,22 +221,21 @@ export function readSessionReceipt(locator, expected) {
     }
   }
   if (!latest) notYet("no SessionStart receipt recorded yet");
-  // An unlisted version can never be admitted, whatever its latest record says,
-  // so say that, definitively. Its records are not interpreted: the context
-  // skip above only knows proven shapes, so for an unproven version the merged
-  // context record is 'latest' and would read as an unproven receipt (#5266).
-  requireProvenVersion(latest.version);
   const a = latest.attachment;
   let output = null;
   try { output = JSON.parse(a?.stdout); } catch { output = null; }
   const token = output?.codexStateLockAdmission ?? null;
   const ours = typeof token?.attemptId === "string" && token.attemptId === expected?.attemptId;
-  if (latest.type !== "attachment" || a?.type !== "hook_success" || a.hookEvent !== "SessionStart" || a.exitCode !== 0 || a.command !== SESSION_START_COMMAND) {
-    // Our own command failed or crashed. With this attempt's token the failure
-    // is this attempt's; without one it may belong to an earlier attempt.
-    if (!ours && latest.type === "attachment" && a?.command === SESSION_START_COMMAND) notYet("latest receipt belongs to an earlier attempt");
-    fail("latest provider receipt not proven");
-  }
+  const completed = latest.type === "attachment" && a?.type === "hook_success" && a.hookEvent === "SessionStart" && a.exitCode === 0 && a.command === SESSION_START_COMMAND;
+  // Our own command failed or crashed. With this attempt's token the failure
+  // is this attempt's; without one it may belong to an earlier attempt.
+  if (!completed && !ours && latest.type === "attachment" && a?.command === SESSION_START_COMMAND) notYet("latest receipt belongs to an earlier attempt");
+  // Every other path refuses an unlisted version anyway; name it, before the
+  // record is read as a receipt. The context skip above only knows proven
+  // shapes, so for an unproven version the merged context record is 'latest'
+  // and would read as "receipt not proven" (#5266).
+  requireProvenVersion(latest.version);
+  if (!completed) fail("latest provider receipt not proven");
   if (latest.sessionId !== locator.sessionId || latest.isSidechain !== false ||
     !path.isAbsolute(latest.cwd ?? "") || fs.realpathSync(latest.cwd) !== locator.cwd) fail("latest provider receipt not proven");
   if (!ours) {
@@ -294,14 +293,16 @@ function consumerRefusalHint(fencePath, target) {
     if (envelope.root === requested) return null;
     let started = envelope.root;
     try { started = readSessionLocator(envelope.sessionId)?.cwd ?? started; } catch { /* the envelope's root names it too */ }
+    const route = target ? `for ${target}, start a Claude session in ${target}` : `${requested} belongs to another workspace or CLAUDE_PLUGIN_DATA; start a Claude session in that workspace`;
     return `this Claude session's state admission belongs to the workspace this Claude session started in (${started}); ` +
-      `on macOS a session writes Codex state only for that workspace and CLAUDE_PLUGIN_DATA (#1916). For ${target ?? requested}, start a Claude session in ${target ?? requested}`;
+      `on macOS a session writes Codex state only for that workspace and CLAUDE_PLUGIN_DATA (#1916): ${route}`;
   } catch {
     return null;
   }
 }
 
-// target: the workspace the caller asked for, named in the refusal hint.
+// target: the workspace the caller asked for (null: only a state directory is
+// known), named in the refusal hint.
 export function consumerSessionOptions(fencePath, target = null) {
   let envelope = null;
   let locator = null;
@@ -323,7 +324,8 @@ export function consumerSessionOptions(fencePath, target = null) {
   }
   return {
     // Text only, for the refusal message (#5266): never an option of the lock.
-    refusalHint: envelope ? null : consumerRefusalHint(fencePath),
+    // Built only when a refusal is reported.
+    refusalHint: envelope ? null : () => consumerRefusalHint(fencePath, target),
     consumeAdmission: envelope?.admission ?? null,
     consumeSessionAdmission: envelope ? { sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch, capabilityId: envelope.capabilityId,
       ...(Object.hasOwn(envelope, "attemptId") ? { attemptId: envelope.attemptId } : {}) } : null,
