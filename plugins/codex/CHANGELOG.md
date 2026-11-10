@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (fork, Factory #5266)
+## 1.0.7-sjotie.32 (fork, Factory #5266; 2026-11-10)
 
 - Claude Code 2.1.321 darwin/arm64 is a proven provider version: native
   receipt proof on that exact binary (abc9feee…), all 24 checks green, no
