@@ -97,17 +97,29 @@ export function resolveLockPath(cwd) {
 }
 
 export function openStateLock(cwd) {
-  return openFencedLock(resolveLockPath(cwd), consumerOptions(cwd));
+  return openConsumerLock(cwd, resolveLockPath(cwd));
 }
 
 // For state-lock --all: a state directory found on disk, without a workspace.
 export function openStateLockAt(stateDir) {
-  return openFencedLock(path.join(stateDir, LOCK_NAME), consumerOptions(stateDir, path.join(stateDir, LOCK_NAME)));
+  return openConsumerLock(stateDir, path.join(stateDir, LOCK_NAME));
 }
 
-function consumerOptions(cwd, fence = resolveLockPath(cwd)) {
+function openConsumerLock(cwd, fence) {
   const options = stateLockOptions(cwd);
-  return process.platform === "darwin" ? { ...options, ...consumerSessionOptions(fence) } : options;
+  if (process.platform !== "darwin") return openFencedLock(fence, options);
+  const { refusalHint = null, ...lockOptions } = { ...options, ...consumerSessionOptions(fence, cwd) };
+  const lock = openFencedLock(fence, lockOptions);
+  if (!refusalHint) return lock;
+  // #5266: the lock reports only "admission certificate missing"; add why this
+  // consumer has none. The text changes, the refusal does not.
+  return { ...lock, acquire: (...args) => {
+    try { return lock.acquire(...args); }
+    catch (error) {
+      if (error instanceof StateLockTimeout) error.message = `${error.message}; ${refusalHint}`;
+      throw error;
+    }
+  } };
 }
 
 function hookLock(locator) {

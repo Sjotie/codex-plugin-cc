@@ -88,6 +88,7 @@ function fixture(t, repo = defaultRepo) {
   delete env.CODEX_COMPANION_SESSION_ID;
   // Only the notice tests name a running binary; the outer session's own must not leak in.
   delete env.CLAUDE_CODE_EXECPATH;
+  delete env.AI_AGENT;
   const hookInput = (extra = {}) => ({ cwd: workspace, session_id: "session-current", transcript_path: transcript, source: "startup", ...extra });
   const receipt = (result, extra = {}) => {
     const r = fill(RECORDS.hookSuccess, { sessionId: extra.sessionId ?? "session-current", cwd: workspace, source: extra.source ?? "startup", exitCode: result.status ?? 1, stdout: result.stdout });
@@ -130,7 +131,8 @@ function fixture(t, repo = defaultRepo) {
     return { feed: async (receiptOptions = {}) => { fs.writeFileSync(holdFile, ""); const result = await exited;
       if (!receiptOptions.omit) appendReceipt(result, { source: input.source, sessionId: input.session_id, ...receiptOptions }); return result; } };
   };
-  const consume = (extra = {}, write = false) => {
+  // cwd: the workspace the write asks for (default the session's own).
+  const consume = (extra = {}, write = false, cwd = workspace) => {
     fs.writeFileSync(config, JSON.stringify({ consumer: true }));
     const code = `Object.assign(process.env,${JSON.stringify(extra)}); const m=await import(${JSON.stringify(state)}); const cwd=process.argv[1];
       const lock=m.openStateLock(cwd); let acquired=false,error=null;
@@ -140,8 +142,8 @@ function fixture(t, repo = defaultRepo) {
         if(acquired && ${write === "seed-job"}) {const job={id:'fixture-queued',sessionId:'session-current',status:'queued',phase:'queued',pid:null};m.upsertJob(cwd,job);m.writeJobFile(cwd,job.id,job);}
       } catch(e){error={code:e.code,message:e.message};}
       console.log(JSON.stringify({acquired,error,fence:m.resolveLockPath(cwd),psCalls:globalThis.admissionPsCalls}));`;
-    const r = spawnSync("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "fixture", envFile, process.execPath, preload, code, workspace], {
-      cwd: workspace, env: { ...env, ...extra }, encoding: "utf8"
+    const r = spawnSync("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "fixture", envFile, process.execPath, preload, code, cwd], {
+      cwd, env: { ...env, ...extra }, encoding: "utf8"
     });
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(r.stdout);
@@ -788,11 +790,21 @@ for (const [label, execPath, source, warned, extraEnv = {}] of [
   ["a launcher symlink to an unproven version", (t) => versionLink(t, "0.0.1"), "startup", null],
   ["unproven native version on compact", () => "/opt/claude/versions/0.0.1", "compact", null],
   ["proven native version", () => "/opt/claude/versions/2.1.308", "startup", null],
-  ["non-native executable", () => "/usr/local/bin/node", "startup", null]
+  ["non-native executable", () => "/usr/local/bin/node", "startup", null],
+  // #5266: in stream-json mode Claude Code (2.1.308 and 2.1.321 measured, via
+  // the launcher and direct) gives a hook no CLAUDE_CODE_EXECPATH; AI_AGENT
+  // names the version the running process itself reports.
+  ["an unproven version named only by AI_AGENT", () => null, "startup", /Claude Code 0\.0\.1 on darwin\/arm64 .*--expect-version 0\.0\.1 --prepare-candidate/s, { AI_AGENT: "claude-code_0-0-1_harness" }],
+  ["an unproven AI_AGENT version behind a launcher symlink", (t) => versionLink(t, "2.1.308"), "startup", /Claude Code 0\.0\.1 /, { AI_AGENT: "claude-code_0-0-1_harness" }],
+  ["a proven version named only by AI_AGENT", () => null, "startup", null, { AI_AGENT: "claude-code_2-1-308_harness" }],
+  ["an AI_AGENT of another agent", () => null, "startup", null, { AI_AGENT: "codex_0-0-1" }],
+  ["an unproven AI_AGENT version on compact", () => null, "compact", null, { AI_AGENT: "claude-code_0-0-1_harness" }]
 ]) {
   test(`D: SessionStart with ${label} ${warned ? "warns" : "stays silent"}`, options, (t) => {
     const f = source === "compact" ? prepared(t) : fixture(t);
-    Object.assign(f.env, extraEnv, { CLAUDE_CODE_EXECPATH: execPath(t) });
+    const exec = execPath(t);
+    Object.assign(f.env, extraEnv);
+    if (exec === null) delete f.env.CLAUDE_CODE_EXECPATH; else f.env.CLAUDE_CODE_EXECPATH = exec;
     const r = f.runHook({}, JSON.stringify(f.hookInput({ source })), { omit: true });
     if (source === "compact") {
       // The predecessor's receipt is proven, so the compact succeeds; it keeps
@@ -811,7 +823,7 @@ for (const [label, execPath, source, warned, extraEnv = {}] of [
       assert.match(out.systemMessage, warned);
       assert.equal(context.split("\n")[1], out.systemMessage);
       // The notice is no admission: the receipt of this version still refuses.
-      f.appendReceipt(r, { record: { version: path.basename(f.env.CLAUDE_CODE_EXECPATH) } });
+      f.appendReceipt(r, { record: { version: /Claude Code (\d+\.\d+\.\d+) /.exec(out.systemMessage)[1] } });
       assert.equal(f.consume().acquired, false);
     } else {
       assert.match(context, /^Codex Companion session context refreshed at [^\n]+\.$/);
@@ -835,6 +847,59 @@ test("D: a hook_system_message after a proven receipt refuses at once, not as pe
     type: "hook_system_message", content: "Codex Companion: notice", hookName: "SessionStart:startup",
     toolUseID: randomUUID(), hookEvent: "SessionStart" } }) + "\n");
   assert.equal(f.classify(), "definitive");
+});
+
+// #5266: what a refused consumer is told. Only the reason changes: every case
+// refuses, definitively (waiting cannot prove an unlisted version), and the
+// same transcript under a proven version still admits. The shape is the one
+// 2.1.321 wrote live: the fixed hook's success, then the merged context record.
+const lastRecordsAs = (f, version, receipt) => {
+  f.appendReceipt(receipt, { record: { version } });
+  fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version }) + "\n");
+};
+for (const [label, setup, admitted] of [
+  ["receipt and merged context of an unproven version", (f, r) => lastRecordsAs(f, "0.0.1", r), false],
+  ["the same records of a proven version", (f, r) => lastRecordsAs(f, "2.1.308", r), true],
+  ["a proven receipt, then context of an unproven version", (f, r) => { f.appendReceipt(r, { record: { version: "2.1.308" } }); fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"); }, false],
+  ["an unattributed failed receipt of an unproven version", (f) => f.appendReceipt({ status: 1, stdout: "" }, { record: { version: "0.0.1" } }), false],
+  ["only merged context of an unproven version", (f) => fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"), false]
+]) {
+  test(`#5266: ${label} ${admitted ? "admits" : "refuses definitively and names the version"}`, options, (t) => {
+    const f = fixture(t);
+    const r = f.runHook({}, undefined, { omit: true });
+    assert.equal(r.status, 0, r.stderr);
+    setup(f, r);
+    assert.equal(f.consume().acquired, admitted);
+    assert.equal(f.activate("SessionEnd").acquired, admitted);
+    if (admitted) { assert.equal(f.classify(), "acquired"); return; }
+    assert.equal(f.classify(), "definitive");
+    const w = f.consume({}, "denied");
+    assert.equal(w.error?.code, "ESTATELOCKREFUSED", JSON.stringify(w));
+    assert.match(w.error.message, /provider version unproven \(claude-code 0\.0\.1 on darwin\/arm64\)/);
+  });
+}
+
+// #5266: a write for another workspace refuses as before (#1916 binds a session
+// to the root it started with), but says so instead of only "certificate
+// missing"; the session's own workspace is unaffected.
+test("#5266: a write for another workspace names the session's own root and still refuses", options, (t) => {
+  const f = prepared(t);
+  const other = path.join(f.root, "other-workspace");
+  fs.mkdirSync(other);
+  assert.equal(f.consume({}, false, other).acquired, false);
+  const w = f.consume({}, "denied", other);
+  assert.ok(w.error, JSON.stringify(w));
+  assert.match(w.error.message, /admission belongs to the workspace this Claude session started in \(.*\bworkspace\)/);
+  assert.match(w.error.message, /start a Claude session in .*other-workspace/);
+  assert.equal(f.consume().acquired, true, "the session's own workspace still admits");
+});
+
+test("#5266: a write without the SessionStart envelope says the hook's admission is missing", options, (t) => {
+  const f = prepared(t);
+  fs.appendFileSync(f.envFile, `export ${CERT}=''\n`);
+  const w = f.consume({}, "denied");
+  assert.ok(w.error, JSON.stringify(w));
+  assert.match(w.error.message, /no Codex state admission from this Claude session's SessionStart hook/);
 });
 
 test("D: SessionStart with a malformed provider manifest names the manifest, not the version", options, (t) => {

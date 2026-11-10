@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased (fork, Factory #5266)
+
+- macOS: an unlisted Claude Code version now refuses state writes with
+  `provider version unproven (claude-code <version> on <platform>/<arch>)`,
+  definitively, instead of `latest provider receipt not proven`. With an
+  unproven version the merged SessionStart context record was read as the
+  latest receipt, so the message hid the cause and its route (seen live on
+  2.1.321). Only the reason changes: every such case refused before.
+- macOS: the SessionStart notice for an unproven running version also reads
+  the version from `AI_AGENT`. In stream-json mode (how Factory runs Claude) a
+  hook gets no `CLAUDE_CODE_EXECPATH`, so the notice never appeared there.
+- macOS: a state write for another workspace than the one the session started
+  in (for example `task --cwd <other worktree>`), or from a shell without the
+  SessionStart export, adds why to the refusal. It still refuses (#1916).
+
 ## 1.0.7-sjotie.31 (fork, Factory #5241; 2026-11-09)
 
 - The hook that rewrites the session env file follows a symlink to its real

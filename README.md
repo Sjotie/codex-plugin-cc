@@ -39,10 +39,14 @@ native coverage; this candidate is not permission to publish or install it.
 On macOS this candidate accepts only the Claude Code versions listed with
 their proof in `plugins/codex/scripts/lib/provider-receipts.json` (now
 **2.1.301 and 2.1.308 on darwin/arm64**): another version, platform or process
-architecture refuses with `provider version unproven`. When Claude Code runs
-from a native install (`.../versions/<version>`) whose version is not listed,
-SessionStart says so at once, to the user (`systemMessage`) and to the agent
-(one context line), with the route below; this warning grants nothing. A new
+architecture refuses with `provider version unproven`, definitively, also
+when the latest record is a context or failure record of that version. When
+the running Claude Code is not listed, SessionStart says so at once, to the
+user (`systemMessage`) and to the agent (one context line), with the route
+below; this warning grants nothing. The version comes from a native install's
+`.../versions/<version>` path, otherwise from `AI_AGENT`
+(`claude-code_2-1-321_…`), which Claude sets from its own version; in
+stream-json mode, as Factory runs Claude, a hook gets only the latter. A new
 version gets its own entry only after a green native run on the Mac of
 `uv run python tests/fenced-lock/macos-d-pty-probe.py --expect-version <version> --prepare-candidate`,
 which adds the candidate entry with the measured binary hash for the run and,
@@ -397,6 +401,9 @@ refuses admission. Let the old writers end, then start or resume a Claude
 session in the intended workspace so its hook can prepare that root again.
 The session's original root is fixed: changing workspace or plugin-data root
 requires a new Claude session, rather than rebinding the existing session ID.
+A write for another workspace (such as `task --cwd <other worktree>`) says so
+in its refusal, naming the workspace the session started in; a Bash call
+without the SessionStart export says that instead.
 The per-session locator in the Claude config directory is runtime evidence;
 missing, corrupt or replaced evidence also refuses writes. Do not remove it
 to bypass a refusal.

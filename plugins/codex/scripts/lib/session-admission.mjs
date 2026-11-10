@@ -59,10 +59,15 @@ function requireProvenVersion(version) {
 // symlink is not followed, because the launcher's target can be a newer binary
 // than the one running, and a notice here makes the receipt check refuse at
 // once. Any other executable gives no version and so no notice.
+// In stream-json mode (how Factory runs Claude) a hook gets no
+// CLAUDE_CODE_EXECPATH (2.1.308 and 2.1.321, measured in #5266), but AI_AGENT
+// (claude-code_2-1-321_harness), set from the version the running process
+// reports itself; that is the fallback.
 // Returns null when the running version is proven or unknown, otherwise a text
 // naming what refuses and the route to a fix.
-export function unprovenRunningVersionNotice(execPath = process.env.CLAUDE_CODE_EXECPATH) {
-  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(execPath ?? ""))?.[0];
+export function unprovenRunningVersionNotice(execPath = process.env.CLAUDE_CODE_EXECPATH, agent = process.env.AI_AGENT) {
+  const fromAgent = /^claude-code_(\d+)-(\d+)-(\d+)(?:_|$)/.exec(agent ?? "");
+  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(execPath ?? ""))?.[0] ?? (fromAgent ? fromAgent.slice(1, 4).join(".") : undefined);
   if (!version) return null;
   const refuses = "so every Codex state write here (rescue, review, setup, job updates) refuses with 'admission refused'. Retrying does not help.";
   let elsewhere;
@@ -216,6 +221,11 @@ export function readSessionReceipt(locator, expected) {
     }
   }
   if (!latest) notYet("no SessionStart receipt recorded yet");
+  // An unlisted version can never be admitted, whatever its latest record says,
+  // so say that, definitively. Its records are not interpreted: the context
+  // skip above only knows proven shapes, so for an unproven version the merged
+  // context record is 'latest' and would read as an unproven receipt (#5266).
+  requireProvenVersion(latest.version);
   const a = latest.attachment;
   let output = null;
   try { output = JSON.parse(a?.stdout); } catch { output = null; }
@@ -227,7 +237,6 @@ export function readSessionReceipt(locator, expected) {
     if (!ours && latest.type === "attachment" && a?.command === SESSION_START_COMMAND) notYet("latest receipt belongs to an earlier attempt");
     fail("latest provider receipt not proven");
   }
-  requireProvenVersion(latest.version);
   if (latest.sessionId !== locator.sessionId || latest.isSidechain !== false ||
     !path.isAbsolute(latest.cwd ?? "") || fs.realpathSync(latest.cwd) !== locator.cwd) fail("latest provider receipt not proven");
   if (!ours) {
@@ -269,7 +278,31 @@ export function envelopeFor(locator, capability) {
 
 const ENVELOPE_KEYS = ["version", "sessionId", "bindingEpoch", "capabilityId", "root", "transcriptPath", "configRoot", "admission"];
 
-export function consumerSessionOptions(fencePath) {
+// Why this consumer has no admission, for the refusal message only (#5266):
+// the lock itself then reports just "admission certificate missing". Names
+// the two causes seen in use; any other (a malformed or replaced envelope or
+// locator) keeps the lock's own reason. Reads, never repairs.
+function consumerRefusalHint(fencePath, target) {
+  try {
+    const raw = process.env[STATE_LOCK_ADMISSION_ENV];
+    if (!raw) return `no Codex state admission from this Claude session's SessionStart hook (${STATE_LOCK_ADMISSION_ENV} ${raw === "" ? "is empty: the hook did not complete" : "is not set"}); ` +
+      "on macOS only a Bash call in a Claude session whose Codex SessionStart hook succeeded can write Codex state";
+    const envelope = JSON.parse(raw);
+    if (typeof envelope?.root !== "string") return null;
+    let requested = path.dirname(fencePath);
+    try { requested = fs.realpathSync(requested); } catch { /* a root never prepared has no directory yet */ }
+    if (envelope.root === requested) return null;
+    let started = envelope.root;
+    try { started = readSessionLocator(envelope.sessionId)?.cwd ?? started; } catch { /* the envelope's root names it too */ }
+    return `this Claude session's state admission belongs to the workspace this Claude session started in (${started}); ` +
+      `on macOS a session writes Codex state only for that workspace and CLAUDE_PLUGIN_DATA (#1916). For ${target ?? requested}, start a Claude session in ${target ?? requested}`;
+  } catch {
+    return null;
+  }
+}
+
+// target: the workspace the caller asked for, named in the refusal hint.
+export function consumerSessionOptions(fencePath, target = null) {
   let envelope = null;
   let locator = null;
   try {
@@ -289,6 +322,8 @@ export function consumerSessionOptions(fencePath) {
     locator = null;
   }
   return {
+    // Text only, for the refusal message (#5266): never an option of the lock.
+    refusalHint: envelope ? null : consumerRefusalHint(fencePath),
     consumeAdmission: envelope?.admission ?? null,
     consumeSessionAdmission: envelope ? { sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch, capabilityId: envelope.capabilityId,
       ...(Object.hasOwn(envelope, "attemptId") ? { attemptId: envelope.attemptId } : {}) } : null,
