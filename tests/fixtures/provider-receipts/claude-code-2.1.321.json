@@ -1,0 +1,63 @@
+{
+  "note": "Sanitized shapes of the Claude Code 2.1.321 SessionStart transcript records that the receipt adapter session-start-hook-success-v1 reads (#1916), measured on darwin/arm64 by tests/fenced-lock/macos-d-pty-probe.py --prepare-candidate. Placeholders in <angle brackets> are filled by the test harness; no captured ids, paths or tokens.",
+  "hookSuccess": {
+    "type": "attachment",
+    "version": "2.1.321",
+    "sessionId": "<sessionId>",
+    "cwd": "<cwd>",
+    "isSidechain": false,
+    "attachment": {
+      "type": "hook_success",
+      "hookEvent": "SessionStart",
+      "hookName": "SessionStart:<source>",
+      "exitCode": "<exitCode>",
+      "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs\" SessionStart",
+      "stdout": "<stdout>"
+    }
+  },
+  "additionalContext": {
+    "type": "attachment",
+    "version": "2.1.321",
+    "sessionId": "<sessionId>",
+    "cwd": "<cwd>",
+    "isSidechain": false,
+    "attachment": {
+      "type": "hook_additional_context",
+      "hookName": "SessionStart",
+      "hookEvent": "SessionStart",
+      "content": [
+        "<content>"
+      ],
+      "toolUseID": "<toolUseID>"
+    }
+  },
+  "mergedContext": {
+    "parentUuid": "<parentUuid>",
+    "isSidechain": false,
+    "attachment": {
+      "type": "hook_additional_context",
+      "content": [
+        "Codex Companion session context refreshed.",
+        "Another hook's context."
+      ],
+      "hookName": "SessionStart",
+      "toolUseID": "SessionStart",
+      "hookEvent": "SessionStart"
+    },
+    "type": "attachment",
+    "uuid": "<uuid>",
+    "timestamp": "<timestamp>",
+    "rendered": [
+      {
+        "content": "<content>"
+      }
+    ],
+    "renderedRole": "system",
+    "userType": "external",
+    "entrypoint": "sdk-ts",
+    "cwd": "<cwd>",
+    "sessionId": "<sessionId>",
+    "version": "2.1.321",
+    "gitBranch": "main"
+  }
+}

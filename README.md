@@ -38,7 +38,7 @@ only this hook route performs process proof. See the release checklist for
 native coverage; this candidate is not permission to publish or install it.
 On macOS this candidate accepts only the Claude Code versions listed with
 their proof in `plugins/codex/scripts/lib/provider-receipts.json` (now
-**2.1.301 and 2.1.308 on darwin/arm64**): another version, platform or process
+**2.1.301, 2.1.308 and 2.1.321 on darwin/arm64**): another version, platform or process
 architecture refuses with `provider version unproven`, definitively, also
 when the latest record is a context or failure record of that version. When
 the running Claude Code is not listed, SessionStart says so at once, to the

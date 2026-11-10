@@ -27,6 +27,19 @@
       "evidenceSummarySha256": "1c1baaa3b7a028cf8c16c6e0e29ee2b27f879e1886fda4c9111c9b5a559b8f46",
       "fixtures": "tests/fixtures/provider-receipts/claude-code-2.1.308.json",
       "fixturesSha256": "98312c372913cd1a1f8f2dd8c0b4651afa533c2f2934a2f93c8af52c7017ad3a"
+    },
+    {
+      "provider": "claude-code",
+      "version": "2.1.321",
+      "platform": "darwin",
+      "arch": "arm64",
+      "receiptAdapter": "session-start-hook-success-v1",
+      "binarySha256": "abc9feeeca8091d51b623291e044cf0528c2f6b74e0c1d6ef671d52c73f7cd3c",
+      "evidenceCommit": "82283d3b588b6cd8fd1d8a2c6a8ee05cd7296604",
+      "evidenceSummary": "docs/releases/claude-code-2.1.321-receipt-evidence.json",
+      "evidenceSummarySha256": "166da232d12b98734564c6951983212d2145ff1225dd36fe3c93634682401679",
+      "fixtures": "tests/fixtures/provider-receipts/claude-code-2.1.321.json",
+      "fixturesSha256": "3dcfea88a0648b2a840dabacdce7c12b199494e703621fad08e04e1bbfaf1fec"
     }
   ]
 }

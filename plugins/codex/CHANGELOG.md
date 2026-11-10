@@ -2,6 +2,12 @@
 
 ## Unreleased (fork, Factory #5266)
 
+- Claude Code 2.1.321 darwin/arm64 is a proven provider version: native
+  receipt proof on that exact binary (abc9feee…), all 24 checks green, no
+  proof in model input (`docs/releases/claude-code-2.1.321-receipt-evidence.json`,
+  evidenceCommit 82283d3, the product bytes of sjotie.31). Since the Mac moved
+  to 2.1.321 on 2026-11-09 every macOS state write (rescue, review, setup)
+  refused.
 - macOS: an unlisted Claude Code version now refuses state writes with
   `provider version unproven (claude-code <version> on <platform>/<arch>)`,
   definitively, instead of `latest provider receipt not proven`. With an
