@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { buildEnv, installFakeCodex, makePeersCodexHome } from "./fake-codex-fixture.mjs";
+import { buildEnv, installFakeCodex, FAKE_PEERS_KNOWN_ENV } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { BROKER_ENDPOINT_ENV, CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import {
@@ -342,7 +342,7 @@ test("app-server spawn disables the peers MCP via a config override and PEERS_DI
 
   const result = run("node", [SCRIPT, "task", "-C", repo, "inspect the target workspace"], {
     cwd: invocationDir,
-    env: buildEnv(binDir, { CODEX_HOME: makePeersCodexHome(makeTempDir()) })
+    env: buildEnv(binDir, FAKE_PEERS_KNOWN_ENV)
   });
 
   assert.equal(result.status, 0, result.stderr);

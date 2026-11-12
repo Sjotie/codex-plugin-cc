@@ -370,6 +370,10 @@ while (argCursor < rawArgs.length) {
   break;
 }
 const args = rawArgs.slice(argCursor);
+if (args[0] === "mcp" && args[1] === "get") {
+  // #5520: exit 0 only when the (fake) config defines the server, like the real Codex.
+  process.exit(args[2] === "claude-peers-convex" && process.env.FAKE_CODEX_PEERS === "1" ? 0 : 1);
+}
 if (args[0] === "--version") {
   console.log("codex-cli test");
   process.exit(0);
@@ -886,15 +890,5 @@ export function buildEnv(binDir, extra = {}) {
   };
 }
 
-/**
- * #5520: a CODEX_HOME whose config.toml defines the peers server (as stdio, the Factory default), so the plugin
- * passes the `enabled=false` opt-out. Returns the directory.
- */
-export function makePeersCodexHome(dir) {
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, "config.toml"),
-    '[mcp_servers.claude-peers-convex]\ncommand = "true"\nargs = []\n'
-  );
-  return dir;
-}
+/** #5520: env that makes the fake `codex mcp get claude-peers-convex` succeed, so the plugin passes the opt-out. */
+export const FAKE_PEERS_KNOWN_ENV = { FAKE_CODEX_PEERS: "1" };
