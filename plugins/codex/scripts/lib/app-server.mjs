@@ -46,8 +46,9 @@ const PEERS_SERVER_NAME = "claude-peers-convex";
  * layer defines that server with a command or url. So the opt-out is only passed when there is something to switch
  * off. Asking Codex (`codex mcp get`, exit 0 only for a known, valid server) follows layers, project trust,
  * profiles and TOML escapes the way the real start does; no text matching. The output is never read, so no config
- * values reach us. Failure, timeout or an old Codex without `mcp get` counts as unknown: the opt-out is left out (a
- * server Codex does not know cannot start), and PEERS_DISABLE=1 stays as the second guard.
+ * values reach us. Exit 0 means Codex knows a valid peers server. Any other result (an error, a timeout, an old
+ * Codex without `mcp get`) means unknown, not "absent": the opt-out is then left out, so a server that exists but
+ * could not be probed is not switched off by it, and PEERS_DISABLE=1 stays as the second guard.
  * @param {string} cwd
  * @param {NodeJS.ProcessEnv} env
  * @returns {boolean}
