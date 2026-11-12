@@ -33,10 +33,16 @@ export const BROKER_BUSY_RPC_CODE = -32001;
 // register even if the override is ever bypassed.
 export const PEERS_MCP_DISABLE_OVERRIDE = "mcp_servers.claude-peers-convex.enabled=false";
 
+// #5520: codex 0.166 rejects an `mcp_servers.<name>` entry that has only `enabled=false` ("invalid transport")
+// when no config layer defines that name with a command or url, e.g. a host without a peers entry in
+// ~/.codex/config.toml. A throwaway url (discard port, never contacted because the entry stays disabled) gives the
+// entry a transport everywhere. Same pattern as the Factory host (codex-mcp-mise.ts).
+export const PEERS_MCP_TRANSPORT_OVERRIDE = 'mcp_servers.claude-peers-convex.url="http://127.0.0.1:9"';
+
 // `-c/--config` is a GLOBAL codex flag and must precede the subcommand
 // (`codex [OPTIONS] <COMMAND>`), so it goes before "app-server". #1796: ChatGPT
 // apps are off for every child too (app-policy.mjs).
-export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", APPS_DISABLE_OVERRIDE, "app-server"];
+export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", PEERS_MCP_TRANSPORT_OVERRIDE, "-c", APPS_DISABLE_OVERRIDE, "app-server"];
 
 /**
  * Build the environment for a spawned app-server child, layering the peers
