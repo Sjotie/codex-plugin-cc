@@ -877,10 +877,24 @@ rl.on("line", (line) => {
   }
 }
 
-export function buildEnv(binDir) {
+export function buildEnv(binDir, extra = {}) {
   const sep = process.platform === "win32" ? ";" : ":";
   return {
     ...process.env,
-    PATH: `${binDir}${sep}${process.env.PATH}`
+    PATH: `${binDir}${sep}${process.env.PATH}`,
+    ...extra
   };
+}
+
+/**
+ * #5520: a CODEX_HOME whose config.toml defines the peers server (as stdio, the Factory default), so the plugin
+ * passes the `enabled=false` opt-out. Returns the directory.
+ */
+export function makePeersCodexHome(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "config.toml"),
+    '[mcp_servers.claude-peers-convex]\ncommand = "true"\nargs = []\n'
+  );
+  return dir;
 }
