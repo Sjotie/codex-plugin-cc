@@ -10,6 +10,8 @@
  */
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
@@ -33,16 +35,55 @@ export const BROKER_BUSY_RPC_CODE = -32001;
 // register even if the override is ever bypassed.
 export const PEERS_MCP_DISABLE_OVERRIDE = "mcp_servers.claude-peers-convex.enabled=false";
 
-// #5520: codex 0.166 rejects an `mcp_servers.<name>` entry that has only `enabled=false` ("invalid transport")
-// when no config layer defines that name with a command or url, e.g. a host without a peers entry in
-// ~/.codex/config.toml. A throwaway url (discard port, never contacted because the entry stays disabled) gives the
-// entry a transport everywhere. Same pattern as the Factory host (codex-mcp-mise.ts).
-export const PEERS_MCP_TRANSPORT_OVERRIDE = 'mcp_servers.claude-peers-convex.url="http://127.0.0.1:9"';
-
 // `-c/--config` is a GLOBAL codex flag and must precede the subcommand
 // (`codex [OPTIONS] <COMMAND>`), so it goes before "app-server". #1796: ChatGPT
 // apps are off for every child too (app-policy.mjs).
-export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", PEERS_MCP_TRANSPORT_OVERRIDE, "-c", APPS_DISABLE_OVERRIDE, "app-server"];
+export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", APPS_DISABLE_OVERRIDE, "app-server"];
+
+const PEERS_SERVER_NAME = "claude-peers-convex";
+
+/**
+ * #5520: does the Codex config that app-server will load mention the peers server? Codex 0.166 rejects
+ * `mcp_servers.claude-peers-convex.enabled=false` ("invalid transport") when no layer defines that server with a
+ * command or url, and a url added by us would conflict with an existing stdio command ("url is not supported for
+ * stdio"). So the opt-out is only passed when there is something to switch off. Reads the user config
+ * (CODEX_HOME or ~/.codex), /etc/codex and the project layers (.codex in cwd and every parent). The PEERS_DISABLE=1
+ * env stays as the second guard for a layer this does not see. Any mention of the name in those files counts as
+ * present (covers tables, dotted keys, inline tables and profiles). A missing file means absent; a file that cannot
+ * be read counts as absent too: an entry that is not there cannot start the peers server.
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+export function codexConfigDefinesPeers(cwd, env) {
+  const home = env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const files = [path.join(home, "config.toml"), "/etc/codex/config.toml"];
+  // Codex loads a project layer from every directory between the project root and cwd; walk up from cwd.
+  for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
+    files.push(path.join(dir, ".codex", "config.toml"));
+    if (path.dirname(dir) === dir) break;
+  }
+  for (const file of files) {
+    try {
+      if (fs.readFileSync(file, "utf8").includes(PEERS_SERVER_NAME)) return true;
+    } catch {
+      // Missing or unreadable: no entry to disable from this layer.
+    }
+  }
+  return false;
+}
+
+/**
+ * The `codex` argv for an app-server child. The peers opt-out is only included when the config defines the peers
+ * server (see codexConfigDefinesPeers).
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string[]}
+ */
+export function buildAppServerSpawnArgs(cwd, env) {
+  if (codexConfigDefinesPeers(cwd, env)) return APP_SERVER_SPAWN_ARGS;
+  return ["-c", APPS_DISABLE_OVERRIDE, "app-server"];
+}
 
 /**
  * Build the environment for a spawned app-server child, layering the peers
@@ -302,9 +343,10 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    this.proc = spawn("codex", APP_SERVER_SPAWN_ARGS, {
+    const childEnv = buildAppServerChildEnv(this.options.env ?? process.env);
+    this.proc = spawn("codex", buildAppServerSpawnArgs(this.cwd, childEnv), {
       cwd: this.cwd,
-      env: buildAppServerChildEnv(this.options.env ?? process.env),
+      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
       windowsHide: true
