@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7-sjotie.33 (fork, Factory #5520; 2026-11-12)
+
+- Fix: the app-server child no longer dies with `invalid transport in
+  mcp_servers.claude-peers-convex` on a host whose Codex config does not define
+  the peers server (surface-omarchy has no `~/.codex/config.toml`). The
+  `enabled=false` peers opt-out is now passed only when Codex itself knows that
+  server (`codex mcp get`, exit code only, output discarded; an error, timeout or
+  old Codex means unknown and leaves the opt-out out; `PEERS_DISABLE=1` stays).
+  Reviewed GO (GPT-6.1 Sol) on 894552f; the later commits are tests and a comment.
+  Known follow-ups (Factory #5520 todos): more test cases, and the synchronous
+  probe can block a cold start for up to 15 s.
+
 ## 1.0.7-sjotie.32 (fork, Factory #5266; 2026-11-10)
 
 - Claude Code 2.1.321 darwin/arm64 is a proven provider version: native
