@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
-import { buildEnv, installFakeCodex, makePeersCodexHome } from "./fake-codex-fixture.mjs";
+import { buildEnv, installFakeCodex, FAKE_PEERS_KNOWN_ENV } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { AppServerClientBase, CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
 import { ensureBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
@@ -79,7 +79,7 @@ test("app-server children start with ChatGPT apps disabled before the subcommand
 
   const result = run("node", [SCRIPT, "task", "-C", repo, "inspect the target workspace"], {
     cwd: makeTempDir(),
-    env: buildEnv(binDir, { CODEX_HOME: makePeersCodexHome(makeTempDir()) })
+    env: buildEnv(binDir, FAKE_PEERS_KNOWN_ENV)
   });
 
   assert.equal(result.status, 0, result.stderr);

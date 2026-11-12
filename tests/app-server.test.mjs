@@ -10,8 +10,7 @@ import {
   APP_SERVER_SPAWN_ARGS,
   PEERS_MCP_DISABLE_OVERRIDE,
   buildAppServerChildEnv,
-  buildAppServerSpawnArgs,
-  codexConfigDefinesPeers
+  buildAppServerSpawnArgs
 } from "../plugins/codex/scripts/lib/app-server.mjs";
 
 /** Minimal client that records the JSON-RPC messages it would send. */
@@ -68,10 +67,14 @@ test("app-server child env sets PEERS_DISABLE=1 while preserving the base env", 
   assert.equal(baseEnv.PEERS_DISABLE, undefined);
 });
 
-// ---- #5520: the peers opt-out only goes along when the config defines the peers server ----
+// ---- #5520: the peers opt-out only goes along when Codex itself knows the peers server ----
+// These run the real `codex` (skipped when it is missing): Codex decides what is defined, so layers, trust, TOML
+// escapes and comments are judged by Codex, not by us.
 
 const PEERS_STDIO = '[mcp_servers.claude-peers-convex]\ncommand = "true"\nargs = []\n';
 const PEERS_URL = '[mcp_servers.claude-peers-convex]\nurl = "http://127.0.0.1:9/mcp"\n';
+const PEERS_QUOTED = '[mcp_servers."claude-peers-convex"]\ncommand = "true"\nargs = []\n';
+const PEERS_COMMENT_ONLY = "# claude-peers-convex is not configured here\n";
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -83,40 +86,25 @@ function codexHomeWith(toml) {
   return home;
 }
 
+function envFor(codexHome) {
+  return buildAppServerChildEnv(Object.assign({}, process.env, { CODEX_HOME: codexHome }));
+}
+
 const hasOptOut = (args) => args.includes(PEERS_MCP_DISABLE_OVERRIDE);
 
-test("#5520: no peers entry (empty CODEX_HOME, no file) leaves the opt-out out; apps opt-out and subcommand stay", () => {
-  const cwd = tmp("codex-5520-cwd-");
-  for (const home of [codexHomeWith(null), path.join(tmp("codex-5520-missing-"), "nope")]) {
-    const args = buildAppServerSpawnArgs(cwd, { CODEX_HOME: home });
-    assert.equal(hasOptOut(args), false);
-    assert.deepEqual(args, ["-c", "features.apps=false", "app-server"]);
-  }
-});
+const codexAvailable = spawnSync("codex", ["--version"]).status === 0;
+const real = { skip: !codexAvailable };
 
-test("#5520: peers as stdio command, as url, as project layer or in an unreadable config", () => {
-  const cwd = tmp("codex-5520-cwd-");
-  assert.deepEqual(buildAppServerSpawnArgs(cwd, { CODEX_HOME: codexHomeWith(PEERS_STDIO) }), APP_SERVER_SPAWN_ARGS);
-  assert.deepEqual(buildAppServerSpawnArgs(cwd, { CODEX_HOME: codexHomeWith(PEERS_URL) }), APP_SERVER_SPAWN_ARGS);
-  // Project layer.
-  fs.mkdirSync(path.join(cwd, ".codex"));
-  fs.writeFileSync(path.join(cwd, ".codex", "config.toml"), PEERS_STDIO);
-  assert.equal(codexConfigDefinesPeers(cwd, { CODEX_HOME: codexHomeWith(null) }), true);
-  // config.toml is a directory: unreadable counts as absent (safe: nothing to start).
-  const odd = tmp("codex-5520-odd-");
-  fs.mkdirSync(path.join(odd, "config.toml"));
-  assert.equal(hasOptOut(buildAppServerSpawnArgs(tmp("codex-5520-cwd-"), { CODEX_HOME: odd })), false);
-});
-
-function codexAvailable() {
-  return spawnSync("codex", ["--version"]).status === 0;
+/** The effective state of the peers server under the plugin's own overrides: `codex <overrides> mcp get`. */
+function effectivePeers(args, cwd, env) {
+  const overrides = args.slice(0, args.indexOf("app-server"));
+  const r = spawnSync("codex", [...overrides, "mcp", "get", "claude-peers-convex", "--json"], { cwd, env, encoding: "utf8", timeout: 15000 });
+  return r.status === 0 ? JSON.parse(r.stdout) : null;
 }
 
 /** Start a real `codex app-server` with the plugin's args and wait for its answer to `initialize`. */
-async function realInitialize(codexHome) {
-  const cwd = tmp("codex-5520-cwd-");
-  const env = buildAppServerChildEnv({ ...globalThis.process.env, CODEX_HOME: codexHome });
-  const child = spawn("codex", buildAppServerSpawnArgs(cwd, env), { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+async function realInitialize(args, cwd, env) {
+  const child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   child.stderr.on("data", (d) => { stderr += d; });
@@ -133,10 +121,46 @@ async function realInitialize(codexHome) {
   return { outcome, stderr };
 }
 
-for (const [label, toml] of [["an empty CODEX_HOME", null], ["peers as stdio command", PEERS_STDIO], ["peers as url", PEERS_URL]]) {
-  test(`#5520: a real codex app-server answers initialize with ${label}`, { skip: !codexAvailable() }, async () => {
-    const { outcome, stderr } = await realInitialize(codexHomeWith(toml));
+const CASES = [
+  { label: "an empty CODEX_HOME", toml: null, known: false },
+  { label: "a config that only mentions the name in a comment", toml: PEERS_COMMENT_ONLY, known: false },
+  { label: "peers as stdio command", toml: PEERS_STDIO, known: true },
+  { label: "peers as url", toml: PEERS_URL, known: true },
+  { label: 'peers under a quoted TOML key ("claude-peers-convex")', toml: PEERS_QUOTED, known: true }
+];
+
+for (const { label, toml, known } of CASES) {
+  test(`#5520: ${label}: opt-out ${known ? "passed and effective (enabled=false)" : "left out"}, app-server answers initialize`, real, async () => {
+    const cwd = tmp("codex-5520-cwd-");
+    const env = envFor(codexHomeWith(toml));
+    const args = buildAppServerSpawnArgs(cwd, env);
+    assert.equal(hasOptOut(args), known);
+    assert.deepEqual(args.slice(-1), ["app-server"]);
+    assert.ok(args.includes("features.apps=false"));
+    if (known) {
+      // Not just "it started": Codex reports the server as disabled under these overrides.
+      assert.equal(effectivePeers(args, cwd, env)?.enabled, false);
+      assert.equal(effectivePeers(["app-server"], cwd, env)?.enabled, true);
+    }
+    const { outcome, stderr } = await realInitialize(args, cwd, env);
     assert.equal(outcome, "initialized", stderr);
     assert.doesNotMatch(stderr, /invalid transport|not supported for stdio/);
   });
 }
+
+test("#5520: peers defined in a project layer (.codex/config.toml in cwd) count", real, () => {
+  const cwd = tmp("codex-5520-cwd-");
+  fs.mkdirSync(path.join(cwd, ".codex"));
+  fs.writeFileSync(path.join(cwd, ".codex", "config.toml"), PEERS_STDIO);
+  const env = envFor(codexHomeWith(null));
+  // Codex only loads a project layer for a trusted project; either answer is fine as long as args and Codex agree.
+  const args = buildAppServerSpawnArgs(cwd, env);
+  assert.equal(hasOptOut(args), effectivePeers(["app-server"], cwd, env) !== null);
+});
+
+test("#5520: a missing codex binary or failing `mcp get` leaves the opt-out out", () => {
+  const cwd = tmp("codex-5520-cwd-");
+  const args = buildAppServerSpawnArgs(cwd, { PATH: tmp("codex-5520-nopath-") });
+  assert.deepEqual(args, ["-c", "features.apps=false", "app-server"]);
+});
+
