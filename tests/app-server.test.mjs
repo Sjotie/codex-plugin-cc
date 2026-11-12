@@ -99,7 +99,14 @@ const real = { skip: !codexAvailable };
 function effectivePeers(args, cwd, env) {
   const overrides = args.slice(0, args.indexOf("app-server"));
   const r = spawnSync("codex", [...overrides, "mcp", "get", "claude-peers-convex", "--json"], { cwd, env, encoding: "utf8", timeout: 15000 });
-  return r.status === 0 ? JSON.parse(r.stdout) : null;
+  if (r.status !== 0) return null;
+  // Only the `enabled` flag leaves this function: the output can carry env and headers of a server (#4709), so it is
+  // never returned, logged or put in an assertion message, even when it does not parse.
+  try {
+    return { enabled: JSON.parse(r.stdout).enabled };
+  } catch {
+    return { enabled: undefined };
+  }
 }
 
 /** Start a real `codex app-server` with the plugin's args and wait for its answer to `initialize`. */
@@ -143,7 +150,8 @@ for (const { label, toml, known } of CASES) {
       assert.equal(effectivePeers(["app-server"], cwd, env)?.enabled, true);
     }
     const { outcome, stderr } = await realInitialize(args, cwd, env);
-    assert.equal(outcome, "initialized", stderr);
+    // stderr stays out of the message: it can echo config (#4709).
+    assert.equal(outcome, "initialized", `app-server did not initialize (${outcome}); stderr length ${stderr.length}`);
     assert.doesNotMatch(stderr, /invalid transport|not supported for stdio/);
   });
 }
