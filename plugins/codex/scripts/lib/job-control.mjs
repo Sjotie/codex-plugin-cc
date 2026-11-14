@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { isFailedJobStatus, isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
@@ -9,6 +10,7 @@ import {
   readJobFile,
   reconcileJobWorkerState,
   resolveJobFile,
+  resolveStateRoots,
   updateJobRecord,
   upsertJob
 } from "./state.mjs";
@@ -495,4 +497,39 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
   }
 
   throw new Error("No active Codex jobs to cancel.");
+}
+
+// Workspace roots whose state holds a job file for this id. Job state is kept per workspace root,
+// so a lookup from another working directory finds nothing even while the job runs. Read-only:
+// it never takes a lock and ignores anything it cannot read.
+export function findJobWorkspaceRoots(jobId) {
+  validateExactJobId(jobId);
+  const found = new Set();
+  for (const root of resolveStateRoots()) {
+    let entries;
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const job = JSON.parse(fs.readFileSync(path.join(root, entry.name, "jobs", `${jobId}.json`), "utf8"));
+        if (typeof job?.workspaceRoot === "string" && job.workspaceRoot) found.add(job.workspaceRoot);
+      } catch {
+        // No such job file in this state directory, or not readable: not a candidate.
+      }
+    }
+  }
+  return [...found];
+}
+
+// Why a resume is refused while a task of this Claude session still runs, and how to go on.
+export function describeRunningTaskBlock(taskId, workspaceRoot) {
+  return (
+    `Task ${taskId} is still running. A running task of this Claude session blocks resuming; ` +
+    `wait for it with "wait ${taskId} --timeout 480" (run from ${workspaceRoot}) or stop it with ` +
+    `"cancel ${taskId}", then resume. /codex:status shows its progress.`
+  );
 }

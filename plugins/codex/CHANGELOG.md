@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased (Factory #3280)
+
+- Messages only, no behaviour change. `wait <id>` that finds no job file now says
+  which workspace it looked in (job state is kept per workspace root) and, when the
+  job exists in another workspace root, which one to run it from. A resume refused
+  because a task of the same Claude session still runs now says that this blocks
+  resuming and names `wait <id> --timeout 480` and `cancel <id>` as the ways on.
+
 ## 1.0.7-sjotie.33 (fork, Factory #5520; 2026-11-12)
 
 - Fix: the app-server child no longer dies with `invalid transport in

@@ -40,7 +40,9 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  describeRunningTaskBlock,
   enrichJob,
+  findJobWorkspaceRoots,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -410,6 +412,17 @@ function resolveWaitTimeoutMs(options) {
   return parseNonNegativeNumber(options["timeout-ms"], "--timeout-ms");
 }
 
+// Job state is per workspace root: say where the lookup ran and where the job is, when that is
+// another root, so an empty lookup is not read as a job that does not exist.
+function describeJobLookupScope(jobId, searchedRoot) {
+  let lines = `Looked in workspace ${searchedRoot ?? "(unknown)"}; job state is kept per workspace root.\n`;
+  const elsewhere = findJobWorkspaceRoots(jobId).filter((root) => root !== searchedRoot);
+  if (elsewhere.length > 0) {
+    lines += `This job exists in workspace ${elsewhere.join(", ")}: run the command from there (cd into it, or pass --cwd).\n`;
+  }
+  return lines;
+}
+
 function outputWaitOutcome(outcome, jobId, options = {}) {
   if (outcome.outcome === "terminal") {
     const job = enrichJob(outcome.job);
@@ -443,6 +456,7 @@ function outputWaitOutcome(outcome, jobId, options = {}) {
     process.stderr.write(`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`);
   } else {
     process.stderr.write(`No job file appeared for "${jobId}" within the registration grace period.\n`);
+    process.stderr.write(describeJobLookupScope(jobId, options.workspaceRoot));
   }
   process.exitCode = WAIT_EXIT_CODES.invalid;
 }
@@ -452,7 +466,7 @@ async function waitForJobAndOutput(cwd, jobId, options = {}) {
   const outcome = await waitForTerminalJob(workspaceRoot, jobId, {
     timeoutMs: options.timeoutMs
   });
-  outputWaitOutcome(outcome, jobId, options);
+  outputWaitOutcome(outcome, jobId, { ...options, workspaceRoot });
 }
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
@@ -462,7 +476,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && isWaitingJobStatus(job.status));
   if (activeTask) {
-    throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
+    throw new Error(describeRunningTaskBlock(activeTask.id, workspaceRoot));
   }
 
   const trackedTask = findLatestResumableTaskJob(visibleJobs);
