@@ -578,7 +578,7 @@ const SAFE_THREAD_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 // State files of other roots are data, not instructions: one line, no control characters, bounded.
 function plainField(value, fallback) {
   if (typeof value !== "string" || !value) return fallback;
-  const clean = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
   return clean.length > 200 ? `${clean.slice(0, 200)}...` : clean || fallback;
 }
 
@@ -680,7 +680,11 @@ export function describeThreadCandidates(found) {
 }
 
 function describeThreadCandidatesUnguarded({ candidates, incomplete }) {
-  if (!candidates.length) return "";
+  if (!candidates.length) {
+    return incomplete
+      ? "\n(The look in this session's other workspace roots was cut short or hit unreadable state; a thread may exist there. Nothing is chosen for you.)"
+      : "";
+  }
   const lines = candidates.slice(0, THREAD_CANDIDATES_MAX_LISTED).map(
     (job) =>
       `  ${job.threadId}  ${plainField(job.workspaceRoot, "unknown workspace root")}  ${plainField(job.updatedAt, "unknown time")}  ${plainField(job.status, "unknown")}`
