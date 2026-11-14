@@ -2,9 +2,10 @@
 
 ## Unreleased (Factory #3280)
 
-- Messages only, no behaviour change. `wait <id>` that finds no job file now says
+- Messages only: what `wait` and resume do is unchanged. `wait <id>` that finds no job file now says
   which workspace it looked in (job state is kept per workspace root) and, when the
-  job exists in another workspace root, which one to run it from. A resume refused
+  job exists in another workspace root, which one to run it from (read-only lookup of the user's own state
+  directories, only on that failure path). A resume refused
   because a task of the same Claude session still runs now says that this blocks
   resuming and names `wait <id> --timeout 480` and `cancel <id>` as the ways on.
 

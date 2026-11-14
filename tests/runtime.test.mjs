@@ -1059,6 +1059,7 @@ test("the blocked-resume message says why resume is blocked and how to continue"
   assert.match(message, /blocks resuming/);
   assert.match(message, /wait task-live-3280 --timeout 480" \(run from \/work\/space\)/);
   assert.match(message, /cancel task-live-3280/);
+  assert.match(message, /\/codex:cancel task-live-3280/);
 });
 
 test("session end keeps what the worker already published and cancels a queued job in its job file", () => {
@@ -2455,23 +2456,23 @@ test("wait times out with a dedicated exit code while the job is running", () =>
   assert.equal(payload.waitTimedOut, true);
 });
 
-test("wait names the searched workspace and the workspace that holds the job", () => {
-  const holder = makeTempDir();
-  const other = makeTempDir();
+test("wait names the searched workspace and the workspace that holds the job", (t) => {
+  const holder = fs.realpathSync(makeTempDir());
+  const other = fs.realpathSync(makeTempDir());
   writeJobFile(holder, "task-elsewhere-3280", {
     id: "task-elsewhere-3280",
     status: "running",
     workspaceRoot: holder,
     pid: process.pid
   });
+  t.after(() => fs.rmSync(resolveStateDir(holder), { recursive: true, force: true }));
 
   const result = run("node", [SCRIPT, "wait", "task-elsewhere-3280"], { cwd: other });
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /No job file appeared for "task-elsewhere-3280"/);
-  assert.ok(result.stderr.includes(`Looked in workspace ${fs.realpathSync(other)}`) || result.stderr.includes(`Looked in workspace ${other}`), result.stderr);
-  assert.match(result.stderr, /This job exists in workspace .*run the command from there/);
-  assert.ok(result.stderr.includes(holder) || result.stderr.includes(fs.realpathSync(holder)), result.stderr);
+  assert.ok(result.stderr.includes(`Looked in workspace ${other};`), result.stderr);
+  assert.ok(result.stderr.includes(`This job exists in workspace ${holder}: run the command from there`), result.stderr);
 });
 
 test("wait for an unknown job names the searched workspace and does not point elsewhere", () => {

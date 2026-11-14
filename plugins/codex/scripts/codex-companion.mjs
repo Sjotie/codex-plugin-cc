@@ -42,7 +42,7 @@ import {
   buildStatusSnapshot,
   describeRunningTaskBlock,
   enrichJob,
-  findJobWorkspaceRoots,
+  findJobLocations,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -412,15 +412,27 @@ function resolveWaitTimeoutMs(options) {
   return parseNonNegativeNumber(options["timeout-ms"], "--timeout-ms");
 }
 
-// Job state is per workspace root: say where the lookup ran and where the job is, when that is
-// another root, so an empty lookup is not read as a job that does not exist.
+// Job state is per workspace root: say where the lookup ran and where the job is, so an empty
+// lookup is not read as a job that does not exist.
 function describeJobLookupScope(jobId, searchedRoot) {
-  let lines = `Looked in workspace ${searchedRoot ?? "(unknown)"}; job state is kept per workspace root.\n`;
-  const elsewhere = findJobWorkspaceRoots(jobId).filter((root) => root !== searchedRoot);
-  if (elsewhere.length > 0) {
-    lines += `This job exists in workspace ${elsewhere.join(", ")}: run the command from there (cd into it, or pass --cwd).\n`;
+  const canonical = (root) => {
+    try {
+      return fs.realpathSync(root);
+    } catch {
+      return root;
+    }
+  };
+  const searched = searchedRoot ? canonical(searchedRoot) : null;
+  let text = `Looked in workspace ${searchedRoot ?? "(unknown)"}; job state is kept per workspace root.\n`;
+  const hits = findJobLocations(jobId);
+  const elsewhere = [...new Set(hits.map((hit) => canonical(hit.workspaceRoot)).filter((root) => root !== searched))];
+  for (const root of elsewhere) {
+    text += `This job exists in workspace ${root}: run the command from there (cd into it, or pass --cwd).\n`;
   }
-  return lines;
+  if (elsewhere.length === 0 && hits.length > 0) {
+    text += `This job exists for the same workspace in another state directory (${hits[0].stateDir}): CLAUDE_PLUGIN_DATA differs from the session that started it.\n`;
+  }
+  return text;
 }
 
 function outputWaitOutcome(outcome, jobId, options = {}) {

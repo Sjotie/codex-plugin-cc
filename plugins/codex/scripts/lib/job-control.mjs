@@ -499,37 +499,47 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
   throw new Error("No active Codex jobs to cancel.");
 }
 
-// Workspace roots whose state holds a job file for this id. Job state is kept per workspace root,
-// so a lookup from another working directory finds nothing even while the job runs. Read-only:
-// it never takes a lock and ignores anything it cannot read.
-export function findJobWorkspaceRoots(jobId) {
-  validateExactJobId(jobId);
-  const found = new Set();
-  for (const root of resolveStateRoots()) {
-    let entries;
-    try {
-      entries = fs.readdirSync(root, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+// Where state holds a job file for this id: { workspaceRoot, stateDir } per hit. Job state is kept
+// per workspace root, so a lookup from another working directory finds nothing even while the job
+// runs. Read-only (no lock); it only looks at state directories owned by the current user and
+// ignores anything it cannot read. Never throws: it runs while an error is being reported.
+export function findJobLocations(jobId) {
+  const found = [];
+  try {
+    validateExactJobId(jobId);
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    for (const root of resolveStateRoots()) {
+      let entries;
       try {
-        const job = JSON.parse(fs.readFileSync(path.join(root, entry.name, "jobs", `${jobId}.json`), "utf8"));
-        if (typeof job?.workspaceRoot === "string" && job.workspaceRoot) found.add(job.workspaceRoot);
+        entries = fs.readdirSync(root, { withFileTypes: true });
       } catch {
-        // No such job file in this state directory, or not readable: not a candidate.
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const stateDir = path.join(root, entry.name);
+        try {
+          if (uid !== null && fs.statSync(stateDir).uid !== uid) continue;
+          const job = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${jobId}.json`), "utf8"));
+          if (typeof job?.workspaceRoot === "string" && job.workspaceRoot) {
+            found.push({ workspaceRoot: job.workspaceRoot, stateDir });
+          }
+        } catch {
+          // No such job file in this state directory, or not readable: not a candidate.
+        }
       }
     }
+  } catch {
+    return [];
   }
-  return [...found];
+  return found;
 }
 
 // Why a resume is refused while a task of this Claude session still runs, and how to go on.
 export function describeRunningTaskBlock(taskId, workspaceRoot) {
   return (
     `Task ${taskId} is still running. A running task of this Claude session blocks resuming; ` +
-    `wait for it with "wait ${taskId} --timeout 480" (run from ${workspaceRoot}) or stop it with ` +
-    `"cancel ${taskId}", then resume. /codex:status shows its progress.`
+    `wait for it with "codex-companion.mjs wait ${taskId} --timeout 480" (run from ${workspaceRoot}) or stop it ` +
+    `with "codex-companion.mjs cancel ${taskId}" (/codex:cancel ${taskId}), then resume. /codex:status shows its progress.`
   );
 }
