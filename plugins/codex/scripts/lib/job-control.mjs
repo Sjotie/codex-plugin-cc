@@ -630,11 +630,11 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
         continue; // not a workspace state dir
       }
       const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
-      if (!Array.isArray(index?.jobs)) {
+      if (index === null || typeof index !== "object") {
         result.incomplete = true; // a state dir we could not read may hold a running or newer task
         continue;
       }
-      for (const job of index.jobs) {
+      for (const job of Array.isArray(index.jobs) ? index.jobs : []) {
         if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
         const record = /^[A-Za-z0-9._-]+$/.test(job.id)
           ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
