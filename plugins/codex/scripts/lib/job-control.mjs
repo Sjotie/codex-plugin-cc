@@ -575,6 +575,23 @@ export function findJobLocations(jobId) {
 // incomplete scan refuses the automatic choice, so it must cover a long-lived host's dirs.
 const SIBLING_SCAN_MAX_STATE_DIRS = 20000;
 
+const SIBLING_JOB_FILES_MAX = 200;
+
+// True when every job file in this jobs/ directory was read and none belongs to the session.
+function jobFilesRuleOutSession(jobsDir, sessionId, uid) {
+  try {
+    const names = fs.readdirSync(jobsDir).filter((name) => name.endsWith(".json"));
+    if (names.length > SIBLING_JOB_FILES_MAX) return false;
+    for (const name of names) {
+      const record = readJobFileStrict(path.join(jobsDir, name), uid);
+      if (record === null || typeof record !== "object" || record.sessionId === sessionId) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // #4212: state lives per workspace root, but one Claude session can work from several roots
 // (a fresh workroot per review round). The job records of this session in the other roots'
 // state dirs, so --resume-last can find a thread a sibling root holds. Same checks as
@@ -631,7 +648,9 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
       }
       const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
       if (index === null || typeof index !== "object") {
-        result.incomplete = true; // a state dir we could not read may hold a running or newer task
+        // The index cannot be read; the job files can still say whether this session has tasks
+        // here. Unknown (too many or unreadable files) counts as incomplete.
+        if (!jobFilesRuleOutSession(path.join(stateDir, "jobs"), sessionId, uid)) result.incomplete = true;
         continue;
       }
       for (const job of Array.isArray(index.jobs) ? index.jobs : []) {

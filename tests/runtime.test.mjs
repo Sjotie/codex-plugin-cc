@@ -1168,6 +1168,12 @@ test("task --resume-last refuses past 50 sibling roots, an unreadable sibling in
   const broken = path.join(stateRoot, "elsewhere-4212-broken");
   fs.mkdirSync(path.join(broken, "jobs"), { recursive: true });
   fs.writeFileSync(path.join(broken, "state.json"), "{ not json");
+  // Its job files say whether the session has tasks there: another session's do not matter...
+  fs.writeFileSync(path.join(broken, "jobs", "task-theirs.json"), JSON.stringify({ id: "task-theirs", sessionId: "someone-else", jobClass: "task" }));
+  const harmless = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+  assert.doesNotMatch(harmless.stderr, refusal);
+  // ...this session's do.
+  fs.writeFileSync(path.join(broken, "jobs", "task-ours.json"), JSON.stringify({ id: "task-ours", sessionId: "sess-4212-limits", jobClass: "task" }));
   const unreadable = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
   assert.equal(unreadable.status, 1);
   assert.match(unreadable.stderr, refusal);
