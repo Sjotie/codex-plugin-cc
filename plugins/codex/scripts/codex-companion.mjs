@@ -23,8 +23,8 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, getRepoIdentity, resolveReviewTarget, sameRepositoryIdentity } from "./lib/git.mjs";
-import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./lib/process.mjs";
+import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   assignJobWorkerPid,
@@ -42,8 +42,9 @@ import {
   buildStatusSnapshot,
   describeRunningTaskBlock,
   enrichJob,
+  describeThreadCandidates,
   findJobLocations,
-  listSessionJobsInOtherWorkspaces,
+  listSessionThreadCandidates,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -482,17 +483,6 @@ async function waitForJobAndOutput(cwd, jobId, options = {}) {
   outputWaitOutcome(outcome, jobId, { ...options, workspaceRoot });
 }
 
-// A waiting task of a sibling root may be live: its worker pid is alive, or it is still being
-// started (queued, no pid yet). A start that never got a pid is ignored after an hour, with a
-// warning, since age does not prove the start can no longer happen.
-const QUEUED_WITHOUT_PID_MAX_AGE_MS = 60 * 60 * 1000;
-const SIBLING_IDENTITY_MAX_ROOTS = 50;
-function siblingTaskState(job) {
-  if (job.pid) return isProcessAlive(job.pid) ? "live" : "dead";
-  const since = Date.parse(job.updatedAt ?? job.createdAt ?? "");
-  return Number.isFinite(since) && Date.now() - since < QUEUED_WITHOUT_PID_MAX_AGE_MS ? "live" : "expired";
-}
-
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const sessionId = getCurrentClaudeSessionId();
@@ -503,60 +493,8 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
     throw new Error(describeRunningTaskBlock(activeTask.id, workspaceRoot));
   }
 
-  // #4212: with a session id, the session's earlier tasks may sit in another workspace
-  // root (own state dir each, e.g. a fresh workroot per review round). Only roots of the
-  // same repository count (shared root commits; a root whose repository cannot be read
-  // is left out), so a session that moves between repos never resumes the other one's
-  // thread. Own and sibling jobs then compete as one list: a running sibling task blocks
-  // like an own one, and the newest resumable thread of the session wins.
-  const maxStateDirs = Number(process.env["CODEX_COMPANION_SIBLING_SCAN_MAX_DIRS"]) || undefined;
-  const scan = sessionId
-    ? listSessionJobsInOtherWorkspaces(workspaceRoot, sessionId, { maxStateDirs })
-    : { jobs: [], incomplete: false };
-  let uncertain = scan.incomplete;
-  const ownIdentity = scan.jobs.length ? getRepoIdentity(workspaceRoot) : null;
-  if (ownIdentity?.status === "failed") uncertain = true;
-  const identityByRoot = new Map();
-  const sameRepository = (job) => {
-    if (ownIdentity?.status !== "ok" || typeof job.workspaceRoot !== "string") return false;
-    if (!identityByRoot.has(job.workspaceRoot)) {
-      if (identityByRoot.size >= SIBLING_IDENTITY_MAX_ROOTS) {
-        uncertain = true;
-        return false;
-      }
-      identityByRoot.set(job.workspaceRoot, getRepoIdentity(job.workspaceRoot));
-    }
-    const identity = identityByRoot.get(job.workspaceRoot);
-    if (identity.status === "failed") uncertain = true;
-    return sameRepositoryIdentity(ownIdentity, identity);
-  };
-  const siblingJobs = sortJobsNewestFirst(scan.jobs).filter((job) => job.id !== options.excludeJobId && sameRepository(job));
-  for (const job of siblingJobs) {
-    if (job.jobClass !== "task" || !isWaitingJobStatus(job.status)) continue;
-    const state = siblingTaskState(job);
-    if (state === "live") {
-      throw new Error(describeRunningTaskBlock(job.id, job.workspaceRoot ?? "its workspace root"));
-    }
-    if (state === "expired") {
-      process.stderr.write(`Note: task ${job.id} of this session in ${job.workspaceRoot ?? "another root"} has been queued without a worker for over an hour; not treated as running.\n`);
-    }
-  }
-
-  // An incomplete view (more state directories or roots than examined) cannot prove that
-  // nothing else of this session runs or is newer, so it never resumes on its own.
-  if (uncertain) {
-    throw new Error(
-      "Resuming automatically is refused: more Codex state directories or workspace roots exist than were examined, so a running or newer task of this session may have been missed. Use --resume-thread <id>."
-    );
-  }
-
-  const trackedTask = findLatestResumableTaskJob(sortJobsNewestFirst([...visibleJobs, ...siblingJobs]));
+  const trackedTask = findLatestResumableTaskJob(visibleJobs);
   if (trackedTask) {
-    if (siblingJobs.includes(trackedTask)) {
-      process.stderr.write(
-        `Resuming Codex thread ${trackedTask.threadId} of task ${trackedTask.id} from another workspace root of this session (${trackedTask.workspaceRoot ?? "unknown"}).\n`
-      );
-    }
     return { id: trackedTask.threadId };
   }
 
@@ -694,7 +632,9 @@ async function executeTaskRun(request) {
       excludeJobId: request.jobId
     });
     if (!latestThread) {
-      throw new Error("No previous Codex task thread was found for this repository.");
+      const sessionId = getCurrentClaudeSessionId();
+      const others = sessionId ? describeThreadCandidates(listSessionThreadCandidates(workspaceRoot, sessionId)) : "";
+      throw new Error(`No previous Codex task thread was found for this repository.${others}`);
     }
     resumeThreadId = latestThread.id;
   }

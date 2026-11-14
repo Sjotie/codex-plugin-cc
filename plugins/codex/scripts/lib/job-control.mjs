@@ -571,63 +571,18 @@ export function findJobLocations(jobId) {
   return found;
 }
 
-// Looser than the single-job lookup: this scan decides which thread to resume, and an
-// incomplete scan refuses the automatic choice, so it must cover a long-lived host's dirs.
-const SIBLING_SCAN_MAX_STATE_DIRS = 20000;
+const THREAD_CANDIDATES_MAX_STATE_DIRS = 2000;
+const THREAD_CANDIDATES_MAX_LISTED = 10;
 
-const SIBLING_JOB_FILES_MAX = 200;
-
-// Job files that the index does not list. Ours (valid session id, same id as the file name) count
-// as jobs; another valid session's are ignored; a file that cannot tell, too many files, or a
-// directory that cannot be listed make the answer incomplete.
-function unindexedSessionJobs(jobsDir, indexedJobs, sessionId, uid) {
-  const out = { jobs: [], incomplete: false };
-  try {
-    const indexed = new Set(indexedJobs.map((job) => job?.id));
-    const names = fs.readdirSync(jobsDir).filter((name) => name.endsWith(".json") && !indexed.has(name.slice(0, -5)));
-    if (names.length > SIBLING_JOB_FILES_MAX) return { jobs: [], incomplete: true };
-    for (const name of names) {
-      const record = readJobFileStrict(path.join(jobsDir, name), uid);
-      if (record === null || typeof record !== "object" || typeof record.sessionId !== "string" || !record.sessionId) {
-        out.incomplete = true;
-      } else if (record.sessionId === sessionId) {
-        if (record.id === name.slice(0, -5)) out.jobs.push(record);
-        else out.incomplete = true;
-      }
-    }
-  } catch {
-    out.incomplete = true;
-  }
-  return out;
-}
-
-// True when every job file in this jobs/ directory was read and none belongs to the session.
-function jobFilesRuleOutSession(jobsDir, sessionId, uid) {
-  try {
-    const names = fs.readdirSync(jobsDir).filter((name) => name.endsWith(".json"));
-    if (names.length > SIBLING_JOB_FILES_MAX) return false;
-    for (const name of names) {
-      const record = readJobFileStrict(path.join(jobsDir, name), uid);
-      // Only a valid, different session id rules a file out; a file without one may be ours.
-      if (record === null || typeof record !== "object" || typeof record.sessionId !== "string" || !record.sessionId || record.sessionId === sessionId) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// #4212: state lives per workspace root, but one Claude session can work from several roots
-// (a fresh workroot per review round). The job records of this session in the other roots'
-// state dirs, so --resume-last can find a thread a sibling root holds. Same checks as
-// findJobLocations (real state and jobs/ directories of the current user, small regular
-// files, no locks, no writes); newest state dirs first, at most JOB_LOOKUP_MAX_STATE_DIRS of
-// them, and `incomplete` says when dirs were left out or unreadable. Each index entry is overlaid
-// with its job file like the own root's listing does, so a lagging index does not hide a
-// finished task; a job file of another session or job is ignored. Never throws.
-export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
-  const maxDirs = options.maxStateDirs ?? SIBLING_SCAN_MAX_STATE_DIRS;
-  const result = { jobs: [], incomplete: false };
+// #4212: state lives per workspace root, so a --resume-last from a fresh root (a new workroot per
+// round) finds nothing even though this Claude session has finished tasks in its other roots.
+// Nothing is chosen for the caller: this only lists those threads, read-only and bounded, so the
+// error can say how to resume one on purpose (--resume-thread <id>). Same checks as
+// findJobLocations (real directories of the current user, small regular files, no locks);
+// newest state directories first. `incomplete` says the look was cut short or hit something
+// unreadable. Never throws.
+export function listSessionThreadCandidates(cwd, sessionId) {
+  const result = { candidates: [], incomplete: false };
   if (!sessionId) return result;
   try {
     const uid = typeof process.getuid === "function" ? process.getuid() : null;
@@ -637,9 +592,6 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
     } catch {
       // No own state dir yet: nothing to exclude.
     }
-    // One lstat per directory entry orders them by recent activity; the rest of the checks
-    // run only for the newest maxDirs. Anything the scan cannot read or does not reach makes
-    // it incomplete, so the caller can refuse an automatic choice instead of guessing.
     const dirs = [];
     for (const root of resolveStateRoots()) {
       let entries;
@@ -653,48 +605,56 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
         const stateDir = path.join(root, entry.name);
         try {
           const stat = fs.lstatSync(stateDir);
-          if (!stat.isDirectory() || (uid !== null && stat.uid !== uid)) continue;
-          dirs.push({ stateDir, mtimeMs: stat.mtimeMs });
+          if (stat.isDirectory() && (uid === null || stat.uid === uid)) dirs.push({ stateDir, mtimeMs: stat.mtimeMs });
         } catch {
           continue;
         }
       }
     }
     dirs.sort((left, right) => right.mtimeMs - left.mtimeMs);
-    result.incomplete = dirs.length > maxDirs;
-    for (const { stateDir } of dirs.slice(0, maxDirs)) {
+    result.incomplete = dirs.length > THREAD_CANDIDATES_MAX_STATE_DIRS;
+    for (const { stateDir } of dirs.slice(0, THREAD_CANDIDATES_MAX_STATE_DIRS)) {
       try {
         const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
         if (!jobsStat.isDirectory() || (uid !== null && jobsStat.uid !== uid)) continue;
         if (ownDir !== null && fs.realpathSync(stateDir) === ownDir) continue;
       } catch {
-        continue; // not a workspace state dir (no real jobs/ directory of ours)
-      }
-      const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
-      if (index === null || typeof index !== "object" || !Array.isArray(index.jobs)) {
-        // The index cannot be read; the job files can still say whether this session has tasks
-        // here. Unknown (too many or unreadable files) counts as incomplete.
-        if (!jobFilesRuleOutSession(path.join(stateDir, "jobs"), sessionId, uid)) result.incomplete = true;
         continue;
       }
-      // The start code writes the job file before the index entry: a job being started right
-      // now is only a file. Files not in the index that may be ours are read too.
-      const unindexed = unindexedSessionJobs(path.join(stateDir, "jobs"), index.jobs, sessionId, uid);
-      if (unindexed.incomplete) result.incomplete = true;
-      result.jobs.push(...unindexed.jobs);
+      const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
+      if (!index || !Array.isArray(index.jobs)) continue;
       for (const job of index.jobs) {
-        if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
+        if (job?.sessionId !== sessionId || job.jobClass !== "task" || typeof job.id !== "string") continue;
         const record = /^[A-Za-z0-9._-]+$/.test(job.id)
           ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
           : null;
-        const sameJob = record && record.id === job.id && record.sessionId === sessionId && record.jobClass === job.jobClass;
-        result.jobs.push(sameJob ? applyEffective(job, { source: "json", record }) : job);
+        const effective =
+          record && record.id === job.id && record.sessionId === sessionId && record.jobClass === job.jobClass
+            ? applyEffective(job, { source: "json", record })
+            : job;
+        if (effective.threadId && isTerminalJobStatus(effective.status)) result.candidates.push(effective);
       }
     }
   } catch {
     result.incomplete = true;
   }
+  result.candidates = sortJobsNewestFirst(result.candidates);
   return result;
+}
+
+// The lines the "No previous Codex task thread" error appends. Empty when there is nothing to show.
+export function describeThreadCandidates({ candidates, incomplete }) {
+  if (!candidates.length) return "";
+  const lines = candidates.slice(0, THREAD_CANDIDATES_MAX_LISTED).map(
+    (job) => `  ${job.threadId}  ${job.workspaceRoot ?? "unknown workspace root"}  ${job.updatedAt ?? "unknown time"}  ${job.status}`
+  );
+  const more = candidates.length > THREAD_CANDIDATES_MAX_LISTED ? `\n  ... and ${candidates.length - THREAD_CANDIDATES_MAX_LISTED} more` : "";
+  const cut = incomplete ? "\n(The look was cut short or hit unreadable state; the list may be incomplete.)" : "";
+  return (
+    "\nThis Claude session has finished tasks in other workspace roots. Nothing is chosen for you; " +
+    "to continue one, run the task again with --resume-thread <id> (newest first):\n" +
+    lines.join("\n") + more + cut
+  );
 }
 
 // Why a resume is refused while a task of this Claude session still runs, and how to go on.

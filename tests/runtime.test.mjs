@@ -24,7 +24,6 @@ import {
   settleCancellationAfterTermination
 } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
-import { getRepoIdentity, normalizeRemoteUrl, sameRepositoryIdentity } from "../plugins/codex/scripts/lib/git.mjs";
 import {
   assignJobWorkerPid,
   resolveStateDir,
@@ -894,6 +893,69 @@ test("task-resume-candidate returns the latest rescue thread from the current se
   assert.equal(payload.candidate.threadId, "thr_current");
 });
 
+function seedOtherRootState(slug, jobs, jobFiles = {}) {
+  // The state dir of another workspace root, next to the ones the tests use.
+  const dir = path.join(path.dirname(resolveStateDir(makeTempDir())), slug);
+  fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs }));
+  for (const [id, record] of Object.entries(jobFiles)) {
+    fs.writeFileSync(path.join(dir, "jobs", `${id}.json`), JSON.stringify(record));
+  }
+}
+
+function resumeLastFromNewRoot(sessionId) {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: sessionId };
+  const result = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+  return { result, statePath: path.join(binDir, "fake-codex-state.json") };
+}
+
+test("task --resume-last from a new root lists this session's threads in other roots and resumes none (#4212)", () => {
+  const session = "sess-4212-list";
+  const job = (id, extra) => ({ id, jobClass: "task", sessionId: session, workspaceRoot: `/old/${id}`, ...extra });
+  seedOtherRootState(
+    "other-root-4212-a",
+    [job("task-old", { status: "completed", threadId: "thr_old", updatedAt: "2026-11-01T10:00:00.000Z" })]
+  );
+  // Stale index (still running, no thread); the job file has the finished state.
+  seedOtherRootState(
+    "other-root-4212-b",
+    [job("task-new", { status: "running", updatedAt: "2026-11-02T10:00:00.000Z" })],
+    { "task-new": job("task-new", { status: "completed", threadId: "thr_new", updatedAt: "2026-11-02T10:00:00.000Z" }) }
+  );
+  // Never listed: another session, an unfinished task, a task without a thread, a review.
+  seedOtherRootState("other-root-4212-c", [
+    { ...job("task-theirs", { status: "completed", threadId: "thr_theirs" }), sessionId: "someone-else" },
+    job("task-running", { status: "running", threadId: "thr_running" }),
+    job("task-nothread", { status: "completed" }),
+    job("review-1", { status: "completed", threadId: "thr_review", jobClass: "review" })
+  ]);
+
+  const { result, statePath } = resumeLastFromNewRoot(session);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /No previous Codex task thread was found for this repository\./);
+  assert.match(result.stderr, /--resume-thread <id>/);
+  const newest = result.stderr.indexOf("thr_new");
+  const oldest = result.stderr.indexOf("thr_old");
+  assert.ok(newest > -1 && oldest > newest, "newest first");
+  assert.match(result.stderr, /thr_new {2}\/old\/task-new {2}2026-11-02T10:00:00.000Z {2}completed/);
+  assert.doesNotMatch(result.stderr, /thr_theirs|thr_running|thr_review|task-nothread/);
+  // Nothing was chosen or started.
+  assert.equal(fs.existsSync(statePath), false);
+});
+
+test("task --resume-last from a new root with nothing elsewhere keeps the plain error (#4212)", () => {
+  const { result } = resumeLastFromNewRoot("sess-4212-empty");
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr.trim(), "No previous Codex task thread was found for this repository.");
+});
+
 test("task --resume-last does not resume a task from another Claude session", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -906,11 +968,11 @@ test("task --resume-last does not resume a task from another Claude session", ()
 
   const otherEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-isolation-other"
+    CODEX_COMPANION_SESSION_ID: "sess-other"
   };
   const currentEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-isolation-current"
+    CODEX_COMPANION_SESSION_ID: "sess-current"
   };
 
   const firstRun = run("node", [SCRIPT, "task", "initial task"], {
@@ -938,366 +1000,6 @@ test("task --resume-last does not resume a task from another Claude session", ()
   assert.equal(fakeState.lastTurnStart.prompt, "initial task");
 });
 
-test("task --resume-last finds the thread of the same session in another workspace root (#4212)", () => {
-  // Each review round got a fresh workroot (own state dir) under one Claude session;
-  // --resume-last from the new root must find the newest thread of that session.
-  const binDir = makeTempDir();
-  const statePath = path.join(binDir, "fake-codex-state.json");
-  installFakeCodex(binDir);
-  const makeRepo = () => {
-    const repo = makeTempDir();
-    initGitRepo(repo);
-    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-    run("git", ["add", "README.md"], { cwd: repo });
-    run("git", ["commit", "-m", "init"], { cwd: repo });
-    return repo;
-  };
-  const rootA = makeRepo();
-  // Same repository (shared root commit), as workroots of one repo are; rootC is unrelated.
-  const rootB = cloneAsSameProject(rootA);
-  const rootC = makeRepo();
-  const env = (sessionId) => ({ ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: sessionId });
-
-  const first = run("node", [SCRIPT, "task", "initial task"], { cwd: rootA, env: env("sess-4212-current") });
-  assert.equal(first.status, 0, first.stderr);
-
-  const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: rootB, env: env("sess-4212-current") });
-  assert.equal(resume.status, 0, resume.stderr);
-  assert.match(resume.stderr, /another workspace/i);
-  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  assert.equal(fakeState.lastTurnStart.threadId, "thr_1");
-  assert.equal(fakeState.lastTurnStart.prompt, "follow up");
-
-  // Another session never borrows it.
-  const other = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: rootC, env: env("sess-4212-other") });
-  assert.equal(other.status, 1);
-  assert.match(other.stderr, /No previous Codex task thread was found for this repository\./);
-});
-
-// Clones of one project: same root commit and the same origin fetch URL (as workroots have).
-function cloneAsSameProject(source, url = "https://example.invalid/team/project.git") {
-  const clone = path.join(makeTempDir(), "clone");
-  assert.equal(run("git", ["clone", "-q", source, clone]).status, 0);
-  for (const dir of [source, clone]) {
-    const hasOrigin = run("git", ["remote"], { cwd: dir }).stdout.split("\n").includes("origin");
-    assert.equal(run("git", ["remote", hasOrigin ? "set-url" : "add", "origin", url], { cwd: dir }).status, 0);
-  }
-  return clone;
-}
-
-function initCommittedRepo(content = "hello\n") {
-  const repo = makeTempDir();
-  initGitRepo(repo);
-  fs.writeFileSync(path.join(repo, "README.md"), content);
-  run("git", ["add", "README.md"], { cwd: repo });
-  run("git", ["commit", "-m", "init"], { cwd: repo });
-  return repo;
-}
-
-function siblingFixture(sessionId) {
-  const binDir = makeTempDir();
-  installFakeCodex(binDir);
-  const repo = initCommittedRepo();
-  const cloneDir = cloneAsSameProject(repo);
-  return {
-    repo,
-    cloneDir,
-    env: { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: sessionId },
-    base: (workspaceRoot) => ({ jobClass: "task", sessionId, workspaceRoot })
-  };
-}
-
-function seedSiblingWorkspace(slug, jobs, jobFiles = {}) {
-  // A state dir of another workspace root next to the one the tests use.
-  const dir = path.join(path.dirname(resolveStateDir(makeTempDir())), slug);
-  fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
-  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs }));
-  for (const [id, record] of Object.entries(jobFiles)) {
-    fs.writeFileSync(path.join(dir, "jobs", `${id}.json`), JSON.stringify(record));
-  }
-}
-
-test("task --resume-last takes the newest thread of the session across roots, own root included (#4212)", () => {
-  const binDir = makeTempDir();
-  const statePath = path.join(binDir, "fake-codex-state.json");
-  installFakeCodex(binDir);
-  const makeRepo = () => {
-    const repo = makeTempDir();
-    initGitRepo(repo);
-    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
-    run("git", ["add", "README.md"], { cwd: repo });
-    run("git", ["commit", "-m", "init"], { cwd: repo });
-    return repo;
-  };
-  const rootA = makeRepo();
-  const rootB = cloneAsSameProject(rootA);
-  const env = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: "sess-4212-newest" };
-  assert.equal(run("node", [SCRIPT, "task", "task in A"], { cwd: rootA, env }).status, 0);
-  assert.equal(run("node", [SCRIPT, "task", "task in B"], { cwd: rootB, env }).status, 0);
-  const threadB = JSON.parse(fs.readFileSync(statePath, "utf8")).lastTurnStart.threadId;
-
-  // Back in A, whose own task is older than B's.
-  const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: rootA, env });
-  assert.equal(resume.status, 0, resume.stderr);
-  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).lastTurnStart.threadId, threadB);
-});
-
-test("task --resume-last sees a sibling's finished task through its job file (#4212)", () => {
-  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-sibling");
-  const unrelated = initCommittedRepo("another project\n"); // other tree, so other root commit
-  // A fork: shares the history but is its own project (other origin URL).
-  const fork = cloneAsSameProject(repo, "https://example.invalid/team/project.git");
-  run("git", ["remote", "set-url", "origin", "https://example.invalid/someone-else/project.git"], { cwd: fork });
-
-  // Siblings in an unrelated repository or a fork are never picked, even when newest.
-  seedSiblingWorkspace("elsewhere-4212-unrelated", [
-    { ...base(unrelated), id: "task-unrelated", status: "completed", threadId: "thr_unrelated", updatedAt: "2026-11-03T10:00:00.000Z" }
-  ]);
-  seedSiblingWorkspace("elsewhere-4212-fork", [
-    { ...base(fork), id: "task-fork", status: "completed", threadId: "thr_fork", updatedAt: "2026-11-03T11:00:00.000Z" }
-  ]);
-  const none = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  assert.equal(none.status, 1);
-  assert.match(none.stderr, /No previous Codex task thread was found for this repository\./);
-
-  // Stale index (running, dead pid, no thread); the job file says completed with a thread.
-  // A job file of another session with the same id is not trusted.
-  seedSiblingWorkspace(
-    "elsewhere-4212-stale",
-    [{ ...base(cloneDir), id: "task-stale", status: "running", pid: 2 ** 22 + 12345, updatedAt: "2026-11-01T10:00:00.000Z" }],
-    { "task-stale": { ...base(cloneDir), id: "task-stale", status: "completed", threadId: "thr_from_job_file", updatedAt: "2026-11-01T10:00:00.000Z" } }
-  );
-  seedSiblingWorkspace(
-    "elsewhere-4212-foreign-file",
-    [{ ...base(cloneDir), id: "task-foreign", status: "running", pid: 2 ** 22 + 12346, updatedAt: "2026-11-02T10:00:00.000Z" }],
-    { "task-foreign": { ...base(cloneDir), id: "task-foreign", sessionId: "someone-else", status: "completed", threadId: "thr_foreign", updatedAt: "2026-11-02T10:00:00.000Z" } }
-  );
-  const found = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  assert.match(found.stderr, /Resuming Codex thread thr_from_job_file of task task-stale from another workspace root/);
-  assert.doesNotMatch(found.stderr, /thr_foreign|thr_fork|thr_unrelated/);
-});
-
-test("task --resume-last is blocked by a live sibling task and by a fresh queued one (#4212)", () => {
-  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-block");
-  seedSiblingWorkspace("elsewhere-4212-live", [
-    { ...base(cloneDir), id: "task-live", status: "running", pid: process.pid, threadId: "thr_live", updatedAt: "2026-11-04T10:00:00.000Z" }
-  ]);
-  const live = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  assert.equal(live.status, 1);
-  assert.match(live.stderr, /Task task-live is still running/);
-
-  const queuedEnv = { ...env, CODEX_COMPANION_SESSION_ID: "sess-4212-queued" };
-  seedSiblingWorkspace("elsewhere-4212-queued", [
-    { ...base(cloneDir), sessionId: "sess-4212-queued", id: "task-queued", status: "queued", pid: null, updatedAt: new Date().toISOString() }
-  ]);
-  const queued = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env: queuedEnv });
-  assert.equal(queued.status, 1);
-  assert.match(queued.stderr, /Task task-queued is still running/);
-});
-
-test("task --resume-last warns when it ignores a queued sibling older than an hour (#4212)", () => {
-  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-expired");
-  seedSiblingWorkspace("elsewhere-4212-expired", [
-    { ...base(cloneDir), id: "task-expired", status: "queued", pid: null, updatedAt: "2026-01-01T00:00:00.000Z" },
-    { ...base(cloneDir), id: "task-done", status: "completed", threadId: "thr_done", updatedAt: "2025-12-01T00:00:00.000Z" }
-  ]);
-  const result = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  assert.match(result.stderr, /task-expired of this session .* queued without a worker for over an hour/);
-  assert.match(result.stderr, /Resuming Codex thread thr_done/);
-});
-
-test("getRepoIdentity resolves a relative origin against its own repository (#4212)", () => {
-  const source = initCommittedRepo();
-  const cloneIn = (parent) => {
-    const dir = path.join(makeTempDir(), parent, "work");
-    fs.mkdirSync(path.dirname(dir), { recursive: true });
-    assert.equal(run("git", ["clone", "-q", source, dir]).status, 0);
-    assert.equal(run("git", ["remote", "set-url", "origin", "../mirror.git"], { cwd: dir }).status, 0);
-    return getRepoIdentity(dir);
-  };
-  const a = cloneIn("a");
-  const b = cloneIn("b");
-  assert.equal(a.status, "ok");
-  assert.equal(b.status, "ok");
-  assert.notEqual(a.origin, b.origin);
-  assert.equal(sameRepositoryIdentity(a, b), false);
-});
-
-test("repository identity: URL forms match, local paths and path case do not collide (#4212)", () => {
-  assert.equal(normalizeRemoteUrl("https://GitHub.com/Org/Repo.git"), normalizeRemoteUrl("git@github.com:Org/Repo"));
-  assert.equal(normalizeRemoteUrl("ssh://git@github.com/Org/Repo.git/"), normalizeRemoteUrl("https://github.com/Org/Repo"));
-  assert.notEqual(normalizeRemoteUrl("https://github.com/Org/Repo"), normalizeRemoteUrl("https://github.com/org/repo"));
-  const dir = makeTempDir();
-  assert.notEqual(normalizeRemoteUrl(path.join(dir, "project")), normalizeRemoteUrl(path.join(dir, "project.git")));
-  assert.notEqual(normalizeRemoteUrl(path.join(dir, "Client.git")), normalizeRemoteUrl(path.join(dir, "client.git")));
-  assert.equal(normalizeRemoteUrl(`file://${path.join(dir, "x")}`), normalizeRemoteUrl(path.join(dir, "x")));
-  // A relative origin is relative to its own repository, not to this process.
-  const parent = makeTempDir();
-  assert.notEqual(
-    normalizeRemoteUrl("../mirror.git", path.join(parent, "a", "work")),
-    normalizeRemoteUrl("../mirror.git", path.join(parent, "b", "work"))
-  );
-  assert.equal(
-    normalizeRemoteUrl("../mirror.git", path.join(parent, "a", "work")),
-    normalizeRemoteUrl(path.join(parent, "a", "mirror.git"))
-  );
-  const ok = (origin) => ({ status: "ok", commits: ["c1"], origin, commonDir: null });
-  assert.equal(sameRepositoryIdentity(ok("a"), ok("a")), true);
-  assert.equal(sameRepositoryIdentity(ok("a"), ok("b")), false);
-  assert.equal(sameRepositoryIdentity(ok("a"), { status: "failed" }), false);
-});
-
-test("task --resume-last refuses when git cannot answer the identity check in time (#4212)", () => {
-  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-gittimeout");
-  const realGit = run("sh", ["-c", "command -v git"]).stdout.trim();
-  const shimDir = makeTempDir();
-  // Slow only the root-commit lookup, which is the identity check.
-  fs.writeFileSync(
-    path.join(shimDir, "git"),
-    `#!/bin/sh\nif [ "$1" = "rev-list" ] && [ "$2" = "--max-parents=0" ]; then sleep 3; fi\nexec "${realGit}" "$@"\n`,
-    { mode: 0o755 }
-  );
-  seedSiblingWorkspace("elsewhere-4212-gt", [
-    { ...base(cloneDir), id: "task-gt", status: "completed", threadId: "thr_gt", updatedAt: "2026-11-01T10:00:00.000Z" }
-  ]);
-  const slowEnv = {
-    ...env,
-    PATH: `${shimDir}${path.delimiter}${env.PATH}`,
-    CODEX_COMPANION_IDENTITY_GIT_TIMEOUT_MS: "300"
-  };
-  const refused = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env: slowEnv });
-  assert.equal(refused.status, 1);
-  assert.match(refused.stderr, /Resuming automatically is refused.*--resume-thread/);
-});
-
-test("task --resume-last refuses past 50 sibling roots, an unreadable sibling index, and a cut scan even with an own thread (#4212)", () => {
-  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-limits");
-  const refusal = /Resuming automatically is refused.*--resume-thread/;
-
-  // An own, resumable thread exists; a cut scan still refuses.
-  const first = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
-  assert.equal(first.status, 0, first.stderr);
-  seedSiblingWorkspace("elsewhere-4212-cut-a", [
-    { ...base(cloneDir), id: "task-cut-a", status: "completed", threadId: "thr_cut_a", updatedAt: "2026-11-01T10:00:00.000Z" }
-  ]);
-  seedSiblingWorkspace("elsewhere-4212-cut-b", [
-    { ...base(cloneDir), id: "task-cut-b", status: "completed", threadId: "thr_cut_b", updatedAt: "2026-11-02T10:00:00.000Z" }
-  ]);
-  const cut = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
-    cwd: repo,
-    env: { ...env, CODEX_COMPANION_SIBLING_SCAN_MAX_DIRS: "1" }
-  });
-  assert.equal(cut.status, 1);
-  assert.match(cut.stderr, refusal);
-
-  // An unreadable sibling index.
-  const stateRoot = path.dirname(resolveStateDir(makeTempDir()));
-  const broken = path.join(stateRoot, "elsewhere-4212-broken");
-  fs.mkdirSync(path.join(broken, "jobs"), { recursive: true });
-  fs.writeFileSync(path.join(broken, "state.json"), "{ not json");
-  // Its job files say whether the session has tasks there: another session's do not matter...
-  fs.writeFileSync(path.join(broken, "jobs", "task-theirs.json"), JSON.stringify({ id: "task-theirs", sessionId: "someone-else", jobClass: "task" }));
-  const harmless = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  assert.doesNotMatch(harmless.stderr, refusal);
-  // ...this session's do.
-  fs.writeFileSync(path.join(broken, "jobs", "task-ours.json"), JSON.stringify({ id: "task-ours", sessionId: "sess-4212-limits", jobClass: "task" }));
-  const unreadable = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  assert.equal(unreadable.status, 1);
-  assert.match(unreadable.stderr, refusal);
-  fs.rmSync(broken, { recursive: true, force: true });
-
-  // 51 distinct roots of this session.
-  for (let n = 0; n < 51; n += 1) {
-    seedSiblingWorkspace(`elsewhere-4212-many-${n}`, [
-      { ...base(`/gone/root-${n}`), id: `task-many-${n}`, status: "completed", threadId: `thr_many_${n}`, updatedAt: "2026-10-01T10:00:00.000Z" }
-    ]);
-  }
-  const many = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  assert.equal(many.status, 1);
-  assert.match(many.stderr, refusal);
-});
-
-test("task --resume-last sees a job that is only a file yet (start writes the file before the index) (#4212)", () => {
-  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-startwindow");
-  const refusal = /Resuming automatically is refused.*--resume-thread/;
-  const dir = path.join(path.dirname(resolveStateDir(makeTempDir())), "elsewhere-4212-startwindow");
-  fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
-  const writeIndex = (jobs) => fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, config: {}, jobs }));
-  const writeJobFile = (record) => fs.writeFileSync(path.join(dir, "jobs", `${record.id}.json`), JSON.stringify(record));
-  const resume = () => run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-
-  // Valid but empty index; the queued job is only a file: it blocks.
-  writeIndex([]);
-  writeJobFile({ ...base(cloneDir), id: "task-new", status: "queued", pid: null, updatedAt: new Date().toISOString() });
-  const blocked = resume();
-  assert.equal(blocked.status, 1);
-  assert.match(blocked.stderr, /Task task-new is still running/);
-
-  // A finished unindexed file of this session is a candidate like an indexed one.
-  writeJobFile({ ...base(cloneDir), id: "task-new", status: "completed", threadId: "thr_file_only", updatedAt: "2026-11-05T10:00:00.000Z" });
-  assert.match(resume().stderr, /Resuming Codex thread thr_file_only of task task-new/);
-
-  // A file that cannot say whose it is refuses; another session's file does not matter.
-  writeJobFile({ id: "task-anon", status: "running" });
-  assert.match(resume().stderr, refusal);
-  fs.rmSync(path.join(dir, "jobs", "task-anon.json"));
-  writeJobFile({ id: "task-theirs", sessionId: "someone-else", jobClass: "task", status: "running", pid: process.pid });
-  assert.doesNotMatch(resume().stderr, refusal);
-});
-
-test("task --resume-last refuses when a sibling's index is missing or hollow and its job files may be ours (#4212)", () => {
-  const { repo, env } = siblingFixture("sess-4212-hollow");
-  const refusal = /Resuming automatically is refused.*--resume-thread/;
-  const stateRoot = path.dirname(resolveStateDir(makeTempDir()));
-  const seed = (name, indexText, jobFile) => {
-    const dir = path.join(stateRoot, name);
-    fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
-    if (indexText !== null) fs.writeFileSync(path.join(dir, "state.json"), indexText);
-    if (jobFile !== null) fs.writeFileSync(path.join(dir, "jobs", "task-x.json"), JSON.stringify(jobFile));
-    return dir;
-  };
-  const tryResume = () => run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
-  const ours = { id: "task-x", sessionId: "sess-4212-hollow", jobClass: "task", status: "running" };
-
-  for (const [label, indexText, jobFile] of [
-    ["missing index, our job file", null, ours],
-    ["empty-object index, our job file", "{}", ours],
-    ["broken index, job file without session", "{ nope", { id: "task-x" }],
-    ["broken index, empty job file", "{ nope", {}],
-    ["broken index, job file with blank session", "{ nope", { id: "task-x", sessionId: "" }]
-  ]) {
-    const dir = seed(`elsewhere-4212-hollow-${label.replace(/\W+/g, "-")}`, indexText, jobFile);
-    const result = tryResume();
-    assert.equal(result.status, 1, label);
-    assert.match(result.stderr, refusal, label);
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-
-  // A hollow dir whose job file belongs to another session, or with no job files, is harmless.
-  const harmless = seed("elsewhere-4212-hollow-theirs", "{}", { id: "task-x", sessionId: "someone-else", jobClass: "task" });
-  assert.doesNotMatch(tryResume().stderr, refusal);
-  fs.rmSync(harmless, { recursive: true, force: true });
-  const empty = seed("elsewhere-4212-hollow-empty", "{}", null);
-  assert.doesNotMatch(tryResume().stderr, refusal);
-  fs.rmSync(empty, { recursive: true, force: true });
-});
-
-test("task --resume-last refuses to choose automatically when the scan is incomplete (#4212)", () => {
-  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-truncated");
-  seedSiblingWorkspace("elsewhere-4212-old", [
-    { ...base(cloneDir), id: "task-old", status: "completed", threadId: "thr_old", updatedAt: "2026-11-01T10:00:00.000Z" }
-  ]);
-  seedSiblingWorkspace("elsewhere-4212-older", [
-    { ...base(cloneDir), id: "task-older", status: "completed", threadId: "thr_older", updatedAt: "2026-10-01T10:00:00.000Z" }
-  ]);
-  const refused = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
-    cwd: repo,
-    env: { ...env, CODEX_COMPANION_SIBLING_SCAN_MAX_DIRS: "1" }
-  });
-  assert.equal(refused.status, 1);
-  assert.match(refused.stderr, /Resuming automatically is refused.*--resume-thread/);
-});
-
 test("task --resume-last still finds the thread after the session ends and is resumed", () => {
   // #1576: a host restart ends the Claude session (SessionEnd) and resumes it under
   // the same session id; the next --resume-last must still find the earlier thread.
@@ -1312,7 +1014,7 @@ test("task --resume-last still finds the thread after the session ends and is re
 
   const sessionEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-1576"
+    CODEX_COMPANION_SESSION_ID: "sess-current"
   };
   const endSession = (sessionId) =>
     run("node", [SESSION_HOOK, "SessionEnd"], {
@@ -1324,7 +1026,7 @@ test("task --resume-last still finds the thread after the session ends and is re
   const firstRun = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env: sessionEnv });
   assert.equal(firstRun.status, 0, firstRun.stderr);
 
-  const ended = endSession("sess-1576");
+  const ended = endSession("sess-current");
   assert.equal(ended.status, 0, ended.stderr);
 
   const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env: sessionEnv });
@@ -1335,11 +1037,11 @@ test("task --resume-last still finds the thread after the session ends and is re
 
   // The kept jobs stay scoped to their session: one that never ran a task still
   // gets the clear error instead of sess-current's thread.
-  const otherEnded = endSession("sess-1576-other");
+  const otherEnded = endSession("sess-other");
   assert.equal(otherEnded.status, 0, otherEnded.stderr);
   const missing = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
     cwd: repo,
-    env: { ...sessionEnv, CODEX_COMPANION_SESSION_ID: "sess-1576-other" }
+    env: { ...sessionEnv, CODEX_COMPANION_SESSION_ID: "sess-other" }
   });
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /No previous Codex task thread was found for this repository\./);
@@ -1522,7 +1224,7 @@ test("task --resume-last ignores running tasks from other Claude sessions", () =
 
   const env = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-cur-other-running"
+    CODEX_COMPANION_SESSION_ID: "sess-current"
   };
   const status = run("node", [SCRIPT, "status", "--json"], {
     cwd: repo,
