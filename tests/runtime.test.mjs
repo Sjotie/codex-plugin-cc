@@ -905,11 +905,11 @@ test("task --resume-last does not resume a task from another Claude session", ()
 
   const otherEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-other"
+    CODEX_COMPANION_SESSION_ID: "sess-isolation-other"
   };
   const currentEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-current"
+    CODEX_COMPANION_SESSION_ID: "sess-isolation-current"
   };
 
   const firstRun = run("node", [SCRIPT, "task", "initial task"], {
@@ -937,6 +937,41 @@ test("task --resume-last does not resume a task from another Claude session", ()
   assert.equal(fakeState.lastTurnStart.prompt, "initial task");
 });
 
+test("task --resume-last finds the thread of the same session in another workspace root (#4212)", () => {
+  // Each review round got a fresh workroot (own state dir) under one Claude session;
+  // --resume-last from the new root must find the newest thread of that session.
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  const makeRepo = () => {
+    const repo = makeTempDir();
+    initGitRepo(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+    run("git", ["add", "README.md"], { cwd: repo });
+    run("git", ["commit", "-m", "init"], { cwd: repo });
+    return repo;
+  };
+  const rootA = makeRepo();
+  const rootB = makeRepo();
+  const rootC = makeRepo();
+  const env = (sessionId) => ({ ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: sessionId });
+
+  const first = run("node", [SCRIPT, "task", "initial task"], { cwd: rootA, env: env("sess-4212-current") });
+  assert.equal(first.status, 0, first.stderr);
+
+  const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: rootB, env: env("sess-4212-current") });
+  assert.equal(resume.status, 0, resume.stderr);
+  assert.match(resume.stderr, /another workspace/i);
+  const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(fakeState.lastTurnStart.threadId, "thr_1");
+  assert.equal(fakeState.lastTurnStart.prompt, "follow up");
+
+  // Another session never borrows it.
+  const other = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: rootC, env: env("sess-4212-other") });
+  assert.equal(other.status, 1);
+  assert.match(other.stderr, /No previous Codex task thread was found for this repository\./);
+});
+
 test("task --resume-last still finds the thread after the session ends and is resumed", () => {
   // #1576: a host restart ends the Claude session (SessionEnd) and resumes it under
   // the same session id; the next --resume-last must still find the earlier thread.
@@ -951,7 +986,7 @@ test("task --resume-last still finds the thread after the session ends and is re
 
   const sessionEnv = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-current"
+    CODEX_COMPANION_SESSION_ID: "sess-1576"
   };
   const endSession = (sessionId) =>
     run("node", [SESSION_HOOK, "SessionEnd"], {
@@ -963,7 +998,7 @@ test("task --resume-last still finds the thread after the session ends and is re
   const firstRun = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env: sessionEnv });
   assert.equal(firstRun.status, 0, firstRun.stderr);
 
-  const ended = endSession("sess-current");
+  const ended = endSession("sess-1576");
   assert.equal(ended.status, 0, ended.stderr);
 
   const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env: sessionEnv });
@@ -974,11 +1009,11 @@ test("task --resume-last still finds the thread after the session ends and is re
 
   // The kept jobs stay scoped to their session: one that never ran a task still
   // gets the clear error instead of sess-current's thread.
-  const otherEnded = endSession("sess-other");
+  const otherEnded = endSession("sess-1576-other");
   assert.equal(otherEnded.status, 0, otherEnded.stderr);
   const missing = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
     cwd: repo,
-    env: { ...sessionEnv, CODEX_COMPANION_SESSION_ID: "sess-other" }
+    env: { ...sessionEnv, CODEX_COMPANION_SESSION_ID: "sess-1576-other" }
   });
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /No previous Codex task thread was found for this repository\./);
@@ -1161,7 +1196,7 @@ test("task --resume-last ignores running tasks from other Claude sessions", () =
 
   const env = {
     ...buildEnv(binDir),
-    CODEX_COMPANION_SESSION_ID: "sess-current"
+    CODEX_COMPANION_SESSION_ID: "sess-cur-other-running"
   };
   const status = run("node", [SCRIPT, "status", "--json"], {
     cwd: repo,

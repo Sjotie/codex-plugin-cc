@@ -32,6 +32,7 @@ import {
   generateJobId,
   getConfig,
   listJobs,
+  listSessionJobsInOtherWorkspaces,
   setConfig,
   updateJobRecord,
   upsertJob,
@@ -497,6 +498,17 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   }
 
   if (sessionId) {
+    // #4212: this session may have run its earlier tasks from another workspace
+    // root (own state dir each). Newest resumable thread of this session wins.
+    const sibling = findLatestResumableTaskJob(
+      sortJobsNewestFirst(listSessionJobsInOtherWorkspaces(workspaceRoot, sessionId))
+    );
+    if (sibling) {
+      process.stderr.write(
+        `Resuming Codex thread ${sibling.threadId} of task ${sibling.id} from another workspace root of this session (${sibling.workspaceRoot ?? "unknown"}).\n`
+      );
+      return { id: sibling.threadId };
+    }
     return null;
   }
 
