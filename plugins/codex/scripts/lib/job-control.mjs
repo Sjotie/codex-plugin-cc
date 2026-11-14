@@ -573,6 +573,14 @@ export function findJobLocations(jobId) {
 
 const THREAD_CANDIDATES_MAX_STATE_DIRS = 2000;
 const THREAD_CANDIDATES_MAX_LISTED = 10;
+const SAFE_THREAD_ID = /^[A-Za-z0-9._:-]{1,200}$/;
+
+// State files of other roots are data, not instructions: one line, no control characters, bounded.
+function plainField(value, fallback) {
+  if (typeof value !== "string" || !value) return fallback;
+  const clean = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return clean.length > 200 ? `${clean.slice(0, 200)}...` : clean || fallback;
+}
 
 // #4212: state lives per workspace root, so a --resume-last from a fresh root (a new workroot per
 // round) finds nothing even though this Claude session has finished tasks in its other roots.
@@ -622,7 +630,10 @@ export function listSessionThreadCandidates(cwd, sessionId) {
         continue;
       }
       const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
-      if (!index || !Array.isArray(index.jobs)) continue;
+      if (!index || !Array.isArray(index.jobs)) {
+        result.incomplete = true;
+        continue;
+      }
       for (const job of index.jobs) {
         if (job?.sessionId !== sessionId || job.jobClass !== "task" || typeof job.id !== "string") continue;
         const record = /^[A-Za-z0-9._-]+$/.test(job.id)
@@ -632,13 +643,17 @@ export function listSessionThreadCandidates(cwd, sessionId) {
           record && record.id === job.id && record.sessionId === sessionId && record.jobClass === job.jobClass
             ? applyEffective(job, { source: "json", record })
             : job;
-        if (effective.threadId && isTerminalJobStatus(effective.status)) result.candidates.push(effective);
+        if (typeof effective.threadId === "string" && SAFE_THREAD_ID.test(effective.threadId) && isTerminalJobStatus(effective.status)) {
+          result.candidates.push(effective);
+        }
       }
     }
   } catch {
     result.incomplete = true;
   }
-  result.candidates = sortJobsNewestFirst(result.candidates);
+  // One row per thread (newest run), so a thread resumed several times does not fill the list.
+  const seen = new Set();
+  result.candidates = sortJobsNewestFirst(result.candidates).filter((job) => !seen.has(job.threadId) && seen.add(job.threadId));
   return result;
 }
 
@@ -646,7 +661,8 @@ export function listSessionThreadCandidates(cwd, sessionId) {
 export function describeThreadCandidates({ candidates, incomplete }) {
   if (!candidates.length) return "";
   const lines = candidates.slice(0, THREAD_CANDIDATES_MAX_LISTED).map(
-    (job) => `  ${job.threadId}  ${job.workspaceRoot ?? "unknown workspace root"}  ${job.updatedAt ?? "unknown time"}  ${job.status}`
+    (job) =>
+      `  ${job.threadId}  ${plainField(job.workspaceRoot, "unknown workspace root")}  ${plainField(job.updatedAt, "unknown time")}  ${plainField(job.status, "unknown")}`
   );
   const more = candidates.length > THREAD_CANDIDATES_MAX_LISTED ? `\n  ... and ${candidates.length - THREAD_CANDIDATES_MAX_LISTED} more` : "";
   const cut = incomplete ? "\n(The look was cut short or hit unreadable state; the list may be incomplete.)" : "";
