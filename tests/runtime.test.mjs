@@ -24,7 +24,7 @@ import {
   settleCancellationAfterTermination
 } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
-import { normalizeRemoteUrl, sameRepositoryIdentity } from "../plugins/codex/scripts/lib/git.mjs";
+import { getRepoIdentity, normalizeRemoteUrl, sameRepositoryIdentity } from "../plugins/codex/scripts/lib/git.mjs";
 import {
   assignJobWorkerPid,
   resolveStateDir,
@@ -1106,6 +1106,23 @@ test("task --resume-last warns when it ignores a queued sibling older than an ho
   assert.match(result.stderr, /Resuming Codex thread thr_done/);
 });
 
+test("getRepoIdentity resolves a relative origin against its own repository (#4212)", () => {
+  const source = initCommittedRepo();
+  const cloneIn = (parent) => {
+    const dir = path.join(makeTempDir(), parent, "work");
+    fs.mkdirSync(path.dirname(dir), { recursive: true });
+    assert.equal(run("git", ["clone", "-q", source, dir]).status, 0);
+    assert.equal(run("git", ["remote", "set-url", "origin", "../mirror.git"], { cwd: dir }).status, 0);
+    return getRepoIdentity(dir);
+  };
+  const a = cloneIn("a");
+  const b = cloneIn("b");
+  assert.equal(a.status, "ok");
+  assert.equal(b.status, "ok");
+  assert.notEqual(a.origin, b.origin);
+  assert.equal(sameRepositoryIdentity(a, b), false);
+});
+
 test("repository identity: URL forms match, local paths and path case do not collide (#4212)", () => {
   assert.equal(normalizeRemoteUrl("https://GitHub.com/Org/Repo.git"), normalizeRemoteUrl("git@github.com:Org/Repo"));
   assert.equal(normalizeRemoteUrl("ssh://git@github.com/Org/Repo.git/"), normalizeRemoteUrl("https://github.com/Org/Repo"));
@@ -1198,6 +1215,34 @@ test("task --resume-last refuses past 50 sibling roots, an unreadable sibling in
   const many = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
   assert.equal(many.status, 1);
   assert.match(many.stderr, refusal);
+});
+
+test("task --resume-last sees a job that is only a file yet (start writes the file before the index) (#4212)", () => {
+  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-startwindow");
+  const refusal = /Resuming automatically is refused.*--resume-thread/;
+  const dir = path.join(path.dirname(resolveStateDir(makeTempDir())), "elsewhere-4212-startwindow");
+  fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
+  const writeIndex = (jobs) => fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, config: {}, jobs }));
+  const writeJobFile = (record) => fs.writeFileSync(path.join(dir, "jobs", `${record.id}.json`), JSON.stringify(record));
+  const resume = () => run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+
+  // Valid but empty index; the queued job is only a file: it blocks.
+  writeIndex([]);
+  writeJobFile({ ...base(cloneDir), id: "task-new", status: "queued", pid: null, updatedAt: new Date().toISOString() });
+  const blocked = resume();
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /Task task-new is still running/);
+
+  // A finished unindexed file of this session is a candidate like an indexed one.
+  writeJobFile({ ...base(cloneDir), id: "task-new", status: "completed", threadId: "thr_file_only", updatedAt: "2026-11-05T10:00:00.000Z" });
+  assert.match(resume().stderr, /Resuming Codex thread thr_file_only of task task-new/);
+
+  // A file that cannot say whose it is refuses; another session's file does not matter.
+  writeJobFile({ id: "task-anon", status: "running" });
+  assert.match(resume().stderr, refusal);
+  fs.rmSync(path.join(dir, "jobs", "task-anon.json"));
+  writeJobFile({ id: "task-theirs", sessionId: "someone-else", jobClass: "task", status: "running", pid: process.pid });
+  assert.doesNotMatch(resume().stderr, refusal);
 });
 
 test("task --resume-last refuses when a sibling's index is missing or hollow and its job files may be ours (#4212)", () => {

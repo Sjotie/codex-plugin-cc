@@ -577,6 +577,30 @@ const SIBLING_SCAN_MAX_STATE_DIRS = 20000;
 
 const SIBLING_JOB_FILES_MAX = 200;
 
+// Job files that the index does not list. Ours (valid session id, same id as the file name) count
+// as jobs; another valid session's are ignored; a file that cannot tell, too many files, or a
+// directory that cannot be listed make the answer incomplete.
+function unindexedSessionJobs(jobsDir, indexedJobs, sessionId, uid) {
+  const out = { jobs: [], incomplete: false };
+  try {
+    const indexed = new Set(indexedJobs.map((job) => job?.id));
+    const names = fs.readdirSync(jobsDir).filter((name) => name.endsWith(".json") && !indexed.has(name.slice(0, -5)));
+    if (names.length > SIBLING_JOB_FILES_MAX) return { jobs: [], incomplete: true };
+    for (const name of names) {
+      const record = readJobFileStrict(path.join(jobsDir, name), uid);
+      if (record === null || typeof record !== "object" || typeof record.sessionId !== "string" || !record.sessionId) {
+        out.incomplete = true;
+      } else if (record.sessionId === sessionId) {
+        if (record.id === name.slice(0, -5)) out.jobs.push(record);
+        else out.incomplete = true;
+      }
+    }
+  } catch {
+    out.incomplete = true;
+  }
+  return out;
+}
+
 // True when every job file in this jobs/ directory was read and none belongs to the session.
 function jobFilesRuleOutSession(jobsDir, sessionId, uid) {
   try {
@@ -653,6 +677,11 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
         if (!jobFilesRuleOutSession(path.join(stateDir, "jobs"), sessionId, uid)) result.incomplete = true;
         continue;
       }
+      // The start code writes the job file before the index entry: a job being started right
+      // now is only a file. Files not in the index that may be ours are read too.
+      const unindexed = unindexedSessionJobs(path.join(stateDir, "jobs"), index.jobs, sessionId, uid);
+      if (unindexed.incomplete) result.incomplete = true;
+      result.jobs.push(...unindexed.jobs);
       for (const job of index.jobs) {
         if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
         const record = /^[A-Za-z0-9._-]+$/.test(job.id)
