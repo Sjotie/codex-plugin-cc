@@ -972,6 +972,71 @@ test("task --resume-last finds the thread of the same session in another workspa
   assert.match(other.stderr, /No previous Codex task thread was found for this repository\./);
 });
 
+function seedSiblingWorkspace(slug, jobs, jobFiles = {}) {
+  // A state dir of another workspace root next to the one the tests use.
+  const dir = path.join(path.dirname(resolveStateDir(makeTempDir())), slug);
+  fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify({ version: 1, config: { stopReviewGate: false }, jobs }));
+  for (const [id, record] of Object.entries(jobFiles)) {
+    fs.writeFileSync(path.join(dir, "jobs", `${id}.json`), JSON.stringify(record));
+  }
+}
+
+test("task --resume-last takes the newest thread of the session across roots, own root included (#4212)", () => {
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  const makeRepo = () => {
+    const repo = makeTempDir();
+    initGitRepo(repo);
+    fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+    run("git", ["add", "README.md"], { cwd: repo });
+    run("git", ["commit", "-m", "init"], { cwd: repo });
+    return repo;
+  };
+  const rootA = makeRepo();
+  const rootB = makeRepo();
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: "sess-4212-newest" };
+  assert.equal(run("node", [SCRIPT, "task", "task in A"], { cwd: rootA, env }).status, 0);
+  assert.equal(run("node", [SCRIPT, "task", "task in B"], { cwd: rootB, env }).status, 0);
+  const threadB = JSON.parse(fs.readFileSync(statePath, "utf8")).lastTurnStart.threadId;
+
+  // Back in A, whose own task is older than B's.
+  const resume = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: rootA, env });
+  assert.equal(resume.status, 0, resume.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).lastTurnStart.threadId, threadB);
+});
+
+test("task --resume-last sees a sibling's finished task through its job file and refuses while one runs (#4212)", () => {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  const repo = makeTempDir();
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  const env = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: "sess-4212-sibling" };
+  const base = { jobClass: "task", sessionId: "sess-4212-sibling", workspaceRoot: "/elsewhere/root" };
+
+  // Stale index (running, dead pid, no thread); the job file says completed with a thread.
+  seedSiblingWorkspace(
+    "elsewhere-4212-stale",
+    [{ ...base, id: "task-stale", status: "running", pid: 2 ** 22 + 12345, updatedAt: "2026-11-01T10:00:00.000Z" }],
+    { "task-stale": { ...base, id: "task-stale", status: "completed", threadId: "thr_from_job_file", updatedAt: "2026-11-01T10:00:00.000Z" } }
+  );
+  const found = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+  assert.match(found.stderr, /Resuming Codex thread thr_from_job_file of task task-stale from another workspace root/);
+
+  // A live running task of the same session in a sibling blocks, like one in the own root.
+  seedSiblingWorkspace(
+    "elsewhere-4212-live",
+    [{ ...base, id: "task-live", status: "running", pid: process.pid, threadId: "thr_live", updatedAt: "2026-11-02T10:00:00.000Z" }]
+  );
+  const blocked = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /Task task-live is still running/);
+});
+
 test("task --resume-last still finds the thread after the session ends and is resumed", () => {
   // #1576: a host restart ends the Claude session (SessionEnd) and resumes it under
   // the same session id; the next --resume-last must still find the earlier thread.

@@ -434,7 +434,7 @@ function sameValue(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function applyEffective(job, effective) {
+export function applyEffective(job, effective) {
   if (effective.source !== "json") {
     return job;
   }
@@ -730,36 +730,6 @@ function readOnlyJobs(cwd, jobs) {
 
 export function listJobsReadOnly(cwd) {
   return readOnlyJobs(cwd, loadState(cwd).jobs);
-}
-
-// #4212: state lives per workspace root, but one Claude session can work from
-// several roots (a fresh workroot per review round). Read-only look at the other
-// workspaces' job records for this session, so --resume-last can find the thread
-// that a sibling root holds. Never locks or writes; unreadable state is skipped.
-export function listSessionJobsInOtherWorkspaces(cwd, sessionId) {
-  if (!sessionId) return [];
-  const ownDir = resolveStateDir(cwd);
-  const stateRoot = path.dirname(ownDir);
-  let entries;
-  try {
-    entries = fs.readdirSync(stateRoot, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const jobs = [];
-  for (const entry of entries) {
-    const dir = path.join(stateRoot, entry.name);
-    if (!entry.isDirectory() || dir === ownDir) continue;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(dir, STATE_FILE_NAME), "utf8"));
-      for (const job of Array.isArray(parsed.jobs) ? parsed.jobs : []) {
-        if (job?.sessionId === sessionId) jobs.push(job);
-      }
-    } catch {
-      // Not a workspace state dir, or mid-write: not a candidate.
-    }
-  }
-  return jobs;
 }
 
 export function listJobs(cwd) {

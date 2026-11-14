@@ -24,7 +24,7 @@ import {
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
-import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
+import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
   assignJobWorkerPid,
@@ -32,7 +32,6 @@ import {
   generateJobId,
   getConfig,
   listJobs,
-  listSessionJobsInOtherWorkspaces,
   setConfig,
   updateJobRecord,
   upsertJob,
@@ -44,6 +43,7 @@ import {
   describeRunningTaskBlock,
   enrichJob,
   findJobLocations,
+  listSessionJobsInOtherWorkspaces,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -492,23 +492,33 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
     throw new Error(describeRunningTaskBlock(activeTask.id, workspaceRoot));
   }
 
-  const trackedTask = findLatestResumableTaskJob(visibleJobs);
+  // #4212: with a session id, the session's earlier tasks may sit in another workspace
+  // root (own state dir each, e.g. a fresh workroot per review round). Own and sibling
+  // jobs compete as one list: a running sibling task blocks like an own one, and the
+  // newest resumable thread of the session wins.
+  const siblingJobs = sessionId
+    ? sortJobsNewestFirst(listSessionJobsInOtherWorkspaces(workspaceRoot, sessionId)).filter(
+        (job) => job.id !== options.excludeJobId
+      )
+    : [];
+  const activeSibling = siblingJobs.find(
+    (job) => job.jobClass === "task" && isWaitingJobStatus(job.status) && isProcessAlive(job.pid)
+  );
+  if (activeSibling) {
+    throw new Error(describeRunningTaskBlock(activeSibling.id, activeSibling.workspaceRoot ?? "its workspace root"));
+  }
+
+  const trackedTask = findLatestResumableTaskJob(sortJobsNewestFirst([...visibleJobs, ...siblingJobs]));
   if (trackedTask) {
+    if (siblingJobs.includes(trackedTask)) {
+      process.stderr.write(
+        `Resuming Codex thread ${trackedTask.threadId} of task ${trackedTask.id} from another workspace root of this session (${trackedTask.workspaceRoot ?? "unknown"}).\n`
+      );
+    }
     return { id: trackedTask.threadId };
   }
 
   if (sessionId) {
-    // #4212: this session may have run its earlier tasks from another workspace
-    // root (own state dir each). Newest resumable thread of this session wins.
-    const sibling = findLatestResumableTaskJob(
-      sortJobsNewestFirst(listSessionJobsInOtherWorkspaces(workspaceRoot, sessionId))
-    );
-    if (sibling) {
-      process.stderr.write(
-        `Resuming Codex thread ${sibling.threadId} of task ${sibling.id} from another workspace root of this session (${sibling.workspaceRoot ?? "unknown"}).\n`
-      );
-      return { id: sibling.threadId };
-    }
     return null;
   }
 

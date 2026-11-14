@@ -11,6 +11,8 @@ import {
   reconcileJobWorkerState,
   resolveJobFile,
   resolveStateRoots,
+  resolveStateDir,
+  applyEffective,
   updateJobRecord,
   upsertJob
 } from "./state.mjs";
@@ -567,6 +569,60 @@ export function findJobLocations(jobId) {
     return [];
   }
   return found;
+}
+
+// #4212: state lives per workspace root, but one Claude session can work from several roots
+// (a fresh workroot per review round). The job records of this session in the other roots'
+// state dirs, so --resume-last can find a thread a sibling root holds. Same bounds and checks
+// as findJobLocations (real directories of the current user, small regular files, at most
+// JOB_LOOKUP_MAX_STATE_DIRS directories, no locks, no writes). Each index entry is overlaid
+// with its job file, like the own root's listing does, so a lagging index does not hide a
+// finished task or its thread. Never throws.
+export function listSessionJobsInOtherWorkspaces(cwd, sessionId) {
+  const jobs = [];
+  if (!sessionId) return jobs;
+  try {
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    let ownDir = null;
+    try {
+      ownDir = fs.realpathSync(resolveStateDir(cwd));
+    } catch {
+      // No own state dir yet: nothing to exclude.
+    }
+    let looked = 0;
+    for (const root of resolveStateRoots()) {
+      let entries;
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (++looked > JOB_LOOKUP_MAX_STATE_DIRS) return jobs;
+        const stateDir = path.join(root, entry.name);
+        try {
+          const stateStat = fs.lstatSync(stateDir);
+          if (!stateStat.isDirectory() || (uid !== null && stateStat.uid !== uid)) continue;
+          if (ownDir !== null && fs.realpathSync(stateDir) === ownDir) continue;
+        } catch {
+          continue;
+        }
+        const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
+        for (const job of Array.isArray(index?.jobs) ? index.jobs : []) {
+          if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
+          const record = /^[A-Za-z0-9._-]+$/.test(job.id)
+            ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
+            : null;
+          const effective = record && record.id === job.id ? applyEffective(job, { source: "json", record }) : job;
+          jobs.push(effective);
+        }
+      }
+    }
+  } catch {
+    return jobs;
+  }
+  return jobs;
 }
 
 // Why a resume is refused while a task of this Claude session still runs, and how to go on.
