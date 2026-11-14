@@ -576,7 +576,7 @@ const THREAD_CANDIDATES_MAX_LISTED = 10;
 const SAFE_THREAD_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 
 // State files of other roots are data, not instructions: one line, no control characters, bounded.
-function plainField(value, fallback) {
+export function plainField(value, fallback) {
   if (typeof value !== "string" || !value) return fallback;
   const clean = value.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ").trim();
   return clean.length > 200 ? `${clean.slice(0, 200)}...` : clean || fallback;
@@ -633,7 +633,9 @@ export function listSessionThreadCandidates(cwd, sessionId) {
       if (!index || !Array.isArray(index.jobs)) {
         // A directory without a state file, or with a valid file that has no job list, is not ours
         // to read; a state file that exists but cannot be read is something we may have missed.
-        if (!index) {
+        if (index && typeof index === "object" && "jobs" in index) {
+          result.incomplete = true; // a job list that is not a list: damaged
+        } else if (!index) {
           try {
             fs.lstatSync(path.join(stateDir, "state.json"));
             result.incomplete = true;

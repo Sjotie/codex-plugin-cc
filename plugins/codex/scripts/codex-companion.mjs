@@ -45,6 +45,7 @@ import {
   describeThreadCandidates,
   findJobLocations,
   listSessionThreadCandidates,
+  plainField,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -429,10 +430,10 @@ function describeJobLookupScope(jobId, searchedRoot) {
   const hits = findJobLocations(jobId);
   const elsewhere = [...new Set(hits.map((hit) => canonical(hit.workspaceRoot)).filter((root) => root !== searched))];
   for (const root of elsewhere) {
-    text += `This job exists in workspace ${root}: run the command from there (cd into it, or pass --cwd).\n`;
+    text += `This job exists in workspace ${plainField(root, "(unknown)")}: run the command from there (cd into it, or pass --cwd).\n`;
   }
   if (elsewhere.length === 0 && hits.length > 0) {
-    text += `This job exists for the same workspace in another state directory (${hits[0].stateDir}): CLAUDE_PLUGIN_DATA differs from the session that started it.\n`;
+    text += `This job exists for the same workspace in another state directory (${plainField(hits[0].stateDir, "(unknown)")}): CLAUDE_PLUGIN_DATA differs from the session that started it.\n`;
   }
   return text;
 }

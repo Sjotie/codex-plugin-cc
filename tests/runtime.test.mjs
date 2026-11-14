@@ -2574,6 +2574,22 @@ test("wait names the searched workspace and the workspace that holds the job", (
   assert.ok(result.stderr.includes(`This job exists in workspace ${holder}: run the command from there`), result.stderr);
 });
 
+test("wait prints a foreign workspace root without control characters (#4212)", (t) => {
+  const holder = fs.realpathSync(makeTempDir());
+  const other = fs.realpathSync(makeTempDir());
+  writeJobFile(holder, "task-elsewhere-4212c1", {
+    id: "task-elsewhere-4212c1",
+    status: "running",
+    workspaceRoot: `${holder}\u009b2J\u009dEVIL`,
+    pid: process.pid
+  });
+  t.after(() => fs.rmSync(resolveStateDir(holder), { recursive: true, force: true }));
+  const result = run("node", [SCRIPT, "wait", "task-elsewhere-4212c1"], { cwd: other });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /This job exists in workspace /);
+  assert.doesNotMatch(result.stderr, /[\u0080-\u009f]/);
+});
+
 test("the job lookup ignores symlinked, FIFO and oversized job files and symlinked state directories", (t) => {
   const pluginData = makeTempDir();
   const previous = process.env.CLAUDE_PLUGIN_DATA;
