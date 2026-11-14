@@ -1114,6 +1114,16 @@ test("repository identity: URL forms match, local paths and path case do not col
   assert.notEqual(normalizeRemoteUrl(path.join(dir, "project")), normalizeRemoteUrl(path.join(dir, "project.git")));
   assert.notEqual(normalizeRemoteUrl(path.join(dir, "Client.git")), normalizeRemoteUrl(path.join(dir, "client.git")));
   assert.equal(normalizeRemoteUrl(`file://${path.join(dir, "x")}`), normalizeRemoteUrl(path.join(dir, "x")));
+  // A relative origin is relative to its own repository, not to this process.
+  const parent = makeTempDir();
+  assert.notEqual(
+    normalizeRemoteUrl("../mirror.git", path.join(parent, "a", "work")),
+    normalizeRemoteUrl("../mirror.git", path.join(parent, "b", "work"))
+  );
+  assert.equal(
+    normalizeRemoteUrl("../mirror.git", path.join(parent, "a", "work")),
+    normalizeRemoteUrl(path.join(parent, "a", "mirror.git"))
+  );
   const ok = (origin) => ({ status: "ok", commits: ["c1"], origin, commonDir: null });
   assert.equal(sameRepositoryIdentity(ok("a"), ok("a")), true);
   assert.equal(sameRepositoryIdentity(ok("a"), ok("b")), false);
@@ -1188,6 +1198,43 @@ test("task --resume-last refuses past 50 sibling roots, an unreadable sibling in
   const many = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
   assert.equal(many.status, 1);
   assert.match(many.stderr, refusal);
+});
+
+test("task --resume-last refuses when a sibling's index is missing or hollow and its job files may be ours (#4212)", () => {
+  const { repo, env } = siblingFixture("sess-4212-hollow");
+  const refusal = /Resuming automatically is refused.*--resume-thread/;
+  const stateRoot = path.dirname(resolveStateDir(makeTempDir()));
+  const seed = (name, indexText, jobFile) => {
+    const dir = path.join(stateRoot, name);
+    fs.mkdirSync(path.join(dir, "jobs"), { recursive: true });
+    if (indexText !== null) fs.writeFileSync(path.join(dir, "state.json"), indexText);
+    if (jobFile !== null) fs.writeFileSync(path.join(dir, "jobs", "task-x.json"), JSON.stringify(jobFile));
+    return dir;
+  };
+  const tryResume = () => run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+  const ours = { id: "task-x", sessionId: "sess-4212-hollow", jobClass: "task", status: "running" };
+
+  for (const [label, indexText, jobFile] of [
+    ["missing index, our job file", null, ours],
+    ["empty-object index, our job file", "{}", ours],
+    ["broken index, job file without session", "{ nope", { id: "task-x" }],
+    ["broken index, empty job file", "{ nope", {}],
+    ["broken index, job file with blank session", "{ nope", { id: "task-x", sessionId: "" }]
+  ]) {
+    const dir = seed(`elsewhere-4212-hollow-${label.replace(/\W+/g, "-")}`, indexText, jobFile);
+    const result = tryResume();
+    assert.equal(result.status, 1, label);
+    assert.match(result.stderr, refusal, label);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // A hollow dir whose job file belongs to another session, or with no job files, is harmless.
+  const harmless = seed("elsewhere-4212-hollow-theirs", "{}", { id: "task-x", sessionId: "someone-else", jobClass: "task" });
+  assert.doesNotMatch(tryResume().stderr, refusal);
+  fs.rmSync(harmless, { recursive: true, force: true });
+  const empty = seed("elsewhere-4212-hollow-empty", "{}", null);
+  assert.doesNotMatch(tryResume().stderr, refusal);
+  fs.rmSync(empty, { recursive: true, force: true });
 });
 
 test("task --resume-last refuses to choose automatically when the scan is incomplete (#4212)", () => {

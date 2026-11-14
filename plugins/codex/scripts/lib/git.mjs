@@ -95,7 +95,7 @@ const IDENTITY_GIT_TIMEOUT_MS = 5000;
 // URL forms (scheme://, user@host:path) compare by host (case-insensitive) and path (exact
 // case; a trailing .git and slashes do not matter on a hosted URL). A local path or file://
 // URL is a path: its real path, compared exactly, so /srv/x and /srv/x.git stay two repos.
-export function normalizeRemoteUrl(url) {
+export function normalizeRemoteUrl(url, baseDir = process.cwd()) {
   const value = String(url ?? "").trim();
   if (!value) return null;
   const hosted = (host, rest) => {
@@ -104,21 +104,23 @@ export function normalizeRemoteUrl(url) {
   };
   const scheme = /^([a-z][a-z0-9+.-]*):\/\/([^/]*)(\/.*)?$/i.exec(value);
   if (scheme) {
-    if (scheme[1].toLowerCase() === "file") return localPathKey(decodeURIComponent(scheme[3] ?? ""));
+    if (scheme[1].toLowerCase() === "file") return localPathKey(decodeURIComponent(scheme[3] ?? ""), baseDir);
     const host = scheme[2].replace(/^[^@]*@/, "");
     return hosted(host, scheme[3] ?? "");
   }
   const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(value);
   if (scp) return hosted(scp[1], scp[2]);
-  return localPathKey(value);
+  return localPathKey(value, baseDir);
 }
 
-function localPathKey(localPath) {
+// A relative local origin is relative to the repository it is configured in, not to this process.
+function localPathKey(localPath, baseDir) {
   if (!localPath) return null;
+  const absolute = path.resolve(baseDir, localPath);
   try {
-    return `path:${fs.realpathSync(localPath)}`;
+    return `path:${fs.realpathSync(absolute)}`;
   } catch {
-    return `path:${path.resolve(localPath)}`;
+    return `path:${absolute}`;
   }
 }
 
@@ -149,7 +151,7 @@ export function getRepoIdentity(cwd) {
     return {
       status: "ok",
       commits,
-      origin: origin.status === 0 && !origin.error ? normalizeRemoteUrl(origin.stdout) : null,
+      origin: origin.status === 0 && !origin.error ? normalizeRemoteUrl(origin.stdout, cwd) : null,
       commonDir
     };
   } catch {

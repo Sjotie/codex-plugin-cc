@@ -584,7 +584,8 @@ function jobFilesRuleOutSession(jobsDir, sessionId, uid) {
     if (names.length > SIBLING_JOB_FILES_MAX) return false;
     for (const name of names) {
       const record = readJobFileStrict(path.join(jobsDir, name), uid);
-      if (record === null || typeof record !== "object" || record.sessionId === sessionId) return false;
+      // Only a valid, different session id rules a file out; a file without one may be ours.
+      if (record === null || typeof record !== "object" || typeof record.sessionId !== "string" || !record.sessionId || record.sessionId === sessionId) return false;
     }
     return true;
   } catch {
@@ -642,18 +643,17 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
         const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
         if (!jobsStat.isDirectory() || (uid !== null && jobsStat.uid !== uid)) continue;
         if (ownDir !== null && fs.realpathSync(stateDir) === ownDir) continue;
-        fs.lstatSync(path.join(stateDir, "state.json"));
       } catch {
-        continue; // not a workspace state dir
+        continue; // not a workspace state dir (no real jobs/ directory of ours)
       }
       const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
-      if (index === null || typeof index !== "object") {
+      if (index === null || typeof index !== "object" || !Array.isArray(index.jobs)) {
         // The index cannot be read; the job files can still say whether this session has tasks
         // here. Unknown (too many or unreadable files) counts as incomplete.
         if (!jobFilesRuleOutSession(path.join(stateDir, "jobs"), sessionId, uid)) result.incomplete = true;
         continue;
       }
-      for (const job of Array.isArray(index.jobs) ? index.jobs : []) {
+      for (const job of index.jobs) {
         if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
         const record = /^[A-Za-z0-9._-]+$/.test(job.id)
           ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
