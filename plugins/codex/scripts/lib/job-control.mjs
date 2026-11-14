@@ -580,12 +580,12 @@ const SIBLING_SCAN_MAX_STATE_DIRS = 20000;
 // state dirs, so --resume-last can find a thread a sibling root holds. Same checks as
 // findJobLocations (real state and jobs/ directories of the current user, small regular
 // files, no locks, no writes); newest state dirs first, at most JOB_LOOKUP_MAX_STATE_DIRS of
-// them, and `truncated` says when older dirs were not looked at. Each index entry is overlaid
+// them, and `incomplete` says when dirs were left out or unreadable. Each index entry is overlaid
 // with its job file like the own root's listing does, so a lagging index does not hide a
 // finished task; a job file of another session or job is ignored. Never throws.
 export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
   const maxDirs = options.maxStateDirs ?? SIBLING_SCAN_MAX_STATE_DIRS;
-  const result = { jobs: [], truncated: false };
+  const result = { jobs: [], incomplete: false };
   if (!sessionId) return result;
   try {
     const uid = typeof process.getuid === "function" ? process.getuid() : null;
@@ -595,6 +595,9 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
     } catch {
       // No own state dir yet: nothing to exclude.
     }
+    // One lstat per directory entry orders them by recent activity; the rest of the checks
+    // run only for the newest maxDirs. Anything the scan cannot read or does not reach makes
+    // it incomplete, so the caller can refuse an automatic choice instead of guessing.
     const dirs = [];
     for (const root of resolveStateRoots()) {
       let entries;
@@ -607,22 +610,31 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
         if (!entry.isDirectory()) continue;
         const stateDir = path.join(root, entry.name);
         try {
-          const stateStat = fs.lstatSync(stateDir);
-          const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
-          if (!stateStat.isDirectory() || !jobsStat.isDirectory()) continue;
-          if (uid !== null && (stateStat.uid !== uid || jobsStat.uid !== uid)) continue;
-          if (ownDir !== null && fs.realpathSync(stateDir) === ownDir) continue;
-          dirs.push({ stateDir, mtimeMs: fs.lstatSync(path.join(stateDir, "state.json")).mtimeMs });
+          const stat = fs.lstatSync(stateDir);
+          if (!stat.isDirectory() || (uid !== null && stat.uid !== uid)) continue;
+          dirs.push({ stateDir, mtimeMs: stat.mtimeMs });
         } catch {
           continue;
         }
       }
     }
     dirs.sort((left, right) => right.mtimeMs - left.mtimeMs);
-    result.truncated = dirs.length > maxDirs;
+    result.incomplete = dirs.length > maxDirs;
     for (const { stateDir } of dirs.slice(0, maxDirs)) {
+      try {
+        const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
+        if (!jobsStat.isDirectory() || (uid !== null && jobsStat.uid !== uid)) continue;
+        if (ownDir !== null && fs.realpathSync(stateDir) === ownDir) continue;
+        fs.lstatSync(path.join(stateDir, "state.json"));
+      } catch {
+        continue; // not a workspace state dir
+      }
       const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
-      for (const job of Array.isArray(index?.jobs) ? index.jobs : []) {
+      if (!Array.isArray(index?.jobs)) {
+        result.incomplete = true; // a state dir we could not read may hold a running or newer task
+        continue;
+      }
+      for (const job of index.jobs) {
         if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
         const record = /^[A-Za-z0-9._-]+$/.test(job.id)
           ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
@@ -632,7 +644,7 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
       }
     }
   } catch {
-    return result;
+    result.incomplete = true;
   }
   return result;
 }

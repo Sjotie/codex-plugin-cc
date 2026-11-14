@@ -89,27 +89,55 @@ export function ensureGitRepository(cwd) {
 
 // #4212: what makes two checkouts the same repository. Shared root commits rule out unrelated
 // histories; forks share them too, so the same repository also needs the same `origin` fetch
-// URL (clones, workroots) or the same git common directory (worktrees). null when unknown
-// (not a repo, no commits, directory gone, git too slow).
+// URL (clones, workroots) or the same git common directory (worktrees).
 const IDENTITY_GIT_TIMEOUT_MS = 5000;
 
+// URL forms (scheme://, user@host:path) compare by host (case-insensitive) and path (exact
+// case; a trailing .git and slashes do not matter on a hosted URL). A local path or file://
+// URL is a path: its real path, compared exactly, so /srv/x and /srv/x.git stay two repos.
 export function normalizeRemoteUrl(url) {
-  let value = String(url ?? "").trim().toLowerCase();
+  const value = String(url ?? "").trim();
   if (!value) return null;
+  const hosted = (host, rest) => {
+    const pathPart = rest.replace(/\/+$/, "").replace(/\.git$/, "");
+    return host && pathPart ? `${host.toLowerCase()}/${pathPart.replace(/^\/+/, "")}` : null;
+  };
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\/([^/]*)(\/.*)?$/i.exec(value);
+  if (scheme) {
+    if (scheme[1].toLowerCase() === "file") return localPathKey(decodeURIComponent(scheme[3] ?? ""));
+    const host = scheme[2].replace(/^[^@]*@/, "");
+    return hosted(host, scheme[3] ?? "");
+  }
   const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(value);
-  value = scp ? `${scp[1]}/${scp[2]}` : value.replace(/^[a-z+.-]+:\/\//, "").replace(/^[^@/]+@/, "");
-  return value.replace(/\/+$/, "").replace(/\.git$/, "") || null;
+  if (scp) return hosted(scp[1], scp[2]);
+  return localPathKey(value);
 }
 
-export function getRepoIdentity(cwd) {
+function localPathKey(localPath) {
+  if (!localPath) return null;
   try {
-    const opts = { timeout: IDENTITY_GIT_TIMEOUT_MS };
+    return `path:${fs.realpathSync(localPath)}`;
+  } catch {
+    return `path:${path.resolve(localPath)}`;
+  }
+}
+
+// { status: "ok", commits, origin, commonDir }, { status: "unknown" } when git says there is no
+// usable repository (not a repo, no commits, directory gone), or { status: "failed" } when git
+// could not answer (timeout, spawn error): the caller must not treat that as "not the same".
+export function getRepoIdentity(cwd) {
+  const timeout = Number(process.env["CODEX_COMPANION_IDENTITY_GIT_TIMEOUT_MS"]) || IDENTITY_GIT_TIMEOUT_MS;
+  const opts = { timeout };
+  const failed = (result) => Boolean(result.error) && result.error.code !== "ENOENT";
+  try {
     const roots = git(cwd, ["rev-list", "--max-parents=0", "HEAD"], opts);
-    if (roots.status !== 0 || roots.error) return null;
+    if (failed(roots) || roots.signal) return { status: "failed" };
+    if (roots.error || roots.status !== 0) return { status: "unknown" };
     const commits = roots.stdout.split("\n").map((line) => line.trim()).filter(Boolean).sort();
-    if (!commits.length) return null;
+    if (!commits.length) return { status: "unknown" };
     const origin = git(cwd, ["config", "--get", "remote.origin.url"], opts);
     const common = git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], opts);
+    if (failed(origin) || failed(common) || origin.signal || common.signal) return { status: "failed" };
     let commonDir = null;
     if (common.status === 0 && !common.error) {
       try {
@@ -119,17 +147,18 @@ export function getRepoIdentity(cwd) {
       }
     }
     return {
+      status: "ok",
       commits,
-      origin: origin.status === 0 ? normalizeRemoteUrl(origin.stdout) : null,
+      origin: origin.status === 0 && !origin.error ? normalizeRemoteUrl(origin.stdout) : null,
       commonDir
     };
   } catch {
-    return null;
+    return { status: "failed" };
   }
 }
 
 export function sameRepositoryIdentity(left, right) {
-  if (!left || !right) return false;
+  if (left?.status !== "ok" || right?.status !== "ok") return false;
   if (!left.commits.some((commit) => right.commits.includes(commit))) return false;
   if (left.commonDir && left.commonDir === right.commonDir) return true;
   return Boolean(left.origin) && left.origin === right.origin;

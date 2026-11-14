@@ -24,6 +24,7 @@ import {
   settleCancellationAfterTermination
 } from "../plugins/codex/scripts/lib/job-control.mjs";
 import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
+import { normalizeRemoteUrl, sameRepositoryIdentity } from "../plugins/codex/scripts/lib/git.mjs";
 import {
   assignJobWorkerPid,
   resolveStateDir,
@@ -1103,6 +1104,84 @@ test("task --resume-last warns when it ignores a queued sibling older than an ho
   const result = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
   assert.match(result.stderr, /task-expired of this session .* queued without a worker for over an hour/);
   assert.match(result.stderr, /Resuming Codex thread thr_done/);
+});
+
+test("repository identity: URL forms match, local paths and path case do not collide (#4212)", () => {
+  assert.equal(normalizeRemoteUrl("https://GitHub.com/Org/Repo.git"), normalizeRemoteUrl("git@github.com:Org/Repo"));
+  assert.equal(normalizeRemoteUrl("ssh://git@github.com/Org/Repo.git/"), normalizeRemoteUrl("https://github.com/Org/Repo"));
+  assert.notEqual(normalizeRemoteUrl("https://github.com/Org/Repo"), normalizeRemoteUrl("https://github.com/org/repo"));
+  const dir = makeTempDir();
+  assert.notEqual(normalizeRemoteUrl(path.join(dir, "project")), normalizeRemoteUrl(path.join(dir, "project.git")));
+  assert.notEqual(normalizeRemoteUrl(path.join(dir, "Client.git")), normalizeRemoteUrl(path.join(dir, "client.git")));
+  assert.equal(normalizeRemoteUrl(`file://${path.join(dir, "x")}`), normalizeRemoteUrl(path.join(dir, "x")));
+  const ok = (origin) => ({ status: "ok", commits: ["c1"], origin, commonDir: null });
+  assert.equal(sameRepositoryIdentity(ok("a"), ok("a")), true);
+  assert.equal(sameRepositoryIdentity(ok("a"), ok("b")), false);
+  assert.equal(sameRepositoryIdentity(ok("a"), { status: "failed" }), false);
+});
+
+test("task --resume-last refuses when git cannot answer the identity check in time (#4212)", () => {
+  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-gittimeout");
+  const realGit = run("sh", ["-c", "command -v git"]).stdout.trim();
+  const shimDir = makeTempDir();
+  // Slow only the root-commit lookup, which is the identity check.
+  fs.writeFileSync(
+    path.join(shimDir, "git"),
+    `#!/bin/sh\nif [ "$1" = "rev-list" ] && [ "$2" = "--max-parents=0" ]; then sleep 3; fi\nexec "${realGit}" "$@"\n`,
+    { mode: 0o755 }
+  );
+  seedSiblingWorkspace("elsewhere-4212-gt", [
+    { ...base(cloneDir), id: "task-gt", status: "completed", threadId: "thr_gt", updatedAt: "2026-11-01T10:00:00.000Z" }
+  ]);
+  const slowEnv = {
+    ...env,
+    PATH: `${shimDir}${path.delimiter}${env.PATH}`,
+    CODEX_COMPANION_IDENTITY_GIT_TIMEOUT_MS: "300"
+  };
+  const refused = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env: slowEnv });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /Resuming automatically is refused.*--resume-thread/);
+});
+
+test("task --resume-last refuses past 50 sibling roots, an unreadable sibling index, and a cut scan even with an own thread (#4212)", () => {
+  const { repo, cloneDir, env, base } = siblingFixture("sess-4212-limits");
+  const refusal = /Resuming automatically is refused.*--resume-thread/;
+
+  // An own, resumable thread exists; a cut scan still refuses.
+  const first = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(first.status, 0, first.stderr);
+  seedSiblingWorkspace("elsewhere-4212-cut-a", [
+    { ...base(cloneDir), id: "task-cut-a", status: "completed", threadId: "thr_cut_a", updatedAt: "2026-11-01T10:00:00.000Z" }
+  ]);
+  seedSiblingWorkspace("elsewhere-4212-cut-b", [
+    { ...base(cloneDir), id: "task-cut-b", status: "completed", threadId: "thr_cut_b", updatedAt: "2026-11-02T10:00:00.000Z" }
+  ]);
+  const cut = run("node", [SCRIPT, "task", "--resume-last", "follow up"], {
+    cwd: repo,
+    env: { ...env, CODEX_COMPANION_SIBLING_SCAN_MAX_DIRS: "1" }
+  });
+  assert.equal(cut.status, 1);
+  assert.match(cut.stderr, refusal);
+
+  // An unreadable sibling index.
+  const stateRoot = path.dirname(resolveStateDir(makeTempDir()));
+  const broken = path.join(stateRoot, "elsewhere-4212-broken");
+  fs.mkdirSync(path.join(broken, "jobs"), { recursive: true });
+  fs.writeFileSync(path.join(broken, "state.json"), "{ not json");
+  const unreadable = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+  assert.equal(unreadable.status, 1);
+  assert.match(unreadable.stderr, refusal);
+  fs.rmSync(broken, { recursive: true, force: true });
+
+  // 51 distinct roots of this session.
+  for (let n = 0; n < 51; n += 1) {
+    seedSiblingWorkspace(`elsewhere-4212-many-${n}`, [
+      { ...base(`/gone/root-${n}`), id: `task-many-${n}`, status: "completed", threadId: `thr_many_${n}`, updatedAt: "2026-10-01T10:00:00.000Z" }
+    ]);
+  }
+  const many = run("node", [SCRIPT, "task", "--resume-last", "follow up"], { cwd: repo, env });
+  assert.equal(many.status, 1);
+  assert.match(many.stderr, refusal);
 });
 
 test("task --resume-last refuses to choose automatically when the scan is incomplete (#4212)", () => {

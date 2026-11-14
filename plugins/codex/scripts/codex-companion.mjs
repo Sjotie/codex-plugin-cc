@@ -512,12 +512,13 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const maxStateDirs = Number(process.env["CODEX_COMPANION_SIBLING_SCAN_MAX_DIRS"]) || undefined;
   const scan = sessionId
     ? listSessionJobsInOtherWorkspaces(workspaceRoot, sessionId, { maxStateDirs })
-    : { jobs: [], truncated: false };
-  let uncertain = scan.truncated;
+    : { jobs: [], incomplete: false };
+  let uncertain = scan.incomplete;
   const ownIdentity = scan.jobs.length ? getRepoIdentity(workspaceRoot) : null;
+  if (ownIdentity?.status === "failed") uncertain = true;
   const identityByRoot = new Map();
   const sameRepository = (job) => {
-    if (!ownIdentity || typeof job.workspaceRoot !== "string") return false;
+    if (ownIdentity?.status !== "ok" || typeof job.workspaceRoot !== "string") return false;
     if (!identityByRoot.has(job.workspaceRoot)) {
       if (identityByRoot.size >= SIBLING_IDENTITY_MAX_ROOTS) {
         uncertain = true;
@@ -525,7 +526,9 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
       }
       identityByRoot.set(job.workspaceRoot, getRepoIdentity(job.workspaceRoot));
     }
-    return sameRepositoryIdentity(ownIdentity, identityByRoot.get(job.workspaceRoot));
+    const identity = identityByRoot.get(job.workspaceRoot);
+    if (identity.status === "failed") uncertain = true;
+    return sameRepositoryIdentity(ownIdentity, identity);
   };
   const siblingJobs = sortJobsNewestFirst(scan.jobs).filter((job) => job.id !== options.excludeJobId && sameRepository(job));
   for (const job of siblingJobs) {
