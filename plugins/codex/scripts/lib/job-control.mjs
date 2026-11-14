@@ -639,11 +639,20 @@ export function listSessionThreadCandidates(cwd, sessionId) {
         const record = /^[A-Za-z0-9._-]+$/.test(job.id)
           ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
           : null;
-        const effective =
-          record && record.id === job.id && record.sessionId === sessionId && record.jobClass === job.jobClass
-            ? applyEffective(job, { source: "json", record })
-            : job;
-        if (typeof effective.threadId === "string" && SAFE_THREAD_ID.test(effective.threadId) && isTerminalJobStatus(effective.status)) {
+        const confirmed = record && record.id === job.id && record.sessionId === sessionId && record.jobClass === job.jobClass;
+        // Without a matching job file the index entry may be stale: not listed, and said so.
+        if (!confirmed) {
+          result.incomplete = true;
+          continue;
+        }
+        const effective = { ...applyEffective(job, { source: "json", record }), updatedAt: record.updatedAt ?? job.updatedAt };
+        // Only plain strings are shown; anything else in a state file is damage, not a candidate.
+        if (
+          typeof effective.threadId === "string" && SAFE_THREAD_ID.test(effective.threadId) &&
+          typeof effective.status === "string" && isTerminalJobStatus(effective.status) &&
+          typeof effective.updatedAt === "string" &&
+          (effective.workspaceRoot === undefined || typeof effective.workspaceRoot === "string")
+        ) {
           result.candidates.push(effective);
         }
       }
@@ -652,13 +661,25 @@ export function listSessionThreadCandidates(cwd, sessionId) {
     result.incomplete = true;
   }
   // One row per thread (newest run), so a thread resumed several times does not fill the list.
-  const seen = new Set();
-  result.candidates = sortJobsNewestFirst(result.candidates).filter((job) => !seen.has(job.threadId) && seen.add(job.threadId));
+  try {
+    const seen = new Set();
+    result.candidates = sortJobsNewestFirst(result.candidates).filter((job) => !seen.has(job.threadId) && seen.add(job.threadId));
+  } catch {
+    return { candidates: [], incomplete: true };
+  }
   return result;
 }
 
 // The lines the "No previous Codex task thread" error appends. Empty when there is nothing to show.
-export function describeThreadCandidates({ candidates, incomplete }) {
+export function describeThreadCandidates(found) {
+  try {
+    return describeThreadCandidatesUnguarded(found);
+  } catch {
+    return ""; // never replace the plain error
+  }
+}
+
+function describeThreadCandidatesUnguarded({ candidates, incomplete }) {
   if (!candidates.length) return "";
   const lines = candidates.slice(0, THREAD_CANDIDATES_MAX_LISTED).map(
     (job) =>
