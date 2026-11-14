@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (Factory #3280)
+## 1.0.7-sjotie.34 (fork, Factory #3280; 2026-11-14)
 
 - Messages only: what `wait` and resume do is unchanged. `wait <id>` that finds no job file now says
   which workspace it looked in (job state is kept per workspace root) and, when the
