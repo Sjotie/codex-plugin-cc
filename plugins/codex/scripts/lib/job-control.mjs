@@ -573,14 +573,15 @@ export function findJobLocations(jobId) {
 
 // #4212: state lives per workspace root, but one Claude session can work from several roots
 // (a fresh workroot per review round). The job records of this session in the other roots'
-// state dirs, so --resume-last can find a thread a sibling root holds. Same bounds and checks
-// as findJobLocations (real directories of the current user, small regular files, at most
-// JOB_LOOKUP_MAX_STATE_DIRS directories, no locks, no writes). Each index entry is overlaid
-// with its job file, like the own root's listing does, so a lagging index does not hide a
-// finished task or its thread. Never throws.
+// state dirs, so --resume-last can find a thread a sibling root holds. Same checks as
+// findJobLocations (real state and jobs/ directories of the current user, small regular
+// files, no locks, no writes); newest state dirs first, at most JOB_LOOKUP_MAX_STATE_DIRS of
+// them, and `truncated` says when older dirs were not looked at. Each index entry is overlaid
+// with its job file like the own root's listing does, so a lagging index does not hide a
+// finished task; a job file of another session or job is ignored. Never throws.
 export function listSessionJobsInOtherWorkspaces(cwd, sessionId) {
-  const jobs = [];
-  if (!sessionId) return jobs;
+  const result = { jobs: [], truncated: false };
+  if (!sessionId) return result;
   try {
     const uid = typeof process.getuid === "function" ? process.getuid() : null;
     let ownDir = null;
@@ -589,7 +590,7 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId) {
     } catch {
       // No own state dir yet: nothing to exclude.
     }
-    let looked = 0;
+    const dirs = [];
     for (const root of resolveStateRoots()) {
       let entries;
       try {
@@ -599,30 +600,36 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId) {
       }
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        if (++looked > JOB_LOOKUP_MAX_STATE_DIRS) return jobs;
         const stateDir = path.join(root, entry.name);
         try {
           const stateStat = fs.lstatSync(stateDir);
-          if (!stateStat.isDirectory() || (uid !== null && stateStat.uid !== uid)) continue;
+          const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
+          if (!stateStat.isDirectory() || !jobsStat.isDirectory()) continue;
+          if (uid !== null && (stateStat.uid !== uid || jobsStat.uid !== uid)) continue;
           if (ownDir !== null && fs.realpathSync(stateDir) === ownDir) continue;
+          dirs.push({ stateDir, mtimeMs: fs.lstatSync(path.join(stateDir, "state.json")).mtimeMs });
         } catch {
           continue;
         }
-        const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
-        for (const job of Array.isArray(index?.jobs) ? index.jobs : []) {
-          if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
-          const record = /^[A-Za-z0-9._-]+$/.test(job.id)
-            ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
-            : null;
-          const effective = record && record.id === job.id ? applyEffective(job, { source: "json", record }) : job;
-          jobs.push(effective);
-        }
+      }
+    }
+    dirs.sort((left, right) => right.mtimeMs - left.mtimeMs);
+    result.truncated = dirs.length > JOB_LOOKUP_MAX_STATE_DIRS;
+    for (const { stateDir } of dirs.slice(0, JOB_LOOKUP_MAX_STATE_DIRS)) {
+      const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
+      for (const job of Array.isArray(index?.jobs) ? index.jobs : []) {
+        if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
+        const record = /^[A-Za-z0-9._-]+$/.test(job.id)
+          ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
+          : null;
+        const sameJob = record && record.id === job.id && record.sessionId === sessionId && record.jobClass === job.jobClass;
+        result.jobs.push(sameJob ? applyEffective(job, { source: "json", record }) : job);
       }
     }
   } catch {
-    return jobs;
+    return result;
   }
-  return jobs;
+  return result;
 }
 
 // Why a resume is refused while a task of this Claude session still runs, and how to go on.

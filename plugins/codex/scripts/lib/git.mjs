@@ -87,6 +87,20 @@ export function ensureGitRepository(cwd) {
   return result.stdout.trim();
 }
 
+// #4212: what makes two checkouts the same repository: the root commits of HEAD (clones and
+// workroots of one repo share them; unrelated repos do not). null when unknown (not a repo,
+// no commits, directory gone).
+export function getRepoIdentity(cwd) {
+  try {
+    const result = git(cwd, ["rev-list", "--max-parents=0", "HEAD"]);
+    if (result.status !== 0) return null;
+    const roots = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean).sort();
+    return roots.length ? roots : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getRepoRoot(cwd) {
   return gitChecked(cwd, ["rev-parse", "--show-toplevel"]).stdout.trim();
 }

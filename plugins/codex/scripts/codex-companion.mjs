@@ -23,7 +23,7 @@ import {
   } from "./lib/codex.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
-import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
+import { collectReviewContext, ensureGitRepository, getRepoIdentity, resolveReviewTarget } from "./lib/git.mjs";
 import { binaryAvailable, isProcessAlive, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -482,6 +482,15 @@ async function waitForJobAndOutput(cwd, jobId, options = {}) {
   outputWaitOutcome(outcome, jobId, { ...options, workspaceRoot });
 }
 
+// A waiting task of a sibling root may be live: its worker pid is alive, or it is still being
+// started (queued, no pid yet; a start that never got a pid is ignored after an hour).
+const QUEUED_WITHOUT_PID_MAX_AGE_MS = 60 * 60 * 1000;
+function siblingTaskMayBeLive(job) {
+  if (job.pid) return isProcessAlive(job.pid);
+  const since = Date.parse(job.updatedAt ?? job.createdAt ?? "");
+  return Number.isFinite(since) && Date.now() - since < QUEUED_WITHOUT_PID_MAX_AGE_MS;
+}
+
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const sessionId = getCurrentClaudeSessionId();
@@ -493,16 +502,25 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   }
 
   // #4212: with a session id, the session's earlier tasks may sit in another workspace
-  // root (own state dir each, e.g. a fresh workroot per review round). Own and sibling
-  // jobs compete as one list: a running sibling task blocks like an own one, and the
-  // newest resumable thread of the session wins.
-  const siblingJobs = sessionId
-    ? sortJobsNewestFirst(listSessionJobsInOtherWorkspaces(workspaceRoot, sessionId)).filter(
-        (job) => job.id !== options.excludeJobId
-      )
-    : [];
+  // root (own state dir each, e.g. a fresh workroot per review round). Only roots of the
+  // same repository count (shared root commits; a root whose repository cannot be read
+  // is left out), so a session that moves between repos never resumes the other one's
+  // thread. Own and sibling jobs then compete as one list: a running sibling task blocks
+  // like an own one, and the newest resumable thread of the session wins.
+  const scan = sessionId
+    ? listSessionJobsInOtherWorkspaces(workspaceRoot, sessionId)
+    : { jobs: [], truncated: false };
+  const ownIdentity = scan.jobs.length ? getRepoIdentity(workspaceRoot) : null;
+  const identityByRoot = new Map();
+  const sameRepository = (job) => {
+    if (!ownIdentity || typeof job.workspaceRoot !== "string") return false;
+    if (!identityByRoot.has(job.workspaceRoot)) identityByRoot.set(job.workspaceRoot, getRepoIdentity(job.workspaceRoot));
+    const other = identityByRoot.get(job.workspaceRoot);
+    return Boolean(other) && other.some((commit) => ownIdentity.includes(commit));
+  };
+  const siblingJobs = sortJobsNewestFirst(scan.jobs).filter((job) => job.id !== options.excludeJobId && sameRepository(job));
   const activeSibling = siblingJobs.find(
-    (job) => job.jobClass === "task" && isWaitingJobStatus(job.status) && isProcessAlive(job.pid)
+    (job) => job.jobClass === "task" && isWaitingJobStatus(job.status) && siblingTaskMayBeLive(job)
   );
   if (activeSibling) {
     throw new Error(describeRunningTaskBlock(activeSibling.id, activeSibling.workspaceRoot ?? "its workspace root"));
@@ -515,10 +533,18 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
         `Resuming Codex thread ${trackedTask.threadId} of task ${trackedTask.id} from another workspace root of this session (${trackedTask.workspaceRoot ?? "unknown"}).\n`
       );
     }
+    if (scan.truncated) {
+      process.stderr.write("Note: more state directories exist than were scanned; an older or newer thread elsewhere may have been missed. Use --resume-thread <id> to be exact.\n");
+    }
     return { id: trackedTask.threadId };
   }
 
   if (sessionId) {
+    if (scan.truncated) {
+      throw new Error(
+        "No previous Codex task thread was found for this repository in the state directories scanned, but more exist than were scanned. Use --resume-thread <id>."
+      );
+    }
     return null;
   }
 
