@@ -19,6 +19,7 @@ import {
 import { createBrokerEndpoint, parseBrokerEndpoint } from "../plugins/codex/scripts/lib/broker-endpoint.mjs";
 import {
   describeRunningTaskBlock,
+  findJobLocations,
   resolveCancelableJob,
   settleCancellationAfterTermination
 } from "../plugins/codex/scripts/lib/job-control.mjs";
@@ -1057,8 +1058,9 @@ test("the blocked-resume message says why resume is blocked and how to continue"
 
   assert.match(message, /Task task-live-3280 is still running/);
   assert.match(message, /blocks resuming/);
-  assert.match(message, /wait task-live-3280 --timeout 480" \(run from \/work\/space\)/);
-  assert.match(message, /cancel task-live-3280/);
+  const companion = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs"';
+  assert.ok(message.includes(`\`${companion} wait task-live-3280 --timeout 480\` (run from /work/space)`), message);
+  assert.ok(message.includes(`\`${companion} cancel task-live-3280\``), message);
   assert.match(message, /\/codex:cancel task-live-3280/);
 });
 
@@ -2473,6 +2475,38 @@ test("wait names the searched workspace and the workspace that holds the job", (
   assert.match(result.stderr, /No job file appeared for "task-elsewhere-3280"/);
   assert.ok(result.stderr.includes(`Looked in workspace ${other};`), result.stderr);
   assert.ok(result.stderr.includes(`This job exists in workspace ${holder}: run the command from there`), result.stderr);
+});
+
+test("the job lookup ignores symlinked, FIFO and oversized job files and symlinked state directories", (t) => {
+  const pluginData = makeTempDir();
+  const previous = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = pluginData;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = previous;
+  });
+  const root = path.join(pluginData, "state");
+  const jobsOf = (name) => {
+    const dir = path.join(root, name, "jobs");
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const file = "task-strict-3280.json";
+  const payload = JSON.stringify({ id: "task-strict-3280", workspaceRoot: "/real/workspace" });
+  const outside = path.join(pluginData, "outside.json");
+  fs.writeFileSync(outside, payload);
+
+  fs.writeFileSync(path.join(jobsOf("plain"), file), payload);
+  fs.symlinkSync(outside, path.join(jobsOf("linked-file"), file));
+  fs.writeFileSync(path.join(jobsOf("big"), file), payload + " ".repeat(2 * 1024 * 1024));
+  fs.symlinkSync(path.join(root, "plain"), path.join(root, "linked-dir"));
+  const fifo = run("mkfifo", [path.join(jobsOf("fifo"), file)]);
+  assert.equal(fifo.status, 0, fifo.stderr);
+
+  const hits = findJobLocations("task-strict-3280");
+
+  assert.deepEqual(hits.map((hit) => path.basename(hit.stateDir)), ["plain"]);
+  assert.equal(hits[0].workspaceRoot, "/real/workspace");
 });
 
 test("wait for an unknown job names the searched workspace and does not point elsewhere", () => {

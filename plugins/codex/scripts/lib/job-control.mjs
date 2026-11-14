@@ -499,15 +499,45 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
   throw new Error("No active Codex jobs to cancel.");
 }
 
+// Bounds of the lookup below: it runs while an error is being reported and must stay quick.
+const JOB_LOOKUP_MAX_STATE_DIRS = 2000;
+const JOB_LOOKUP_MAX_FILE_BYTES = 1024 * 1024;
+
+// Reads a job file without following symlinks and without blocking on special files. Returns the
+// parsed JSON, or null when it is not a small regular file of the current user.
+function readJobFileStrict(file, uid) {
+  let fd;
+  try {
+    // O_NONBLOCK keeps open() from waiting on a FIFO; O_NOFOLLOW refuses a symlink as last component.
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > JOB_LOOKUP_MAX_FILE_BYTES || (uid !== null && stat.uid !== uid)) return null;
+    return JSON.parse(fs.readFileSync(fd, "utf8"));
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Nothing to release.
+      }
+    }
+  }
+}
+
 // Where state holds a job file for this id: { workspaceRoot, stateDir } per hit. Job state is kept
 // per workspace root, so a lookup from another working directory finds nothing even while the job
-// runs. Read-only (no lock); it only looks at state directories owned by the current user and
-// ignores anything it cannot read. Never throws: it runs while an error is being reported.
+// runs. Read-only (no lock). It looks only at real (non-symlink) state directories and a real
+// jobs/ directory owned by the current user, reads only small regular job files, looks at no more
+// than JOB_LOOKUP_MAX_STATE_DIRS directories, and ignores anything it cannot read. Never throws:
+// it runs while an error is being reported.
 export function findJobLocations(jobId) {
   const found = [];
   try {
     validateExactJobId(jobId);
     const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    let looked = 0;
     for (const root of resolveStateRoots()) {
       let entries;
       try {
@@ -516,16 +546,20 @@ export function findJobLocations(jobId) {
         continue;
       }
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
+        if (!entry.isDirectory()) continue; // a symlink to a directory is not a directory here
+        if (++looked > JOB_LOOKUP_MAX_STATE_DIRS) return found;
         const stateDir = path.join(root, entry.name);
         try {
-          if (uid !== null && fs.statSync(stateDir).uid !== uid) continue;
-          const job = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${jobId}.json`), "utf8"));
-          if (typeof job?.workspaceRoot === "string" && job.workspaceRoot) {
-            found.push({ workspaceRoot: job.workspaceRoot, stateDir });
-          }
+          const stateStat = fs.lstatSync(stateDir);
+          const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
+          if (!stateStat.isDirectory() || !jobsStat.isDirectory()) continue;
+          if (uid !== null && (stateStat.uid !== uid || jobsStat.uid !== uid)) continue;
         } catch {
-          // No such job file in this state directory, or not readable: not a candidate.
+          continue;
+        }
+        const job = readJobFileStrict(path.join(stateDir, "jobs", `${jobId}.json`), uid);
+        if (typeof job?.workspaceRoot === "string" && job.workspaceRoot) {
+          found.push({ workspaceRoot: job.workspaceRoot, stateDir });
         }
       }
     }
@@ -537,9 +571,11 @@ export function findJobLocations(jobId) {
 
 // Why a resume is refused while a task of this Claude session still runs, and how to go on.
 export function describeRunningTaskBlock(taskId, workspaceRoot) {
+  // "${CLAUDE_PLUGIN_ROOT}" stays literal: it is shell text for the reader to run, not a value to fill in here.
+  const companion = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs"';
   return (
     `Task ${taskId} is still running. A running task of this Claude session blocks resuming; ` +
-    `wait for it with "codex-companion.mjs wait ${taskId} --timeout 480" (run from ${workspaceRoot}) or stop it ` +
-    `with "codex-companion.mjs cancel ${taskId}" (/codex:cancel ${taskId}), then resume. /codex:status shows its progress.`
+    `wait for it with \`${companion} wait ${taskId} --timeout 480\` (run from ${workspaceRoot}) or stop it ` +
+    `with \`${companion} cancel ${taskId}\` (/codex:cancel ${taskId}), then resume. /codex:status shows its progress.`
   );
 }
