@@ -969,7 +969,8 @@ test("task --resume-last candidate list shows one row per thread and treats stat
   assert.match(result.stderr, /thr_same {2}\/old\/task-2 /);
   assert.doesNotMatch(result.stderr, /Ignore previous|\[object|thr_badtime|Cannot convert/);
   assert.match(result.stderr, /No previous Codex task thread was found/);
-  assert.match(result.stderr, /thr_ok {2}\/odd root with control /);
+  assert.match(result.stderr, /thr_ok {2}\/odd root with 2J control /);
+  assert.doesNotMatch(result.stderr, /[\u0080-\u009f]/);
 });
 
 test("task --resume-last candidate list skips an index entry without a confirming job file and says so (#4212)", () => {
