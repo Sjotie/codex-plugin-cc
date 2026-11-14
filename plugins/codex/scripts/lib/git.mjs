@@ -87,18 +87,52 @@ export function ensureGitRepository(cwd) {
   return result.stdout.trim();
 }
 
-// #4212: what makes two checkouts the same repository: the root commits of HEAD (clones and
-// workroots of one repo share them; unrelated repos do not). null when unknown (not a repo,
-// no commits, directory gone).
+// #4212: what makes two checkouts the same repository. Shared root commits rule out unrelated
+// histories; forks share them too, so the same repository also needs the same `origin` fetch
+// URL (clones, workroots) or the same git common directory (worktrees). null when unknown
+// (not a repo, no commits, directory gone, git too slow).
+const IDENTITY_GIT_TIMEOUT_MS = 5000;
+
+export function normalizeRemoteUrl(url) {
+  let value = String(url ?? "").trim().toLowerCase();
+  if (!value) return null;
+  const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(value);
+  value = scp ? `${scp[1]}/${scp[2]}` : value.replace(/^[a-z+.-]+:\/\//, "").replace(/^[^@/]+@/, "");
+  return value.replace(/\/+$/, "").replace(/\.git$/, "") || null;
+}
+
 export function getRepoIdentity(cwd) {
   try {
-    const result = git(cwd, ["rev-list", "--max-parents=0", "HEAD"]);
-    if (result.status !== 0) return null;
-    const roots = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean).sort();
-    return roots.length ? roots : null;
+    const opts = { timeout: IDENTITY_GIT_TIMEOUT_MS };
+    const roots = git(cwd, ["rev-list", "--max-parents=0", "HEAD"], opts);
+    if (roots.status !== 0 || roots.error) return null;
+    const commits = roots.stdout.split("\n").map((line) => line.trim()).filter(Boolean).sort();
+    if (!commits.length) return null;
+    const origin = git(cwd, ["config", "--get", "remote.origin.url"], opts);
+    const common = git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], opts);
+    let commonDir = null;
+    if (common.status === 0 && !common.error) {
+      try {
+        commonDir = fs.realpathSync(common.stdout.trim());
+      } catch {
+        commonDir = null;
+      }
+    }
+    return {
+      commits,
+      origin: origin.status === 0 ? normalizeRemoteUrl(origin.stdout) : null,
+      commonDir
+    };
   } catch {
     return null;
   }
+}
+
+export function sameRepositoryIdentity(left, right) {
+  if (!left || !right) return false;
+  if (!left.commits.some((commit) => right.commits.includes(commit))) return false;
+  if (left.commonDir && left.commonDir === right.commonDir) return true;
+  return Boolean(left.origin) && left.origin === right.origin;
 }
 
 export function getRepoRoot(cwd) {

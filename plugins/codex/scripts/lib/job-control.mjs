@@ -571,6 +571,10 @@ export function findJobLocations(jobId) {
   return found;
 }
 
+// Looser than the single-job lookup: this scan decides which thread to resume, and an
+// incomplete scan refuses the automatic choice, so it must cover a long-lived host's dirs.
+const SIBLING_SCAN_MAX_STATE_DIRS = 20000;
+
 // #4212: state lives per workspace root, but one Claude session can work from several roots
 // (a fresh workroot per review round). The job records of this session in the other roots'
 // state dirs, so --resume-last can find a thread a sibling root holds. Same checks as
@@ -579,7 +583,8 @@ export function findJobLocations(jobId) {
 // them, and `truncated` says when older dirs were not looked at. Each index entry is overlaid
 // with its job file like the own root's listing does, so a lagging index does not hide a
 // finished task; a job file of another session or job is ignored. Never throws.
-export function listSessionJobsInOtherWorkspaces(cwd, sessionId) {
+export function listSessionJobsInOtherWorkspaces(cwd, sessionId, options = {}) {
+  const maxDirs = options.maxStateDirs ?? SIBLING_SCAN_MAX_STATE_DIRS;
   const result = { jobs: [], truncated: false };
   if (!sessionId) return result;
   try {
@@ -614,8 +619,8 @@ export function listSessionJobsInOtherWorkspaces(cwd, sessionId) {
       }
     }
     dirs.sort((left, right) => right.mtimeMs - left.mtimeMs);
-    result.truncated = dirs.length > JOB_LOOKUP_MAX_STATE_DIRS;
-    for (const { stateDir } of dirs.slice(0, JOB_LOOKUP_MAX_STATE_DIRS)) {
+    result.truncated = dirs.length > maxDirs;
+    for (const { stateDir } of dirs.slice(0, maxDirs)) {
       const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
       for (const job of Array.isArray(index?.jobs) ? index.jobs : []) {
         if (job?.sessionId !== sessionId || typeof job.id !== "string") continue;
