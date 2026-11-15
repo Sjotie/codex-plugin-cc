@@ -45,7 +45,6 @@ import {
   describeThreadCandidates,
   findJobLocations,
   listSessionThreadCandidates,
-  plainField,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -55,7 +54,8 @@ import {
 } from "./lib/job-control.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
 import { sqliteRuntime } from "./lib/fenced-lock.mjs";
-import { escapeForTerminal, runStateLockCommand } from "./lib/state-lock-cli.mjs";
+import { runStateLockCommand } from "./lib/state-lock-cli.mjs";
+import { MultilineError, reportError, stderrf } from "./lib/stderr-writer.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -417,7 +417,7 @@ function resolveWaitTimeoutMs(options) {
 
 // Job state is per workspace root: say where the lookup ran and where the job is, so an empty
 // lookup is not read as a job that does not exist.
-function describeJobLookupScope(jobId, searchedRoot) {
+function reportJobLookupScope(jobId, searchedRoot) {
   const canonical = (root) => {
     try {
       return fs.realpathSync(root);
@@ -426,16 +426,15 @@ function describeJobLookupScope(jobId, searchedRoot) {
     }
   };
   const searched = searchedRoot ? canonical(searchedRoot) : null;
-  let text = `Looked in workspace ${searchedRoot ?? "(unknown)"}; job state is kept per workspace root.\n`;
+  stderrf`Looked in workspace ${searchedRoot ?? "(unknown)"}; job state is kept per workspace root.\n`;
   const hits = findJobLocations(jobId);
   const elsewhere = [...new Set(hits.map((hit) => canonical(hit.workspaceRoot)).filter((root) => root !== searched))];
   for (const root of elsewhere) {
-    text += `This job exists in workspace ${plainField(root, "(unknown)")}: run the command from there (cd into it, or pass --cwd).\n`;
+    stderrf`This job exists in workspace ${root ?? "(unknown)"}: run the command from there (cd into it, or pass --cwd).\n`;
   }
   if (elsewhere.length === 0 && hits.length > 0) {
-    text += `This job exists for the same workspace in another state directory (${plainField(hits[0].stateDir, "(unknown)")}): CLAUDE_PLUGIN_DATA differs from the session that started it.\n`;
+    stderrf`This job exists for the same workspace in another state directory (${hits[0].stateDir ?? "(unknown)"}): CLAUDE_PLUGIN_DATA differs from the session that started it.\n`;
   }
-  return text;
 }
 
 function outputWaitOutcome(outcome, jobId, options = {}) {
@@ -458,20 +457,20 @@ function outputWaitOutcome(outcome, jobId, options = {}) {
     if (options.json) {
       outputResult(payload, true);
     } else {
-      process.stderr.write(`Timed out waiting for ${jobId} to reach a terminal status.\n`);
+      stderrf`Timed out waiting for ${jobId} to reach a terminal status.\n`;
     }
     process.exitCode = WAIT_EXIT_CODES.timeout;
     return;
   }
 
   if (outcome.outcome === "invalid-status") {
-    process.stderr.write(escapeForTerminal(`Job ${jobId} has unsupported non-terminal status "${outcome.job?.status ?? "unknown"}".\n`));
+    stderrf`Job ${jobId} has unsupported non-terminal status "${outcome.job?.status ?? "unknown"}".\n`;
   } else if (outcome.outcome === "unreadable") {
     const detail = outcome.error instanceof Error ? `: ${outcome.error.message}` : "";
-    process.stderr.write(escapeForTerminal(`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`));
+    stderrf`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`;
   } else {
-    process.stderr.write(`No job file appeared for "${jobId}" within the registration grace period.\n`);
-    process.stderr.write(describeJobLookupScope(jobId, options.workspaceRoot));
+    stderrf`No job file appeared for "${jobId}" within the registration grace period.\n`;
+    reportJobLookupScope(jobId, options.workspaceRoot);
   }
   process.exitCode = WAIT_EXIT_CODES.invalid;
 }
@@ -635,7 +634,7 @@ async function executeTaskRun(request) {
     if (!latestThread) {
       const sessionId = getCurrentClaudeSessionId();
       const others = sessionId ? describeThreadCandidates(listSessionThreadCandidates(workspaceRoot, sessionId)) : "";
-      throw new Error(`No previous Codex task thread was found for this repository.${others}`);
+      throw new MultilineError(`No previous Codex task thread was found for this repository.${others}`.split("\n"));
     }
     resumeThreadId = latestThread.id;
   }
@@ -1437,7 +1436,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${escapeForTerminal(message)}\n`);
+  reportError(error);
   process.exitCode = 1;
 });

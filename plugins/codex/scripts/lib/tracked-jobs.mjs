@@ -1,3 +1,4 @@
+import { stderrf } from "./stderr-writer.mjs";
 import fs from "node:fs";
 import process from "node:process";
 
@@ -180,7 +181,7 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
     const event = normalizeProgressEvent(eventOrMessage);
     const stderrMessage = event.stderrMessage ?? event.message;
     if (stderr && stderrMessage) {
-      process.stderr.write(`[codex] ${stderrMessage}\n`);
+      stderrf`[codex] ${stderrMessage}\n`;
     }
     appendLogLine(logFile, event.message);
     appendLogBlock(logFile, event.logTitle, event.logBody);

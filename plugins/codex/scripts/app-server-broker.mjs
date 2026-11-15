@@ -2,6 +2,7 @@
 
 /** @typedef {import("./lib/app-server-protocol").BrokerInitializeResponse} BrokerInitializeResponse */
 
+import { stderrf } from "./lib/stderr-writer.mjs";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -314,7 +315,7 @@ async function main() {
       shutdown(server).then(
         () => process.exit(0),
         (error) => {
-          process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+          stderrf`${error instanceof Error ? error.message : String(error)}\n`;
           process.exit(1);
         }
       );
@@ -486,7 +487,7 @@ async function main() {
   // spawns a fresh, working broker. (Upstream PR #453, reapplied on PR #491.)
   appClient.exitPromise.then(() => {
     if (!shutdownPromise) {
-      process.stderr.write(`Codex app-server child closed: ${appClient.exitError?.message ?? "exit 0"}\n`);
+      stderrf`Codex app-server child closed: ${appClient.exitError?.message ?? "exit 0"}\n`;
       shutdown(server).finally(() => process.exit(1));
     }
   });
@@ -495,6 +496,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  stderrf`${error instanceof Error ? error.message : String(error)}\n`;
   process.exit(1);
 });

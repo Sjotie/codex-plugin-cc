@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { stderrf } from "./lib/stderr-writer.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -435,6 +436,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  stderrf`${error instanceof Error ? error.message : String(error)}\n`;
   process.exit(1);
 });

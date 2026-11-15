@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { stderrf } from "./lib/stderr-writer.mjs";
 import fs from "node:fs";
 import process from "node:process";
 import path from "node:path";
@@ -34,7 +35,7 @@ function logNote(message) {
   if (!message) {
     return;
   }
-  process.stderr.write(`${message}\n`);
+  stderrf`${message}\n`;
 }
 
 function filterJobsForCurrentSession(jobs, input = {}) {
@@ -194,6 +195,6 @@ try {
   main();
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
+  stderrf`${message}\n`;
   process.exitCode = 1;
 }

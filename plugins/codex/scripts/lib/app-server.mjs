@@ -8,6 +8,7 @@
  * @typedef {import("./app-server-protocol").CodexAppServerClientOptions} CodexAppServerClientOptions
  * @typedef {import("./app-server-protocol").InitializeCapabilities} InitializeCapabilities
  */
+import { stderrf } from "./stderr-writer.mjs";
 import fs from "node:fs";
 import net from "node:net";
 import process from "node:process";
@@ -516,7 +517,7 @@ export class CodexAppServerClient {
           // Never reuse a broker under another app policy: run this request on
           // a direct child instead, and say why on stderr.
           await client.close().catch(() => {});
-          process.stderr.write(`${error.message}\n`);
+          stderrf`${error.message}\n`;
           return CodexAppServerClient.connect(cwd, { ...options, brokerEndpoint: null, disableBroker: true });
         }
         throw markBrokerTransportError(error);

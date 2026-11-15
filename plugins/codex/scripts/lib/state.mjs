@@ -1,3 +1,4 @@
+import { stderrf } from "./stderr-writer.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -506,7 +507,7 @@ function saveStateLocked(cwd, state, ctx) {
       removeJobFile(resolveJobFile(cwd, job.id));
       removeFileIfExists(job.logFile);
     } catch (error) {
-      process.stderr.write(`state: committed; cleanup failed for job ${job.id} (${error?.code ?? error?.message})\n`);
+      stderrf`state: committed; cleanup failed for job ${job.id} (${error?.code ?? error?.message})\n`;
     }
   }
   return nextState;
@@ -746,7 +747,7 @@ export function listJobs(cwd) {
     }
     // Reading never depends on the lock: show the effective status of every
     // job without writing, and say why nothing was reconciled.
-    process.stderr.write(`state: job list not reconciled (${error.message})\n`);
+    stderrf`state: job list not reconciled (${error.message})\n`;
     return readOnlyJobs(cwd, state.jobs);
   }
 }
