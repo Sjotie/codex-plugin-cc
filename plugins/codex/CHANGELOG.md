@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.7-sjotie.35 (fork, Factory #4212; 2026-11-15)
+
+- Fix: `task --resume-last` from a new workroot of the same Claude session no longer fails silently
+  with "No previous Codex task thread": nothing is chosen automatically across workspace roots, but
+  the error now lists this session's finished task threads in its other roots (thread id, root,
+  time, status; read-only, bounded) and says to use `--resume-thread <id>`.
+- All text read from other roots' state (paths, fields) is treated as untrusted on every stderr and
+  state-lock output route: one stderr writer (`lib/stderr-writer.mjs`) escapes control, format and
+  line-separator characters, line feeds included. `fenced-lock.mjs` stays byte-equal to the core copy.
+
 ## 1.0.7-sjotie.34 (fork, Factory #3280; 2026-11-14)
 
 - Messages only: what `wait` and resume do is unchanged. `wait <id>` that finds no job file now says
