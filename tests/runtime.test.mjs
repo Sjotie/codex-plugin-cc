@@ -2598,6 +2598,28 @@ test("state-lock report output escapes C1 controls from foreign state and stays 
   assert.deepEqual(JSON.parse(text), value);
 });
 
+test("terminal escaping covers code points above U+FFFF and plain error text (#4212)", async () => {
+  const { escapeForTerminal, serializeForTerminal } = await import("../plugins/codex/scripts/lib/state-lock-cli.mjs");
+  const value = { name: "a\u{E0001}b\u{1D173}c" };
+  const text = serializeForTerminal(value);
+  assert.doesNotMatch(text, /[\u{E0000}-\u{E007F}\u{1D173}]/u);
+  assert.match(text, /\\udb40\\udc01/);
+  assert.deepEqual(JSON.parse(text), value);
+  const message = escapeForTerminal("ENOENT: no such file '/r/\u001b[2J\u009b2J\u{E0001}x'\nsecond line");
+  assert.doesNotMatch(message, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]|[\u{E0000}-\u{E007F}]/u);
+  assert.match(message, /\nsecond line$/);
+});
+
+test("a filesystem error naming a control-character path reaches stderr escaped (#4212)", (t) => {
+  const dir = makeTempDir();
+  const bad = path.join(dir, "a\u001b[2Jb\u009bc");
+  fs.writeFileSync(bad, "x");
+  const result = run("node", [SCRIPT, "task", "--cwd", path.join(bad, "child"), "--resume-last", "hello"], { cwd: dir });
+  assert.match(result.stderr, /ENOTDIR/);
+  assert.match(result.stderr, /\\u001b/);
+  assert.doesNotMatch(result.stderr, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+});
+
 test("the job lookup ignores symlinked, FIFO and oversized job files and symlinked state directories", (t) => {
   const pluginData = makeTempDir();
   const previous = process.env.CLAUDE_PLUGIN_DATA;

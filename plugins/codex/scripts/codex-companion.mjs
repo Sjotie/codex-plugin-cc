@@ -55,7 +55,7 @@ import {
 } from "./lib/job-control.mjs";
 import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
 import { sqliteRuntime } from "./lib/fenced-lock.mjs";
-import { runStateLockCommand } from "./lib/state-lock-cli.mjs";
+import { escapeForTerminal, runStateLockCommand } from "./lib/state-lock-cli.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -465,10 +465,10 @@ function outputWaitOutcome(outcome, jobId, options = {}) {
   }
 
   if (outcome.outcome === "invalid-status") {
-    process.stderr.write(`Job ${jobId} has unsupported non-terminal status "${outcome.job?.status ?? "unknown"}".\n`);
+    process.stderr.write(escapeForTerminal(`Job ${jobId} has unsupported non-terminal status "${outcome.job?.status ?? "unknown"}".\n`));
   } else if (outcome.outcome === "unreadable") {
     const detail = outcome.error instanceof Error ? `: ${outcome.error.message}` : "";
-    process.stderr.write(`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`);
+    process.stderr.write(escapeForTerminal(`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`));
   } else {
     process.stderr.write(`No job file appeared for "${jobId}" within the registration grace period.\n`);
     process.stderr.write(describeJobLookupScope(jobId, options.workspaceRoot));
@@ -1438,6 +1438,6 @@ async function main() {
 
 main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
+  process.stderr.write(`${escapeForTerminal(message)}\n`);
   process.exitCode = 1;
 });

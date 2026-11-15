@@ -81,11 +81,29 @@ only when no directory was busy or unknown.`
 // The report carries names read from other roots' state files. JSON.stringify escapes C0 controls
 // but leaves C1 controls (such as U+009B, a terminal escape introducer) and format characters
 // literal: escape them too, so the output is data on any terminal and still valid JSON.
+const TERMINAL_UNSAFE = /[\p{Cc}\p{Cf}\u2028\u2029]/gu;
+
+function escapeChar(ch) {
+  const cp = ch.codePointAt(0);
+  const unit = (n) => `\\u${n.toString(16).padStart(4, "0")}`;
+  if (cp <= 0xffff) return unit(cp);
+  // JSON and JS escapes are UTF-16 units: a code point above U+FFFF is a surrogate pair.
+  const v = cp - 0x10000;
+  return unit(0xd800 + (v >> 10)) + unit(0xdc00 + (v & 0x3ff));
+}
+
+// Plain text that may contain names from other roots (error messages carry paths): same escaping,
+// newline kept.
+export function escapeForTerminal(text) {
+  return String(text).replace(TERMINAL_UNSAFE, (ch) => (ch === "\n" ? ch : escapeChar(ch)));
+}
+
 export function serializeForTerminal(value) {
-  return JSON.stringify(value, null, 2).replace(
-    /[\p{Cc}\p{Cf}\u2028\u2029]/gu,
-    (ch) => (ch === "\n" ? ch : `\\u${ch.codePointAt(0).toString(16).padStart(4, "0")}`)
-  );
+  return escapeForTerminal(JSON.stringify(value, null, 2));
+}
+
+function err(text) {
+  process.stderr.write(escapeForTerminal(text));
 }
 
 function out(value) {
@@ -130,7 +148,7 @@ export async function runStateLockCommand(argv) {
     return 0;
   }
   if (!HELP[command]) {
-    process.stderr.write(`Unknown state-lock command: ${command}\n${HELP.overview}\n`);
+    err(`Unknown state-lock command: ${command}\n${HELP.overview}\n`);
     return 1;
   }
   if (rest.includes("--help") || rest.includes("-h")) {
@@ -166,7 +184,7 @@ export async function runStateLockCommand(argv) {
       }
       const [{ lock }] = targets({ cwd: options.cwd });
       const declaration = options["declare-cross-namespace"] ?? null;
-      if (declaration) process.stderr.write(`state-lock adopt-legacy: declaration outside the init PID namespace: ${declaration}\n`);
+      if (declaration) err(`state-lock adopt-legacy: declaration outside the init PID namespace: ${declaration}\n`);
       try {
         const result = lock.adoptLegacy({
           expectDev: options["expect-dev"],
@@ -176,7 +194,7 @@ export async function runStateLockCommand(argv) {
         });
         out(result);
         if (!result.ok) {
-          process.stderr.write(`state-lock adopt-legacy: ${result.code}; see ${result.logPath}\n`);
+          err(`state-lock adopt-legacy: ${result.code}; see ${result.logPath}\n`);
         }
         return result.ok ? 0 : 1;
       } catch (error) {
@@ -187,7 +205,7 @@ export async function runStateLockCommand(argv) {
     case "seal": {
       const declaration = options["declare-cross-namespace"];
       if (!declaration) throw new Error("seal needs --declare-cross-namespace \"<who, which namespaces, how drained>\"");
-      process.stderr.write(`state-lock seal: declaration: ${declaration}\n`);
+      err(`state-lock seal: declaration: ${declaration}\n`);
       const [{ lock }] = targets({ cwd: options.cwd });
       const result = lock.seal({ domainDeclaration: declaration });
       out(result);
