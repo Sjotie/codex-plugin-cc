@@ -78,8 +78,18 @@ version can write again. Run it with the code of the new version. Exit code 0
 only when no directory was busy or unknown.`
 };
 
+// The report carries names read from other roots' state files. JSON.stringify escapes C0 controls
+// but leaves C1 controls (such as U+009B, a terminal escape introducer) and format characters
+// literal: escape them too, so the output is data on any terminal and still valid JSON.
+export function serializeForTerminal(value) {
+  return JSON.stringify(value, null, 2).replace(
+    /[\p{Cc}\p{Cf}\u2028\u2029]/gu,
+    (ch) => (ch === "\n" ? ch : `\\u${ch.codePointAt(0).toString(16).padStart(4, "0")}`)
+  );
+}
+
 function out(value) {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  process.stdout.write(`${serializeForTerminal(value)}\n`);
 }
 
 function stateDirs() {

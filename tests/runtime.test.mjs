@@ -2590,6 +2590,14 @@ test("wait prints a foreign workspace root without control characters (#4212)", 
   assert.doesNotMatch(result.stderr, /[\u0080-\u009f]/);
 });
 
+test("state-lock report output escapes C1 controls from foreign state and stays valid JSON (#4212)", async () => {
+  const { serializeForTerminal } = await import("../plugins/codex/scripts/lib/state-lock-cli.mjs");
+  const value = { artifacts: { unreadable: ["task-\u009b2J\u009dEVIL\u2028x"] }, stateDir: "/a\u0085b" };
+  const text = serializeForTerminal(value);
+  assert.doesNotMatch(text, /[\u0080-\u009f\u2028\u2029]/);
+  assert.deepEqual(JSON.parse(text), value);
+});
+
 test("the job lookup ignores symlinked, FIFO and oversized job files and symlinked state directories", (t) => {
   const pluginData = makeTempDir();
   const previous = process.env.CLAUDE_PLUGIN_DATA;
