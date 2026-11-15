@@ -18,7 +18,6 @@
 //
 // Plain ESM without dependencies; node:sqlite (Node >= 22.13) or bun:sqlite.
 import { createHash, randomBytes } from "node:crypto";
-import { stderrf } from "./stderr-writer.mjs";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -807,7 +806,7 @@ export function openFencedLock(fencePath, options = {}) {
     try {
       type = fs.statfsSync(dir).type;
     } catch (error) {
-      if (error.code !== "ENOENT") stderrf`state-lock: statfs ${dir} failed (${error.code}); continuing\n`;
+      if (error.code !== "ENOENT") process.stderr.write(`state-lock: statfs ${dir} failed (${error.code}); continuing\n`);
     }
     if (type !== null) {
       const v = fsVerdict(o.platform, type);
@@ -859,7 +858,7 @@ export function openFencedLock(fencePath, options = {}) {
     try {
       h.db.exec("COMMIT");
     } catch (error) {
-      stderrf`state-lock: COMMIT on release failed (${error?.code}); the kernel releases it at exit\n`;
+      process.stderr.write(`state-lock: COMMIT on release failed (${error?.code}); the kernel releases it at exit\n`);
     }
     closeQuietly(h.db);
     HELD.delete(h);
@@ -1129,7 +1128,7 @@ export function openFencedLock(fencePath, options = {}) {
         `${JSON.stringify({ ...processFacts(), acquiredAt: nowIso(), ...o.ownerInfo() })}\n`
       );
     } catch (error) {
-      stderrf`state-lock: writing owner.json failed (${error.code}); the lock stays valid\n`;
+      process.stderr.write(`state-lock: writing owner.json failed (${error.code}); the lock stays valid\n`);
     }
     void h;
   }

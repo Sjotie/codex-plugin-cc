@@ -9,23 +9,24 @@ import { spawnSync } from "node:child_process";
 
 import { StateLockTimeout, openFencedLock } from "../plugins/codex/scripts/lib/fenced-lock.mjs";
 import { acquireWithSealWait } from "../plugins/codex/scripts/lib/seal-wait.mjs";
-import { formatStderr } from "../plugins/codex/scripts/lib/stderr-writer.mjs";
+import { formatStderr, sanitizeChunk } from "../plugins/codex/scripts/lib/stderr-writer.mjs";
 
 const SCRIPTS = path.resolve(import.meta.dirname, "../plugins/codex/scripts");
 const COMPANION = path.join(SCRIPTS, "codex-companion.mjs");
 const FORGED = "\nstate-lock: forged line \u001b[2J\u009b2J\u{E0001}";
 
+// Records what reaches the stream below the guard (the stream's own _write).
 function capture(fn) {
   const chunks = [];
-  const original = process.stderr.write;
-  process.stderr.write = (chunk) => {
+  const original = process.stderr._write;
+  process.stderr._write = (chunk, _encoding, callback) => {
     chunks.push(String(chunk));
-    return true;
+    callback();
   };
   try {
     fn();
   } finally {
-    process.stderr.write = original;
+    process.stderr._write = original;
   }
   return chunks.join("");
 }
@@ -46,11 +47,18 @@ function sourceFiles(dir) {
 test("nothing in the plugin scripts writes to stderr except the one writer", () => {
   const offenders = [];
   for (const file of sourceFiles(SCRIPTS)) {
-    if (path.basename(file) === "stderr-writer.mjs") continue;
+    // fenced-lock.mjs is the vendored byte-equal core copy; the guard in stderr-writer.mjs covers it.
+    if (["stderr-writer.mjs", "fenced-lock.mjs"].includes(path.basename(file))) continue;
     const text = fs.readFileSync(file, "utf8");
     if (/process\.stderr|console\.(error|warn|trace)\b|fs\.(write|writeSync)\(\s*2\b/.test(text)) offenders.push(path.relative(SCRIPTS, file));
   }
   assert.deepEqual(offenders, []);
+});
+
+test("the stream guard keeps only a final line feed, so a vendored raw write cannot forge a line", () => {
+  assert.equal(sanitizeChunk(`state-lock: statfs /r/a${FORGED} failed\n`).split("\n").length, 2);
+  assert.equal(sanitizeChunk("plain\n"), "plain\n");
+  assert.equal(sanitizeChunk("no newline"), "no newline");
 });
 
 test("formatStderr keeps the literal text and escapes every fragment, line feeds included", () => {

@@ -45,10 +45,33 @@ export function stderrf(strings, ...values) {
   process.stderr.write(formatStderr(strings, ...values));
 }
 
+// The guard under the writer. lib/fenced-lock.mjs is a byte-equal vendored copy of the factory-core
+// file (fenced-lock.source.json) and keeps its own process.stderr.write calls, with directory names in
+// them. Whatever reaches process.stderr.write in a process that loaded this module is therefore
+// sanitized once more at the stream: every unsafe character escaped, and a line feed kept only as the
+// last character of a chunk, so a fragment inside a line can never start a second one. stderrf output
+// is one line per call and passes unchanged.
+export function sanitizeChunk(chunk) {
+  const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+  const end = text.endsWith("\n") ? "\n" : "";
+  return untrusted(end ? text.slice(0, -1) : text) + end;
+}
+
+const GUARDED = Symbol.for("codex-plugin.stderr-guard");
+if (!process.stderr[GUARDED]) {
+  const write = process.stderr.write;
+  process.stderr.write = function guardedWrite(chunk, ...rest) {
+    return write.call(this, typeof chunk === "string" || ArrayBuffer.isView(chunk) ? sanitizeChunk(chunk) : chunk, ...rest);
+  };
+  Object.defineProperty(process.stderr, GUARDED, { value: true });
+}
+
 // Constant program text only (help overviews): written as is. Never pass anything read from disk,
 // argv or the environment.
 export function stderrFixed(text) {
-  process.stderr.write(text);
+  for (const line of String(text).split("\n")) {
+    if (line !== "" || text.endsWith("\n")) process.stderr.write(`${line}\n`);
+  }
 }
 
 // An error whose message is several formatter-built lines. The caller guarantees that each

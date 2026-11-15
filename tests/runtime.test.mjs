@@ -2607,7 +2607,7 @@ test("terminal escaping covers code points above U+FFFF and plain error text (#4
   assert.deepEqual(JSON.parse(text), value);
   const message = escapeForTerminal("ENOENT: no such file '/r/\u001b[2J\u009b2J\u{E0001}x'\nsecond line");
   assert.doesNotMatch(message, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]|[\u{E0000}-\u{E007F}]/u);
-  assert.match(message, /\nsecond line$/);
+  assert.match(message, /\\u000asecond line$/);
 });
 
 test("a filesystem error naming a control-character path reaches stderr escaped (#4212)", (t) => {
