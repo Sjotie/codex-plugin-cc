@@ -96,7 +96,8 @@ const hasOptOut = (args) => args.includes(PEERS_MCP_DISABLE_OVERRIDE);
 // With shell:true the argv is joined without escaping: keep every argument here a plain value (no spaces or quotes).
 const WIN_SHELL = process.platform === "win32";
 const codexAvailable = spawnSync("codex", ["--version"], { shell: WIN_SHELL }).status === 0;
-const real = { skip: !codexAvailable };
+// Hard per-test ceiling: a hanging child can never hold the suite longer than this.
+const real = { skip: !codexAvailable, timeout: 60000 };
 
 /** The effective state of the peers server under the plugin's own overrides: `codex <overrides> mcp get`. */
 function effectivePeers(args, cwd, env) {
@@ -129,8 +130,13 @@ async function realInitialize(args, cwd, env) {
   });
   // With shell:true on Windows, child.kill() only ends cmd.exe and leaves codex running with open pipes: end the tree.
   child.stdin.end();
-  if (WIN_SHELL && child.pid) spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-  else child.kill();
+  let treeKilled = false;
+  if (WIN_SHELL && child.pid) {
+    const r = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", timeout: 10000 });
+    treeKilled = !r.error && r.status === 0;
+  }
+  // Not Windows, or taskkill timed out / failed: fall back to killing the direct child.
+  if (!treeKilled) child.kill("SIGKILL");
   return { outcome, stderr };
 }
 
