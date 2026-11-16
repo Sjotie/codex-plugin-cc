@@ -309,7 +309,8 @@ function startHookOutcome() {
   const a = last.attachment;
   const at = `Claude's last record of the hook (${typeof last.timestamp === "string" ? last.timestamp : "no time"}, ${a.hookName})`;
   const ran = Number.isFinite(a.durationMs) ? ` after ${a.durationMs} ms` : "";
-  if (a.type === "hook_success") return `${at} says it succeeded, but its export did not reach this shell`;
+  // A later run can clear the export and end without a record of its own.
+  if (a.type === "hook_success") return `${at} says it succeeded, but this shell holds no admission now (a later run may have cleared it without a record)`;
   if (a.type === "hook_cancelled") {
     return a.timedOut === true && Number.isFinite(a.timeoutMs)
       ? `${at}: cancelled at its ${a.timeoutMs} ms timeout${ran}`

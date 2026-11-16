@@ -934,7 +934,7 @@ for (const [label, setup, expected] of [
   // A failure first, then a later success: the latest record speaks.
   ["that succeeded last", (f) => { fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_non_blocking_error", exitCode: 1, stderr: SEAL_STDERR }));
     fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_success", exitCode: 0, stdout: "{}", stderr: "" })); },
-    `is empty: ${RECORD_AT} says it succeeded, but its export did not reach this shell)`],
+    `is empty: ${RECORD_AT} says it succeeded, but this shell holds no admission now (a later run may have cleared it without a record))`],
   // Unreadable evidence never costs the message: the r1 text stays.
   ["without a transcript", (f) => fs.rmSync(f.transcript), "is empty: the hook did not complete)"],
   ["whose transcript is not a file", (f) => { fs.rmSync(f.transcript); fs.mkdirSync(f.transcript); }, "is empty: the hook did not complete)"]
