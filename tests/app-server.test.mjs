@@ -93,13 +93,15 @@ function envFor(codexHome) {
 const hasOptOut = (args) => args.includes(PEERS_MCP_DISABLE_OVERRIDE);
 
 // On Windows `codex` is a .cmd shim: without a shell the probe fails and every real-codex test is skipped silently.
-const codexAvailable = spawnSync("codex", ["--version"], { shell: process.platform === "win32" }).status === 0;
+// With shell:true the argv is joined without escaping: keep every argument here a plain value (no spaces or quotes).
+const WIN_SHELL = process.platform === "win32";
+const codexAvailable = spawnSync("codex", ["--version"], { shell: WIN_SHELL }).status === 0;
 const real = { skip: !codexAvailable };
 
 /** The effective state of the peers server under the plugin's own overrides: `codex <overrides> mcp get`. */
 function effectivePeers(args, cwd, env) {
   const overrides = args.slice(0, args.indexOf("app-server"));
-  const r = spawnSync("codex", [...overrides, "mcp", "get", "claude-peers-convex", "--json"], { cwd, env, encoding: "utf8", timeout: 15000 });
+  const r = spawnSync("codex", [...overrides, "mcp", "get", "claude-peers-convex", "--json"], { cwd, env, encoding: "utf8", timeout: 15000, shell: WIN_SHELL });
   if (r.status !== 0) return null;
   // Only the `enabled` flag leaves this function: the output can carry env and headers of a server (#4709), so it is
   // never returned, logged or put in an assertion message, even when it does not parse.
@@ -112,7 +114,7 @@ function effectivePeers(args, cwd, env) {
 
 /** Start a real `codex app-server` with the plugin's args and wait for its answer to `initialize`. */
 async function realInitialize(args, cwd, env) {
-  const child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: process.platform === "win32" });
+  const child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: WIN_SHELL });
   let stdout = "";
   let stderr = "";
   child.stderr.on("data", (d) => { stderr += d; });
@@ -125,7 +127,10 @@ async function realInitialize(args, cwd, env) {
     child.on("exit", (code) => { clearTimeout(timer); resolve(`exited ${code}`); });
     child.stdin.write(`${JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "test", title: "test", version: "0" }, capabilities: null } })}\n`);
   });
-  child.kill();
+  // With shell:true on Windows, child.kill() only ends cmd.exe and leaves codex running with open pipes: end the tree.
+  child.stdin.end();
+  if (WIN_SHELL && child.pid) spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+  else child.kill();
   return { outcome, stderr };
 }
 
