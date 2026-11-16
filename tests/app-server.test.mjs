@@ -92,7 +92,8 @@ function envFor(codexHome) {
 
 const hasOptOut = (args) => args.includes(PEERS_MCP_DISABLE_OVERRIDE);
 
-const codexAvailable = spawnSync("codex", ["--version"]).status === 0;
+// On Windows `codex` is a .cmd shim: without a shell the probe fails and every real-codex test is skipped silently.
+const codexAvailable = spawnSync("codex", ["--version"], { shell: process.platform === "win32" }).status === 0;
 const real = { skip: !codexAvailable };
 
 /** The effective state of the peers server under the plugin's own overrides: `codex <overrides> mcp get`. */
@@ -111,7 +112,7 @@ function effectivePeers(args, cwd, env) {
 
 /** Start a real `codex app-server` with the plugin's args and wait for its answer to `initialize`. */
 async function realInitialize(args, cwd, env) {
-  const child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], shell: process.platform === "win32" });
   let stdout = "";
   let stderr = "";
   child.stderr.on("data", (d) => { stderr += d; });
