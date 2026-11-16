@@ -33,30 +33,10 @@ export const BROKER_BUSY_RPC_CODE = -32001;
 // register even if the override is ever bypassed.
 export const PEERS_MCP_DISABLE_OVERRIDE = "mcp_servers.claude-peers-convex.enabled=false";
 
-// #6110: `enabled=false` alone creates an MCP entry WITHOUT a transport when the
-// host has no `[mcp_servers.claude-peers-convex]` block (no ~/.codex/config.toml),
-// and codex 0.166+ then fails with "invalid transport in `mcp_servers.claude-peers-convex`".
-// A dotted `command` key merges with an existing stdio block (it only replaces its
-// command; args/env stay, and the server is disabled anyway, so nothing is spawned)
-// and gives an absent block a valid stdio transport. An inline table or a second
-// key does not help for a url-based block: both fail with "url is not supported for
-// stdio". The peers MCP is a stdio server on every host, so that case does not occur.
-//
-// The value is a bare word on purpose: codex reads a `-c` value that is not valid
-// TOML as a string, and no quote characters means nothing to lose when spawn runs
-// through cmd.exe on Windows (`command="true"` could arrive as the TOML boolean
-// `true`). The command is never run, because the server is disabled.
-export const PEERS_MCP_TRANSPORT_OVERRIDE = "mcp_servers.claude-peers-convex.command=disabled";
-
 // `-c/--config` is a GLOBAL codex flag and must precede the subcommand
 // (`codex [OPTIONS] <COMMAND>`), so it goes before "app-server". #1796: ChatGPT
 // apps are off for every child too (app-policy.mjs).
-export const APP_SERVER_SPAWN_ARGS = [
-  "-c", PEERS_MCP_DISABLE_OVERRIDE,
-  "-c", PEERS_MCP_TRANSPORT_OVERRIDE,
-  "-c", APPS_DISABLE_OVERRIDE,
-  "app-server"
-];
+export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", APPS_DISABLE_OVERRIDE, "app-server"];
 
 /**
  * Build the environment for a spawned app-server child, layering the peers

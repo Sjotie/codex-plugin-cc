@@ -346,7 +346,7 @@ function taskPayload(prompt, resume) {
 
 // Parse the global \`-c/--config key=value\` overrides that codex accepts BEFORE
 // the subcommand (\`codex [OPTIONS] <COMMAND>\`). The real plugin now spawns
-// \`codex -c <peers enabled=false> -c <peers command> -c features.apps=false app-server\`, so the
+// \`codex -c mcp_servers.claude-peers-convex.enabled=false app-server\`, so the
 // fake CLI must strip and record those leading globals instead of treating
 // \`-c\` as an unknown subcommand.
 const rawArgs = process.argv.slice(2);
