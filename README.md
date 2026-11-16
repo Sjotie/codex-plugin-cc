@@ -406,7 +406,13 @@ The session's original root is fixed: changing workspace or plugin-data root
 requires a new Claude session, rather than rebinding the existing session ID.
 A write for another workspace (such as `task --cwd <other worktree>`) says so
 in its refusal, naming the workspace the session started in; a Bash call
-without the SessionStart export says that instead.
+without the SessionStart export says that instead, with what Claude recorded
+for the hook in the transcript: cancelled at its timeout (and how long it ran),
+or failed with its exit code and stderr (such as `state-lock stop-old`).
+The hook's own work (two process scans, `lsof` per plugin process found) grows
+with the number of sessions starting at once: 8 simultaneous starts took
+5.3-5.6 s each on the Mac (#5266), so its timeout in `hooks.json` is 30 s, not
+the upstream 5 s. A cancelled hook grants nothing either way.
 The per-session locator in the Claude config directory is runtime evidence;
 missing, corrupt or replaced evidence also refuses writes. Do not remove it
 to bypass a refusal.

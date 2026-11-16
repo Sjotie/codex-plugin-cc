@@ -907,6 +907,53 @@ test("#5266: a write without the SessionStart envelope says the hook's admission
   assert.match(w.error.message, /no Codex state admission from this Claude session's SessionStart hook/);
 });
 
+// #5266 r2: on the Mac the hook scans processes twice and runs lsof per plugin
+// process it finds; in a burst of starts the other starting hooks are such
+// processes. Measured 16-11 on 2.1.321: 8 hooks at once took 5.3-5.6 s each,
+// and Claude cancelled 7 live startups at the 5 s of the upstream default.
+// The timeout must leave room for that; a cancelled hook grants nothing.
+test("#5266 r2: the SessionStart hook timeout leaves room for a burst of starts", options, () => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex/hooks/hooks.json"), "utf8")).hooks;
+  const start = hooks.SessionStart.flatMap((group) => group.hooks).find((h) => h.command.includes("session-lifecycle-hook.mjs"));
+  assert.ok(start.timeout >= 30, `SessionStart timeout ${start.timeout} s`);
+});
+
+// #5266 r2: with the envelope cleared, the refusal names what Claude recorded
+// for the hook (live shapes of 2.1.321), so the agent sees a timeout or the
+// hook's own reason instead of a guess. Text only: it still refuses.
+const startRecord = (f, attachment) => JSON.stringify({ type: "attachment", version: "2.1.321", sessionId: "session-current", isSidechain: false,
+  timestamp: "2026-11-15T23:06:23.031Z", cwd: f.workspace, attachment: { hookName: "SessionStart:startup", toolUseID: "fixture-hook", hookEvent: "SessionStart",
+    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionStart', ...attachment } }) + "\n";
+const RECORD_AT = "Claude's last record of the hook (2026-11-15T23:06:23.031Z, SessionStart:startup)";
+const SEAL_STDERR = "Failed with non-blocking status code: SessionStart could not seal the state lock: fence not sealed yet; to stop them: state-lock stop-old; state writes refused";
+for (const [label, setup, expected] of [
+  ["cancelled at its timeout", (f) => fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_cancelled", durationMs: 5281, timedOut: true, timeoutMs: 5000 })),
+    `is empty: ${RECORD_AT}: cancelled at its 5000 ms timeout after 5281 ms)`],
+  ["that failed", (f) => fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_non_blocking_error", exitCode: 1, durationMs: 1441, stdout: "", stderr: SEAL_STDERR })),
+    `is empty: ${RECORD_AT}: hook_non_blocking_error (exit 1) after 1441 ms: ${SEAL_STDERR})`],
+  // A failure first, then a later success: the latest record speaks.
+  ["that succeeded last", (f) => { fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_non_blocking_error", exitCode: 1, stderr: SEAL_STDERR }));
+    fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_success", exitCode: 0, stdout: "{}", stderr: "" })); },
+    `is empty: ${RECORD_AT} says it succeeded, but its export did not reach this shell)`],
+  // Unreadable evidence never costs the message: the r1 text stays.
+  ["without a transcript", (f) => fs.rmSync(f.transcript), "is empty: the hook did not complete)"],
+  ["whose transcript is not a file", (f) => { fs.rmSync(f.transcript); fs.mkdirSync(f.transcript); }, "is empty: the hook did not complete)"]
+]) {
+  test(`#5266 r2: a write after a SessionStart hook ${label} names what Claude recorded`, options, (t) => {
+    const f = fixture(t);
+    const r = f.runHook({}, undefined, { omit: true });
+    assert.equal(r.status, 0, r.stderr);
+    // What a cancelled or failed hook leaves: the cleared envelope, then Claude's record.
+    fs.appendFileSync(f.envFile, `export ${CERT}=''\n`);
+    setup(f);
+    assert.equal(f.consume().acquired, false);
+    const w = f.consume({}, "denied");
+    assert.ok(w.error, JSON.stringify(w));
+    assert.ok(w.error.message.includes(expected), w.error.message);
+    assert.match(w.error.message, /resuming or restarting this Claude session runs the hook again/);
+  });
+}
+
 test("D: SessionStart with a malformed provider manifest names the manifest, not the version", options, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "manifest-notice-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

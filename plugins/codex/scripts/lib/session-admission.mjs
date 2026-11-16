@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
+import { TRANSCRIPT_PATH_ENV } from "./claude-session-transfer.mjs";
 
 export const STATE_LOCK_ADMISSION_ENV = "CODEX_COMPANION_LOCK_ADMISSION";
 export const SESSION_START_COMMAND = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionStart';
@@ -277,6 +278,50 @@ export function envelopeFor(locator, capability) {
 
 const ENVELOPE_KEYS = ["version", "sessionId", "bindingEpoch", "capabilityId", "root", "transcriptPath", "configRoot", "admission"];
 
+// What Claude recorded for this session's last run of our SessionStart hook,
+// for the refusal message only (#5266 r2): a timeout or the hook's own reason
+// (such as "state-lock stop-old"). Never part of an admission decision, so it
+// reads loosely and gives null on anything it cannot read.
+const OUTCOME_STDERR_MAX = 600;
+const OUTCOME_TRANSCRIPT_MAX = 64 * 1024 * 1024;
+function startHookOutcome() {
+  const file = process.env[TRANSCRIPT_PATH_ENV];
+  if (!file || !path.isAbsolute(file)) return null;
+  let text;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile()) return null;
+    if (st.size > OUTCOME_TRANSCRIPT_MAX) return `the hook's outcome was not read: the transcript ${file} is ${Math.round(st.size / 1048576)} MB, above the ${OUTCOME_TRANSCRIPT_MAX / 1048576} MB this message reads; its last SessionStart record of session-lifecycle-hook.mjs says what happened`;
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let last = null;
+  for (const line of text.split("\n")) {
+    if (!line.includes("session-lifecycle-hook.mjs")) continue;
+    let r;
+    try { r = JSON.parse(line); } catch { continue; }
+    const a = r?.attachment;
+    if (r?.type === "attachment" && a?.command === SESSION_START_COMMAND && a.hookEvent === "SessionStart" &&
+      (!process.env.CODEX_COMPANION_SESSION_ID || r.sessionId === process.env.CODEX_COMPANION_SESSION_ID)) last = r;
+  }
+  if (!last) return null;
+  const a = last.attachment;
+  const at = `Claude's last record of the hook (${typeof last.timestamp === "string" ? last.timestamp : "no time"}, ${a.hookName})`;
+  const ran = Number.isFinite(a.durationMs) ? ` after ${a.durationMs} ms` : "";
+  if (a.type === "hook_success") return `${at} says it succeeded, but its export did not reach this shell`;
+  if (a.type === "hook_cancelled") {
+    return a.timedOut === true && Number.isFinite(a.timeoutMs)
+      ? `${at}: cancelled at its ${a.timeoutMs} ms timeout${ran}`
+      : `${at}: cancelled${ran}`;
+  }
+  const stderr = String(a.stderr ?? "");
+  const shown = stderr.length > OUTCOME_STDERR_MAX
+    ? `${stderr.slice(0, OUTCOME_STDERR_MAX)} [${stderr.length - OUTCOME_STDERR_MAX} more characters in the transcript record]`
+    : stderr;
+  return `${at}: ${a.type ?? "failed"} (exit ${a.exitCode ?? "unknown"})${ran}: ${shown || "no stderr recorded"}`;
+}
+
 // Why this consumer has no admission, for the refusal message only (#5266):
 // the lock itself then reports just "admission certificate missing". Names
 // the two causes seen in use; any other (a malformed or replaced envelope or
@@ -284,7 +329,8 @@ const ENVELOPE_KEYS = ["version", "sessionId", "bindingEpoch", "capabilityId", "
 function consumerRefusalHint(fencePath, target) {
   try {
     const raw = process.env[STATE_LOCK_ADMISSION_ENV];
-    if (!raw) return `no Codex state admission from this Claude session's SessionStart hook (${STATE_LOCK_ADMISSION_ENV} ${raw === "" ? "is empty: the hook did not complete" : "is not set"}); ` +
+    if (!raw) return `no Codex state admission from this Claude session's SessionStart hook (${STATE_LOCK_ADMISSION_ENV} ${raw === "" ? `is empty: ${startHookOutcome() ?? "the hook did not complete"}` : "is not set"}); ` +
+      "resuming or restarting this Claude session runs the hook again; " +
       "on macOS only a Bash call in a Claude session whose Codex SessionStart hook succeeded can write Codex state";
     const envelope = JSON.parse(raw);
     if (typeof envelope?.root !== "string") return null;
