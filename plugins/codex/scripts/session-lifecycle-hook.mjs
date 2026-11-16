@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
+import { stderrf } from "./lib/stderr-writer.mjs";
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 
 import { isTerminalJobStatus, isWaitingJobStatus } from "./lib/job-status.mjs";
@@ -34,11 +36,226 @@ function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
 }
 
+let envFileTmpSeq = 0;
+const ENV_LOCK_WAIT_MS = 2000;
+const ENV_LOCK_RETRY_MS = 5;
+const ENV_LOCK_MAX_AGE_MS = 30000;
+const WIN32_RENAME_RETRIES = 3;
+const WIN32_RENAME_BACKOFF_MS = 10;
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function resolveEnvFileTarget(envFile) {
+  try {
+    const lstat = fs.lstatSync(envFile);
+    if (lstat.isDirectory()) {
+      fs.readFileSync(envFile, "utf8");
+    }
+    if (!lstat.isSymbolicLink()) {
+      return envFile;
+    }
+    try {
+      return fs.realpathSync(envFile);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+      return path.resolve(path.dirname(envFile), fs.readlinkSync(envFile));
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+    return envFile;
+  }
+}
+
+function isLockHolderAlive(lockFile) {
+  let stat;
+  let raw = "";
+  try {
+    stat = fs.statSync(lockFile);
+    if (Date.now() - stat.mtimeMs > ENV_LOCK_MAX_AGE_MS) {
+      return false;
+    }
+    raw = fs.readFileSync(lockFile, "utf8").trim();
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    return true;
+  }
+  const pid = Number.parseInt(raw, 10);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return Date.now() - stat.mtimeMs < 100;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function evictStaleLock(lockFile) {
+  const claimFile = `${lockFile}.stale.${process.pid}.${++envFileTmpSeq}`;
+  try {
+    fs.renameSync(lockFile, claimFile);
+  } catch {
+    return false;
+  }
+  if (isLockHolderAlive(claimFile)) {
+    try {
+      fs.renameSync(claimFile, lockFile);
+    } catch {
+      try {
+        fs.unlinkSync(claimFile);
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
+    return false;
+  }
+  try {
+    fs.unlinkSync(claimFile);
+  } catch {
+    // Ignore cleanup errors.
+  }
+  return true;
+}
+
+function withEnvFileLock(targetFile, fn) {
+  const lockFile = `${targetFile}.lock`;
+  const ownerContent = `${process.pid}\n`;
+  const deadline = Date.now() + ENV_LOCK_WAIT_MS;
+  let acquired = false;
+  while (!acquired) {
+    try {
+      fs.writeFileSync(lockFile, ownerContent, { encoding: "utf8", flag: "wx" });
+      if (fs.readFileSync(lockFile, "utf8") === ownerContent) {
+        acquired = true;
+      }
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+      if (!isLockHolderAlive(lockFile) && evictStaleLock(lockFile)) {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw error;
+      }
+      sleepMs(ENV_LOCK_RETRY_MS);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      if (fs.readFileSync(lockFile, "utf8") === ownerContent) {
+        fs.unlinkSync(lockFile);
+      }
+    } catch {
+      // Ignore cleanup errors if the lock file was already removed.
+    }
+  }
+}
+
+function commitEnvFile(tmpFile, targetFile, content, mode) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(tmpFile, targetFile);
+      return;
+    } catch (error) {
+      const transientWin32 =
+        process.platform === "win32" &&
+        (error?.code === "EPERM" || error?.code === "EBUSY" || error?.code === "EACCES");
+      if (!transientWin32) {
+        throw error;
+      }
+      if (attempt < WIN32_RENAME_RETRIES) {
+        sleepMs(WIN32_RENAME_BACKOFF_MS * (attempt + 1));
+        continue;
+      }
+      fs.writeFileSync(targetFile, content, { encoding: "utf8", ...(mode !== null ? { mode } : {}) });
+      if (mode !== null) {
+        fs.chmodSync(targetFile, mode);
+      }
+      try {
+        fs.unlinkSync(tmpFile);
+      } catch {
+        // Ignore temp cleanup failure after in-place fallback.
+      }
+      return;
+    }
+  }
+}
+
 function appendEnvVar(name, value, { allowEmpty = false } = {}) {
-  if (!process.env.CLAUDE_ENV_FILE || value == null || (!allowEmpty && value === "")) {
+  const envFile = process.env.CLAUDE_ENV_FILE;
+  if (!envFile || value == null || (!allowEmpty && value === "")) {
     return;
   }
-  fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
+
+  const targetFile = resolveEnvFileTarget(envFile);
+  withEnvFileLock(targetFile, () => {
+    let existing = "";
+    let mode = null;
+    try {
+      const stat = fs.statSync(targetFile);
+      mode = stat.mode & 0o7777;
+      existing = fs.readFileSync(targetFile, "utf8");
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    const lines = existing === "" ? [] : existing.split("\n");
+    if (lines.length > 0 && lines.at(-1) === "") {
+      lines.pop();
+    }
+
+    const prefix = `export ${name}=`;
+    const nextLine = `${prefix}${shellEscape(value)}`;
+    let replaced = false;
+    const updated = [];
+    for (const line of lines) {
+      if (line.startsWith(prefix)) {
+        if (!replaced) {
+          updated.push(nextLine);
+          replaced = true;
+        }
+      } else {
+        updated.push(line);
+      }
+    }
+    if (!replaced) {
+      updated.push(nextLine);
+    }
+
+    const content = `${updated.join("\n")}\n`;
+    const tmpFile = path.join(
+      path.dirname(targetFile),
+      `.${path.basename(targetFile)}.${process.pid}.${++envFileTmpSeq}.tmp`
+    );
+    try {
+      fs.writeFileSync(tmpFile, content, { encoding: "utf8", ...(mode !== null ? { mode } : {}) });
+      if (mode !== null) {
+        fs.chmodSync(tmpFile, mode);
+      }
+      commitEnvFile(tmpFile, targetFile, content, mode);
+    } catch (error) {
+      try {
+        fs.unlinkSync(tmpFile);
+      } catch {
+        // Ignore cleanup errors after a failed write or rename.
+      }
+      throw error;
+    }
+  });
 }
 
 const SESSION_ENDED_MESSAGE = "Stopped because the Claude session ended.";
@@ -219,6 +436,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  stderrf`${error instanceof Error ? error.message : String(error)}\n`;
   process.exit(1);
 });

@@ -1,3 +1,4 @@
+import { stderrf } from "./stderr-writer.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -97,17 +98,32 @@ export function resolveLockPath(cwd) {
 }
 
 export function openStateLock(cwd) {
-  return openFencedLock(resolveLockPath(cwd), consumerOptions(cwd));
+  return openConsumerLock(cwd, resolveLockPath(cwd), resolveWorkspaceRoot(cwd));
 }
 
 // For state-lock --all: a state directory found on disk, without a workspace.
 export function openStateLockAt(stateDir) {
-  return openFencedLock(path.join(stateDir, LOCK_NAME), consumerOptions(stateDir, path.join(stateDir, LOCK_NAME)));
+  return openConsumerLock(stateDir, path.join(stateDir, LOCK_NAME), null);
 }
 
-function consumerOptions(cwd, fence = resolveLockPath(cwd)) {
+// target: the workspace a refusal hint names (#5266), null when unknown.
+function openConsumerLock(cwd, fence, target) {
   const options = stateLockOptions(cwd);
-  return process.platform === "darwin" ? { ...options, ...consumerSessionOptions(fence) } : options;
+  if (process.platform !== "darwin") return openFencedLock(fence, options);
+  const { refusalHint = null, ...lockOptions } = { ...options, ...consumerSessionOptions(fence, target) };
+  const lock = openFencedLock(fence, lockOptions);
+  if (!refusalHint) return lock;
+  // #5266: the lock reports only "admission certificate missing"; add why this
+  // consumer has none. The text changes, the refusal does not.
+  return { ...lock, acquire: (...args) => {
+    try { return lock.acquire(...args); }
+    catch (error) {
+      const hint = error instanceof StateLockTimeout ? refusalHint() : null;
+      // V8 formats error.stack on first access, so the stack shows it too.
+      if (hint) error.message = `${error.message}; ${hint}`;
+      throw error;
+    }
+  } };
 }
 
 function hookLock(locator) {
@@ -419,7 +435,7 @@ function sameValue(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function applyEffective(job, effective) {
+export function applyEffective(job, effective) {
   if (effective.source !== "json") {
     return job;
   }
@@ -491,7 +507,7 @@ function saveStateLocked(cwd, state, ctx) {
       removeJobFile(resolveJobFile(cwd, job.id));
       removeFileIfExists(job.logFile);
     } catch (error) {
-      process.stderr.write(`state: committed; cleanup failed for job ${job.id} (${error?.code ?? error?.message})\n`);
+      stderrf`state: committed; cleanup failed for job ${job.id} (${error?.code ?? error?.message})\n`;
     }
   }
   return nextState;
@@ -731,7 +747,7 @@ export function listJobs(cwd) {
     }
     // Reading never depends on the lock: show the effective status of every
     // job without writing, and say why nothing was reconciled.
-    process.stderr.write(`state: job list not reconciled (${error.message})\n`);
+    stderrf`state: job list not reconciled (${error.message})\n`;
     return readOnlyJobs(cwd, state.jobs);
   }
 }

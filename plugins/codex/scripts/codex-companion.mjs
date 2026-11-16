@@ -40,7 +40,11 @@ import {
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  describeRunningTaskBlock,
   enrichJob,
+  describeThreadCandidates,
+  findJobLocations,
+  listSessionThreadCandidates,
   readStoredJob,
   resolveCancelableJob,
   resolveResultJob,
@@ -51,6 +55,7 @@ import {
 import { isTerminalJobStatus, isWaitingJobStatus, WAIT_EXIT_CODES } from "./lib/job-status.mjs";
 import { sqliteRuntime } from "./lib/fenced-lock.mjs";
 import { runStateLockCommand } from "./lib/state-lock-cli.mjs";
+import { MultilineError, reportError, stderrf } from "./lib/stderr-writer.mjs";
 import {
   appendLogLine,
   createJobLogFile,
@@ -410,6 +415,28 @@ function resolveWaitTimeoutMs(options) {
   return parseNonNegativeNumber(options["timeout-ms"], "--timeout-ms");
 }
 
+// Job state is per workspace root: say where the lookup ran and where the job is, so an empty
+// lookup is not read as a job that does not exist.
+function reportJobLookupScope(jobId, searchedRoot) {
+  const canonical = (root) => {
+    try {
+      return fs.realpathSync(root);
+    } catch {
+      return root;
+    }
+  };
+  const searched = searchedRoot ? canonical(searchedRoot) : null;
+  stderrf`Looked in workspace ${searchedRoot ?? "(unknown)"}; job state is kept per workspace root.\n`;
+  const hits = findJobLocations(jobId);
+  const elsewhere = [...new Set(hits.map((hit) => canonical(hit.workspaceRoot)).filter((root) => root !== searched))];
+  for (const root of elsewhere) {
+    stderrf`This job exists in workspace ${root ?? "(unknown)"}: run the command from there (cd into it, or pass --cwd).\n`;
+  }
+  if (elsewhere.length === 0 && hits.length > 0) {
+    stderrf`This job exists for the same workspace in another state directory (${hits[0].stateDir ?? "(unknown)"}): CLAUDE_PLUGIN_DATA differs from the session that started it.\n`;
+  }
+}
+
 function outputWaitOutcome(outcome, jobId, options = {}) {
   if (outcome.outcome === "terminal") {
     const job = enrichJob(outcome.job);
@@ -430,19 +457,20 @@ function outputWaitOutcome(outcome, jobId, options = {}) {
     if (options.json) {
       outputResult(payload, true);
     } else {
-      process.stderr.write(`Timed out waiting for ${jobId} to reach a terminal status.\n`);
+      stderrf`Timed out waiting for ${jobId} to reach a terminal status.\n`;
     }
     process.exitCode = WAIT_EXIT_CODES.timeout;
     return;
   }
 
   if (outcome.outcome === "invalid-status") {
-    process.stderr.write(`Job ${jobId} has unsupported non-terminal status "${outcome.job?.status ?? "unknown"}".\n`);
+    stderrf`Job ${jobId} has unsupported non-terminal status "${outcome.job?.status ?? "unknown"}".\n`;
   } else if (outcome.outcome === "unreadable") {
     const detail = outcome.error instanceof Error ? `: ${outcome.error.message}` : "";
-    process.stderr.write(`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`);
+    stderrf`Job file for "${jobId}" remained unreadable after the registration grace period${detail}.\n`;
   } else {
-    process.stderr.write(`No job file appeared for "${jobId}" within the registration grace period.\n`);
+    stderrf`No job file appeared for "${jobId}" within the registration grace period.\n`;
+    reportJobLookupScope(jobId, options.workspaceRoot);
   }
   process.exitCode = WAIT_EXIT_CODES.invalid;
 }
@@ -452,7 +480,7 @@ async function waitForJobAndOutput(cwd, jobId, options = {}) {
   const outcome = await waitForTerminalJob(workspaceRoot, jobId, {
     timeoutMs: options.timeoutMs
   });
-  outputWaitOutcome(outcome, jobId, options);
+  outputWaitOutcome(outcome, jobId, { ...options, workspaceRoot });
 }
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
@@ -462,7 +490,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && isWaitingJobStatus(job.status));
   if (activeTask) {
-    throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
+    throw new Error(describeRunningTaskBlock(activeTask.id, workspaceRoot));
   }
 
   const trackedTask = findLatestResumableTaskJob(visibleJobs);
@@ -604,7 +632,9 @@ async function executeTaskRun(request) {
       excludeJobId: request.jobId
     });
     if (!latestThread) {
-      throw new Error("No previous Codex task thread was found for this repository.");
+      const sessionId = getCurrentClaudeSessionId();
+      const others = sessionId ? describeThreadCandidates(listSessionThreadCandidates(workspaceRoot, sessionId)) : "";
+      throw new MultilineError(`No previous Codex task thread was found for this repository.${others}`.split("\n"));
     }
     resumeThreadId = latestThread.id;
   }
@@ -1406,7 +1436,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
+  reportError(error);
   process.exitCode = 1;
 });

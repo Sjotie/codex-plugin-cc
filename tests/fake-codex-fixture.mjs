@@ -370,6 +370,10 @@ while (argCursor < rawArgs.length) {
   break;
 }
 const args = rawArgs.slice(argCursor);
+if (args[0] === "mcp" && args[1] === "get") {
+  // #5520: exit 0 only when the (fake) config defines the server, like the real Codex.
+  process.exit(args[2] === "claude-peers-convex" && process.env.FAKE_CODEX_PEERS === "1" ? 0 : 1);
+}
 if (args[0] === "--version") {
   console.log("codex-cli test");
   process.exit(0);
@@ -877,10 +881,14 @@ rl.on("line", (line) => {
   }
 }
 
-export function buildEnv(binDir) {
+export function buildEnv(binDir, extra = {}) {
   const sep = process.platform === "win32" ? ";" : ":";
   return {
     ...process.env,
-    PATH: `${binDir}${sep}${process.env.PATH}`
+    PATH: `${binDir}${sep}${process.env.PATH}`,
+    ...extra
   };
 }
+
+/** #5520: env that makes the fake `codex mcp get claude-peers-convex` succeed, so the plugin passes the opt-out. */
+export const FAKE_PEERS_KNOWN_ENV = { FAKE_CODEX_PEERS: "1" };

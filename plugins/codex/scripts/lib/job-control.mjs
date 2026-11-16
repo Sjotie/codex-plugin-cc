@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 
 import { getSessionRuntimeStatus } from "./codex.mjs";
 import { isFailedJobStatus, isTerminalJobStatus, isWaitingJobStatus } from "./job-status.mjs";
@@ -9,6 +10,9 @@ import {
   readJobFile,
   reconcileJobWorkerState,
   resolveJobFile,
+  resolveStateRoots,
+  resolveStateDir,
+  applyEffective,
   updateJobRecord,
   upsertJob
 } from "./state.mjs";
@@ -495,4 +499,223 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
   }
 
   throw new Error("No active Codex jobs to cancel.");
+}
+
+// Bounds of the lookup below: it runs while an error is being reported and must stay quick.
+const JOB_LOOKUP_MAX_STATE_DIRS = 2000;
+const JOB_LOOKUP_MAX_FILE_BYTES = 1024 * 1024;
+
+// Reads a job file without following symlinks and without blocking on special files. Returns the
+// parsed JSON, or null when it is not a small regular file of the current user.
+function readJobFileStrict(file, uid) {
+  let fd;
+  try {
+    // O_NONBLOCK keeps open() from waiting on a FIFO; O_NOFOLLOW refuses a symlink as last component.
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > JOB_LOOKUP_MAX_FILE_BYTES || (uid !== null && stat.uid !== uid)) return null;
+    return JSON.parse(fs.readFileSync(fd, "utf8"));
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Nothing to release.
+      }
+    }
+  }
+}
+
+// Where state holds a job file for this id: { workspaceRoot, stateDir } per hit. Job state is kept
+// per workspace root, so a lookup from another working directory finds nothing even while the job
+// runs. Read-only (no lock). It looks only at real (non-symlink) state directories and a real
+// jobs/ directory owned by the current user, reads only small regular job files, looks at no more
+// than JOB_LOOKUP_MAX_STATE_DIRS directories, and ignores anything it cannot read. Never throws:
+// it runs while an error is being reported.
+export function findJobLocations(jobId) {
+  const found = [];
+  try {
+    validateExactJobId(jobId);
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    let looked = 0;
+    for (const root of resolveStateRoots()) {
+      let entries;
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue; // a symlink to a directory is not a directory here
+        if (++looked > JOB_LOOKUP_MAX_STATE_DIRS) return found;
+        const stateDir = path.join(root, entry.name);
+        try {
+          const stateStat = fs.lstatSync(stateDir);
+          const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
+          if (!stateStat.isDirectory() || !jobsStat.isDirectory()) continue;
+          if (uid !== null && (stateStat.uid !== uid || jobsStat.uid !== uid)) continue;
+        } catch {
+          continue;
+        }
+        const job = readJobFileStrict(path.join(stateDir, "jobs", `${jobId}.json`), uid);
+        if (typeof job?.workspaceRoot === "string" && job.workspaceRoot) {
+          found.push({ workspaceRoot: job.workspaceRoot, stateDir });
+        }
+      }
+    }
+  } catch {
+    return [];
+  }
+  return found;
+}
+
+const THREAD_CANDIDATES_MAX_STATE_DIRS = 2000;
+const THREAD_CANDIDATES_MAX_LISTED = 10;
+const SAFE_THREAD_ID = /^[A-Za-z0-9._:-]{1,200}$/;
+
+// State files of other roots are data, not instructions: one line, no control characters, bounded.
+export function plainField(value, fallback) {
+  if (typeof value !== "string" || !value) return fallback;
+  const clean = value.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ").trim();
+  return clean.length > 200 ? `${clean.slice(0, 200)}...` : clean || fallback;
+}
+
+// #4212: state lives per workspace root, so a --resume-last from a fresh root (a new workroot per
+// round) finds nothing even though this Claude session has finished tasks in its other roots.
+// Nothing is chosen for the caller: this only lists those threads, read-only and bounded, so the
+// error can say how to resume one on purpose (--resume-thread <id>). Same checks as
+// findJobLocations (real directories of the current user, small regular files, no locks);
+// newest state directories first. `incomplete` says the look was cut short or hit something
+// unreadable. Never throws.
+export function listSessionThreadCandidates(cwd, sessionId) {
+  const result = { candidates: [], incomplete: false };
+  if (!sessionId) return result;
+  try {
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    let ownDir = null;
+    try {
+      ownDir = fs.realpathSync(resolveStateDir(cwd));
+    } catch {
+      // No own state dir yet: nothing to exclude.
+    }
+    const dirs = [];
+    for (const root of resolveStateRoots()) {
+      let entries;
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const stateDir = path.join(root, entry.name);
+        try {
+          const stat = fs.lstatSync(stateDir);
+          if (stat.isDirectory() && (uid === null || stat.uid === uid)) dirs.push({ stateDir, mtimeMs: stat.mtimeMs });
+        } catch {
+          continue;
+        }
+      }
+    }
+    dirs.sort((left, right) => right.mtimeMs - left.mtimeMs);
+    result.incomplete = dirs.length > THREAD_CANDIDATES_MAX_STATE_DIRS;
+    for (const { stateDir } of dirs.slice(0, THREAD_CANDIDATES_MAX_STATE_DIRS)) {
+      try {
+        const jobsStat = fs.lstatSync(path.join(stateDir, "jobs"));
+        if (!jobsStat.isDirectory() || (uid !== null && jobsStat.uid !== uid)) continue;
+        if (ownDir !== null && fs.realpathSync(stateDir) === ownDir) continue;
+      } catch {
+        continue;
+      }
+      const index = readJobFileStrict(path.join(stateDir, "state.json"), uid);
+      if (!index || !Array.isArray(index.jobs)) {
+        // A directory without a state file, or with a valid file that has no job list, is not ours
+        // to read; a state file that exists but cannot be read is something we may have missed.
+        if (index && typeof index === "object" && "jobs" in index) {
+          result.incomplete = true; // a job list that is not a list: damaged
+        } else if (!index) {
+          try {
+            fs.lstatSync(path.join(stateDir, "state.json"));
+            result.incomplete = true;
+          } catch {
+            // no state file at all
+          }
+        }
+        continue;
+      }
+      for (const job of index.jobs) {
+        if (job?.sessionId !== sessionId || job.jobClass !== "task" || typeof job.id !== "string") continue;
+        const record = /^[A-Za-z0-9._-]+$/.test(job.id)
+          ? readJobFileStrict(path.join(stateDir, "jobs", `${job.id}.json`), uid)
+          : null;
+        const confirmed = record && record.id === job.id && record.sessionId === sessionId && record.jobClass === job.jobClass;
+        // Without a matching job file the index entry may be stale: not listed, and said so.
+        if (!confirmed) {
+          result.incomplete = true;
+          continue;
+        }
+        const effective = { ...applyEffective(job, { source: "json", record }), updatedAt: record.updatedAt ?? job.updatedAt };
+        // Only plain strings are shown; anything else in a state file is damage, not a candidate.
+        if (
+          typeof effective.threadId === "string" && SAFE_THREAD_ID.test(effective.threadId) &&
+          typeof effective.status === "string" && isTerminalJobStatus(effective.status) &&
+          typeof effective.updatedAt === "string" &&
+          (effective.workspaceRoot === undefined || typeof effective.workspaceRoot === "string")
+        ) {
+          result.candidates.push(effective);
+        }
+      }
+    }
+  } catch {
+    result.incomplete = true;
+  }
+  // One row per thread (newest run), so a thread resumed several times does not fill the list.
+  try {
+    const seen = new Set();
+    result.candidates = sortJobsNewestFirst(result.candidates).filter((job) => !seen.has(job.threadId) && seen.add(job.threadId));
+  } catch {
+    return { candidates: [], incomplete: true };
+  }
+  return result;
+}
+
+// The lines the "No previous Codex task thread" error appends. Empty when there is nothing to show.
+export function describeThreadCandidates(found) {
+  try {
+    return describeThreadCandidatesUnguarded(found);
+  } catch {
+    return ""; // never replace the plain error
+  }
+}
+
+function describeThreadCandidatesUnguarded({ candidates, incomplete }) {
+  if (!candidates.length) {
+    return incomplete
+      ? "\n(The look in this session's other workspace roots was cut short or hit unreadable state; a thread may exist there. Nothing is chosen for you.)"
+      : "";
+  }
+  const lines = candidates.slice(0, THREAD_CANDIDATES_MAX_LISTED).map(
+    (job) =>
+      `  ${job.threadId}  ${plainField(job.workspaceRoot, "unknown workspace root")}  ${plainField(job.updatedAt, "unknown time")}  ${plainField(job.status, "unknown")}`
+  );
+  const more = candidates.length > THREAD_CANDIDATES_MAX_LISTED ? `\n  ... and ${candidates.length - THREAD_CANDIDATES_MAX_LISTED} more` : "";
+  const cut = incomplete ? "\n(The look was cut short or hit unreadable state; the list may be incomplete.)" : "";
+  return (
+    "\nThis Claude session has finished tasks in other workspace roots. Nothing is chosen for you; " +
+    "to continue one, run the task again with --resume-thread <id> (newest first):\n" +
+    lines.join("\n") + more + cut
+  );
+}
+
+// Why a resume is refused while a task of this Claude session still runs, and how to go on.
+export function describeRunningTaskBlock(taskId, workspaceRoot) {
+  // "${CLAUDE_PLUGIN_ROOT}" stays literal: it is shell text for the reader to run, not a value to fill in here.
+  const companion = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs"';
+  return (
+    `Task ${taskId} is still running. A running task of this Claude session blocks resuming; ` +
+    `wait for it with \`${companion} wait ${taskId} --timeout 480\` (run from ${workspaceRoot}) or stop it ` +
+    `with \`${companion} cancel ${taskId}\` (/codex:cancel ${taskId}), then resume. /codex:status shows its progress.`
+  );
 }

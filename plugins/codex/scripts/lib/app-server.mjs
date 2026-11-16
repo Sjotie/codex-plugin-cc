@@ -8,10 +8,11 @@
  * @typedef {import("./app-server-protocol").CodexAppServerClientOptions} CodexAppServerClientOptions
  * @typedef {import("./app-server-protocol").InitializeCapabilities} InitializeCapabilities
  */
+import { stderrf } from "./stderr-writer.mjs";
 import fs from "node:fs";
 import net from "node:net";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { parseBrokerEndpoint } from "./broker-endpoint.mjs";
 import { ensureBrokerSession, isBrokerSessionReady, loadBrokerSession } from "./broker-lifecycle.mjs";
 import { terminateProcessTree } from "./process.mjs";
@@ -37,6 +38,45 @@ export const PEERS_MCP_DISABLE_OVERRIDE = "mcp_servers.claude-peers-convex.enabl
 // (`codex [OPTIONS] <COMMAND>`), so it goes before "app-server". #1796: ChatGPT
 // apps are off for every child too (app-policy.mjs).
 export const APP_SERVER_SPAWN_ARGS = ["-c", PEERS_MCP_DISABLE_OVERRIDE, "-c", APPS_DISABLE_OVERRIDE, "app-server"];
+
+const PEERS_SERVER_NAME = "claude-peers-convex";
+
+/**
+ * #5520: does Codex itself know the peers server, with a valid transport, in the config it will load for this
+ * cwd and env? Codex 0.166+ rejects `mcp_servers.claude-peers-convex.enabled=false` ("invalid transport") when no
+ * layer defines that server with a command or url. So the opt-out is only passed when there is something to switch
+ * off. Asking Codex (`codex mcp get`, exit 0 only for a known, valid server) follows layers, project trust,
+ * profiles and TOML escapes the way the real start does; no text matching. The output is never read, so no config
+ * values reach us. Exit 0 means Codex knows a valid peers server. Any other result (an error, a timeout, an old
+ * Codex without `mcp get`) means unknown, not "absent": the opt-out is then left out, so a server that exists but
+ * could not be probed is not switched off by it, and PEERS_DISABLE=1 stays as the second guard.
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+export function codexKnowsPeersServer(cwd, env) {
+  const result = spawnSync("codex", ["mcp", "get", PEERS_SERVER_NAME, "--json"], {
+    cwd,
+    env,
+    stdio: ["ignore", "ignore", "ignore"],
+    timeout: 15000,
+    shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
+    windowsHide: true
+  });
+  return result.status === 0;
+}
+
+/**
+ * The `codex` argv for an app-server child. The peers opt-out is only included when Codex knows the peers server
+ * (see codexKnowsPeersServer).
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string[]}
+ */
+export function buildAppServerSpawnArgs(cwd, env) {
+  if (codexKnowsPeersServer(cwd, env)) return APP_SERVER_SPAWN_ARGS;
+  return ["-c", APPS_DISABLE_OVERRIDE, "app-server"];
+}
 
 /**
  * Build the environment for a spawned app-server child, layering the peers
@@ -296,9 +336,10 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    this.proc = spawn("codex", APP_SERVER_SPAWN_ARGS, {
+    const childEnv = buildAppServerChildEnv(this.options.env ?? process.env);
+    this.proc = spawn("codex", buildAppServerSpawnArgs(this.cwd, childEnv), {
       cwd: this.cwd,
-      env: buildAppServerChildEnv(this.options.env ?? process.env),
+      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
       windowsHide: true
@@ -476,7 +517,7 @@ export class CodexAppServerClient {
           // Never reuse a broker under another app policy: run this request on
           // a direct child instead, and say why on stderr.
           await client.close().catch(() => {});
-          process.stderr.write(`${error.message}\n`);
+          stderrf`${error.message}\n`;
           return CodexAppServerClient.connect(cwd, { ...options, brokerEndpoint: null, disableBroker: true });
         }
         throw markBrokerTransportError(error);

@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
 import { StateLockRefused, StateLockTimeout } from "./fenced-lock.mjs";
+import { stderrf } from "./stderr-writer.mjs";
 
 // Total time a start command spends on the lock, the ordinary 10 s deadline
 // included.
@@ -108,7 +109,7 @@ export function acquireWithSealWait(lock, options = {}) {
     deadlineMs,
     waitMs = 0,
     describe: describeOne = describeProcess,
-    log = (line) => process.stderr.write(`${line}\n`),
+    log = (line) => stderrf`${line}\n`,
     companionScript = null,
     cwd = null
   } = options;

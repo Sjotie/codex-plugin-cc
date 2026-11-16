@@ -58,7 +58,9 @@ function fixture(t, repo = defaultRepo) {
     };
     const rename=fs.renameSync;
     fs.renameSync=function(from,to,...rest){const r=rename.call(this,from,to,...rest);
-      if(String(to).endsWith('/fence.json') && JSON.parse(fs.readFileSync(process.env.ADMISSION_FIXTURE,'utf8')).crash) process.kill(process.pid,'SIGKILL');
+      const c=JSON.parse(fs.readFileSync(process.env.ADMISSION_FIXTURE,'utf8'));
+      if(String(to).endsWith('/fence.json') && c.crash) process.kill(process.pid,'SIGKILL');
+      if(to===process.env.CLAUDE_ENV_FILE && c.crashExport && fs.readFileSync(to,'utf8').includes("export CODEX_COMPANION_LOCK_ADMISSION='{")) process.kill(process.pid,'SIGKILL');
       return r;};
     const append=fs.appendFileSync;
     fs.appendFileSync=function(file,data,...rest){const r=append.call(this,file,data,...rest);
@@ -86,6 +88,7 @@ function fixture(t, repo = defaultRepo) {
   delete env.CODEX_COMPANION_SESSION_ID;
   // Only the notice tests name a running binary; the outer session's own must not leak in.
   delete env.CLAUDE_CODE_EXECPATH;
+  delete env.AI_AGENT;
   const hookInput = (extra = {}) => ({ cwd: workspace, session_id: "session-current", transcript_path: transcript, source: "startup", ...extra });
   const receipt = (result, extra = {}) => {
     const r = fill(RECORDS.hookSuccess, { sessionId: extra.sessionId ?? "session-current", cwd: workspace, source: extra.source ?? "startup", exitCode: result.status ?? 1, stdout: result.stdout });
@@ -104,10 +107,14 @@ function fixture(t, repo = defaultRepo) {
   // The real hook, started now and fed its stdin later: it begins its attempt
   // before reading stdin, so the attempt stays pending until feed().
   let holds = 0;
-  const cleared = () => fs.readFileSync(env.CLAUDE_ENV_FILE, "utf8").split("\n").filter((l) => l === `export ${CERT}=''`).length;
+  const clearToken = () => {
+    const stat = fs.statSync(env.CLAUDE_ENV_FILE, { bigint: true });
+    const count = fs.readFileSync(env.CLAUDE_ENV_FILE, "utf8").split("\n").filter((l) => l === `export ${CERT}=''`).length;
+    return count > 0 ? `${stat.ino}:${count}` : null;
+  };
   const startHook = async (input = hookInput(), spec = {}, extraEnv = {}) => {
     fs.writeFileSync(config, JSON.stringify(spec));
-    const before = cleared();
+    const before = clearToken();
     // The input is on stdin at once, as from Claude; the preload holds the
     // hook's stdin read until the hold file exists.
     const holdFile = path.join(root, `stdin-hold-${++holds}`);
@@ -118,12 +125,14 @@ function fixture(t, repo = defaultRepo) {
     const exited = new Promise((resolve) => child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr })));
     t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; });
     // The hook clears the export only after its attempt is committed.
-    for (let i = 0; i < 500 && cleared() === before && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 10));
-    assert.equal(cleared(), before + 1, "hook did not begin its attempt");
+    for (let i = 0; i < 500 && (clearToken() ?? before) === before && child.exitCode === null; i++) await new Promise((r) => setTimeout(r, 10));
+    const after = clearToken();
+    assert.ok(after !== null && after !== before, "hook did not begin its attempt");
     return { feed: async (receiptOptions = {}) => { fs.writeFileSync(holdFile, ""); const result = await exited;
       if (!receiptOptions.omit) appendReceipt(result, { source: input.source, sessionId: input.session_id, ...receiptOptions }); return result; } };
   };
-  const consume = (extra = {}, write = false) => {
+  // cwd: the workspace the write asks for (default the session's own).
+  const consume = (extra = {}, write = false, cwd = workspace) => {
     fs.writeFileSync(config, JSON.stringify({ consumer: true }));
     const code = `Object.assign(process.env,${JSON.stringify(extra)}); const m=await import(${JSON.stringify(state)}); const cwd=process.argv[1];
       const lock=m.openStateLock(cwd); let acquired=false,error=null;
@@ -131,10 +140,10 @@ function fixture(t, repo = defaultRepo) {
         const h=lock.tryAcquire(); acquired=!!h; if(h) lock.release(h);
         if(acquired && ${write === true}) m.updateState(cwd,s=>{s.config.stopReviewGate=true;});
         if(acquired && ${write === "seed-job"}) {const job={id:'fixture-queued',sessionId:'session-current',status:'queued',phase:'queued',pid:null};m.upsertJob(cwd,job);m.writeJobFile(cwd,job.id,job);}
-      } catch(e){error={code:e.code,message:e.message};}
+      } catch(e){error={code:e.code,message:e.message,stackHasMessage:String(e.stack).includes(e.message)};}
       console.log(JSON.stringify({acquired,error,fence:m.resolveLockPath(cwd),psCalls:globalThis.admissionPsCalls}));`;
-    const r = spawnSync("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "fixture", envFile, process.execPath, preload, code, workspace], {
-      cwd: workspace, env: { ...env, ...extra }, encoding: "utf8"
+    const r = spawnSync("/bin/bash", ["-c", 'source "$1"; exec "$2" --import "$3" --input-type=module -e "$4" "$5"', "fixture", envFile, process.execPath, preload, code, cwd], {
+      cwd, env: { ...env, ...extra }, encoding: "utf8"
     });
     assert.equal(r.status, 0, r.stderr);
     return JSON.parse(r.stdout);
@@ -781,11 +790,21 @@ for (const [label, execPath, source, warned, extraEnv = {}] of [
   ["a launcher symlink to an unproven version", (t) => versionLink(t, "0.0.1"), "startup", null],
   ["unproven native version on compact", () => "/opt/claude/versions/0.0.1", "compact", null],
   ["proven native version", () => "/opt/claude/versions/2.1.308", "startup", null],
-  ["non-native executable", () => "/usr/local/bin/node", "startup", null]
+  ["non-native executable", () => "/usr/local/bin/node", "startup", null],
+  // #5266: in stream-json mode Claude Code (2.1.308 and 2.1.321 measured, via
+  // the launcher and direct) gives a hook no CLAUDE_CODE_EXECPATH; AI_AGENT
+  // names the version the running process itself reports.
+  ["an unproven version named only by AI_AGENT", () => null, "startup", /Claude Code 0\.0\.1 on darwin\/arm64 .*--expect-version 0\.0\.1 --prepare-candidate/s, { AI_AGENT: "claude-code_0-0-1_harness" }],
+  ["an unproven AI_AGENT version behind a launcher symlink", (t) => versionLink(t, "2.1.308"), "startup", /Claude Code 0\.0\.1 /, { AI_AGENT: "claude-code_0-0-1_harness" }],
+  ["a proven version named only by AI_AGENT", () => null, "startup", null, { AI_AGENT: "claude-code_2-1-308_harness" }],
+  ["an AI_AGENT of another agent", () => null, "startup", null, { AI_AGENT: "codex_0-0-1" }],
+  ["an unproven AI_AGENT version on compact", () => null, "compact", null, { AI_AGENT: "claude-code_0-0-1_harness" }]
 ]) {
   test(`D: SessionStart with ${label} ${warned ? "warns" : "stays silent"}`, options, (t) => {
     const f = source === "compact" ? prepared(t) : fixture(t);
-    Object.assign(f.env, extraEnv, { CLAUDE_CODE_EXECPATH: execPath(t) });
+    const exec = execPath(t);
+    Object.assign(f.env, extraEnv);
+    if (exec === null) delete f.env.CLAUDE_CODE_EXECPATH; else f.env.CLAUDE_CODE_EXECPATH = exec;
     const r = f.runHook({}, JSON.stringify(f.hookInput({ source })), { omit: true });
     if (source === "compact") {
       // The predecessor's receipt is proven, so the compact succeeds; it keeps
@@ -804,7 +823,7 @@ for (const [label, execPath, source, warned, extraEnv = {}] of [
       assert.match(out.systemMessage, warned);
       assert.equal(context.split("\n")[1], out.systemMessage);
       // The notice is no admission: the receipt of this version still refuses.
-      f.appendReceipt(r, { record: { version: path.basename(f.env.CLAUDE_CODE_EXECPATH) } });
+      f.appendReceipt(r, { record: { version: /Claude Code (\d+\.\d+\.\d+) /.exec(out.systemMessage)[1] } });
       assert.equal(f.consume().acquired, false);
     } else {
       assert.match(context, /^Codex Companion session context refreshed at [^\n]+\.$/);
@@ -829,6 +848,111 @@ test("D: a hook_system_message after a proven receipt refuses at once, not as pe
     toolUseID: randomUUID(), hookEvent: "SessionStart" } }) + "\n");
   assert.equal(f.classify(), "definitive");
 });
+
+// #5266: what a refused consumer is told. Only the reason changes: every case
+// refused before in the same class and still does, and the same transcript
+// under a proven version still admits. The first shape is the one 2.1.321
+// wrote live: the fixed hook's success, then the merged context record.
+const lastRecordsAs = (f, version, receipt) => {
+  f.appendReceipt(receipt, { record: { version } });
+  fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version }) + "\n");
+};
+const UNPROVEN = /provider version unproven \(claude-code 0\.0\.1 on darwin\/arm64\)/;
+for (const [label, setup, outcome, reason] of [
+  ["receipt and merged context of an unproven version", (f, r) => lastRecordsAs(f, "0.0.1", r), "definitive", UNPROVEN],
+  ["the same records of a proven version", (f, r) => lastRecordsAs(f, "2.1.308", r), "acquired"],
+  ["a proven receipt, then context of an unproven version", (f, r) => { f.appendReceipt(r, { record: { version: "2.1.308" } }); fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"); }, "definitive", UNPROVEN],
+  ["only merged context of an unproven version", (f) => fs.appendFileSync(f.transcript, JSON.stringify({ ...mergedRecord(f), version: "0.0.1" }) + "\n"), "definitive", UNPROVEN],
+  // Unchanged: a failure without a token may be an earlier attempt's, so a
+  // consumer may still wait for this attempt's own receipt.
+  ["an unattributed failed receipt of an unproven version", (f) => f.appendReceipt({ status: 1, stdout: "" }, { record: { version: "0.0.1" } }), "transient", /session attempt receipt not recorded yet/]
+]) {
+  test(`#5266: ${label} ${outcome === "acquired" ? "admits" : `refuses (${outcome})`}`, options, (t) => {
+    const f = fixture(t);
+    const r = f.runHook({}, undefined, { omit: true });
+    assert.equal(r.status, 0, r.stderr);
+    setup(f, r);
+    assert.equal(f.consume().acquired, outcome === "acquired");
+    assert.equal(f.activate("SessionEnd").acquired, outcome === "acquired");
+    assert.equal(f.classify(), outcome);
+    if (outcome === "acquired") return;
+    const w = f.consume({}, "denied");
+    assert.equal(w.error?.code, outcome === "definitive" ? "ESTATELOCKREFUSED" : "ESTATELOCKTIMEOUT", JSON.stringify(w));
+    assert.match(w.error.message, reason);
+  });
+}
+
+// #5266: a write for another workspace refuses as before (#1916 binds a session
+// to the root it started with), but says so instead of only "certificate
+// missing"; the session's own workspace is unaffected.
+test("#5266: a write for another workspace names the session's own root and still refuses", options, (t) => {
+  const f = prepared(t);
+  const other = path.join(f.root, "other-workspace");
+  fs.mkdirSync(other);
+  assert.equal(f.consume({}, false, other).acquired, false);
+  const w = f.consume({}, "denied", other);
+  assert.ok(w.error, JSON.stringify(w));
+  // Exact paths: the state directory's own name also contains "other-workspace".
+  assert.ok(w.error.message.includes(`started in (${fs.realpathSync(f.workspace)});`), w.error.message);
+  assert.ok(w.error.message.endsWith(`: for ${other}, start a Claude session in ${other}`), w.error.message);
+  assert.equal(w.error.stackHasMessage, true, "a logged stack shows the hint too");
+  assert.equal(f.consume().acquired, true, "the session's own workspace still admits");
+});
+
+test("#5266: a write without the SessionStart envelope says the hook's admission is missing", options, (t) => {
+  const f = prepared(t);
+  fs.appendFileSync(f.envFile, `export ${CERT}=''\n`);
+  const w = f.consume({}, "denied");
+  assert.ok(w.error, JSON.stringify(w));
+  assert.match(w.error.message, /no Codex state admission from this Claude session's SessionStart hook/);
+});
+
+// #5266 r2: on the Mac the hook scans processes twice and runs lsof per plugin
+// process it finds; in a burst of starts the other starting hooks are such
+// processes. Measured 16-11 on 2.1.321: 8 hooks at once took 5.3-5.6 s each,
+// and Claude cancelled 7 live startups at the 5 s of the upstream default.
+// The timeout must leave room for that; a cancelled hook grants nothing.
+test("#5266 r2: the SessionStart hook timeout leaves room for a burst of starts", options, () => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(defaultRepo, "plugins/codex/hooks/hooks.json"), "utf8")).hooks;
+  const start = hooks.SessionStart.flatMap((group) => group.hooks).find((h) => h.command.includes("session-lifecycle-hook.mjs"));
+  assert.ok(start.timeout >= 30, `SessionStart timeout ${start.timeout} s`);
+});
+
+// #5266 r2: with the envelope cleared, the refusal names what Claude recorded
+// for the hook (live shapes of 2.1.321), so the agent sees a timeout or the
+// hook's own reason instead of a guess. Text only: it still refuses.
+const startRecord = (f, attachment) => JSON.stringify({ type: "attachment", version: "2.1.321", sessionId: "session-current", isSidechain: false,
+  timestamp: "2026-11-15T23:06:23.031Z", cwd: f.workspace, attachment: { hookName: "SessionStart:startup", toolUseID: "fixture-hook", hookEvent: "SessionStart",
+    command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionStart', ...attachment } }) + "\n";
+const RECORD_AT = "Claude's last record of the hook (2026-11-15T23:06:23.031Z, SessionStart:startup)";
+const SEAL_STDERR = "Failed with non-blocking status code: SessionStart could not seal the state lock: fence not sealed yet; to stop them: state-lock stop-old; state writes refused";
+for (const [label, setup, expected] of [
+  ["cancelled at its timeout", (f) => fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_cancelled", durationMs: 5281, timedOut: true, timeoutMs: 5000 })),
+    `is empty: ${RECORD_AT}: cancelled at its 5000 ms timeout after 5281 ms)`],
+  ["that failed", (f) => fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_non_blocking_error", exitCode: 1, durationMs: 1441, stdout: "", stderr: SEAL_STDERR })),
+    `is empty: ${RECORD_AT}: hook_non_blocking_error (exit 1) after 1441 ms: ${SEAL_STDERR})`],
+  // A failure first, then a later success: the latest record speaks.
+  ["that succeeded last", (f) => { fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_non_blocking_error", exitCode: 1, stderr: SEAL_STDERR }));
+    fs.appendFileSync(f.transcript, startRecord(f, { type: "hook_success", exitCode: 0, stdout: "{}", stderr: "" })); },
+    `is empty: ${RECORD_AT} says it succeeded, but this shell holds no admission now (a later run may have cleared it without a record))`],
+  // Unreadable evidence never costs the message: the r1 text stays.
+  ["without a transcript", (f) => fs.rmSync(f.transcript), "is empty: the hook did not complete)"],
+  ["whose transcript is not a file", (f) => { fs.rmSync(f.transcript); fs.mkdirSync(f.transcript); }, "is empty: the hook did not complete)"]
+]) {
+  test(`#5266 r2: a write after a SessionStart hook ${label} names what Claude recorded`, options, (t) => {
+    const f = fixture(t);
+    const r = f.runHook({}, undefined, { omit: true });
+    assert.equal(r.status, 0, r.stderr);
+    // What a cancelled or failed hook leaves: the cleared envelope, then Claude's record.
+    fs.appendFileSync(f.envFile, `export ${CERT}=''\n`);
+    setup(f);
+    assert.equal(f.consume().acquired, false);
+    const w = f.consume({}, "denied");
+    assert.ok(w.error, JSON.stringify(w));
+    assert.ok(w.error.message.includes(expected), w.error.message);
+    assert.match(w.error.message, /resuming or restarting this Claude session runs the hook again/);
+  });
+}
 
 test("D: SessionStart with a malformed provider manifest names the manifest, not the version", options, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "manifest-notice-"));

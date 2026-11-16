@@ -1,5 +1,77 @@
 # Changelog
 
+## 1.0.7-sjotie.36 (fork, Factory #5266; 2026-11-16)
+
+- Fix: on macOS `codex:rescue` refused in a fresh session with "CODEX_COMPANION_LOCK_ADMISSION is
+  empty: the hook did not complete" when Claude Code cancelled the SessionStart hook at its 5 s
+  timeout (the upstream default). The hook scans processes twice and runs `lsof` per plugin process
+  it finds, and in a burst of session starts the other starting hooks are such processes: 8 at once
+  took 5.3-5.6 s each. The timeout is now 30 s. A cancelled hook still grants nothing.
+- The refusal now says what Claude recorded for that hook in the transcript: cancelled at its
+  timeout and how long it ran, or the hook's own failure and stderr (such as `state-lock stop-old`).
+  Text only; admission, refusal classes and the receipt check are unchanged.
+  Reviewed GO (GPT-6.1 Sol, high) on 77fc2e6; its P3 (wording after a last recorded success) is fixed
+  in the next commit.
+
+## 1.0.7-sjotie.35 (fork, Factory #4212; 2026-11-15)
+
+- Fix: `task --resume-last` from a new workroot of the same Claude session no longer fails silently
+  with "No previous Codex task thread": nothing is chosen automatically across workspace roots, but
+  the error now lists this session's finished task threads in its other roots (thread id, root,
+  time, status; read-only, bounded) and says to use `--resume-thread <id>`.
+- All text read from other roots' state (paths, fields) is treated as untrusted on every stderr and
+  state-lock output route: one stderr writer (`lib/stderr-writer.mjs`) escapes control, format and
+  line-separator characters, line feeds included. `fenced-lock.mjs` stays byte-equal to the core copy.
+
+## 1.0.7-sjotie.34 (fork, Factory #3280; 2026-11-14)
+
+- Messages only: what `wait` and resume do is unchanged. `wait <id>` that finds no job file now says
+  which workspace it looked in (job state is kept per workspace root) and, when the
+  job exists in another workspace root, which one to run it from (read-only lookup of the user's own state
+  directories, only on that failure path). A resume refused
+  because a task of the same Claude session still runs now says that this blocks
+  resuming and names `wait <id> --timeout 480` and `cancel <id>` as the ways on.
+
+## 1.0.7-sjotie.33 (fork, Factory #5520; 2026-11-12)
+
+- Fix: the app-server child no longer dies with `invalid transport in
+  mcp_servers.claude-peers-convex` on a host whose Codex config does not define
+  the peers server (surface-omarchy has no `~/.codex/config.toml`). The
+  `enabled=false` peers opt-out is now passed only when Codex itself knows that
+  server (`codex mcp get`, exit code only, output discarded; an error, timeout or
+  old Codex means unknown and leaves the opt-out out; `PEERS_DISABLE=1` stays).
+  Reviewed GO (GPT-6.1 Sol) on 894552f; the later commits are tests and a comment.
+  Known follow-ups (Factory #5520 todos): more test cases, and the synchronous
+  probe can block a cold start for up to 15 s.
+
+## 1.0.7-sjotie.32 (fork, Factory #5266; 2026-11-10)
+
+- Claude Code 2.1.321 darwin/arm64 is a proven provider version: native
+  receipt proof on that exact binary (abc9feee…), all 24 checks green, no
+  proof in model input (`docs/releases/claude-code-2.1.321-receipt-evidence.json`,
+  evidenceCommit 82283d3, the product bytes of sjotie.31). Since the Mac moved
+  to 2.1.321 on 2026-11-09 every macOS state write (rescue, review, setup)
+  refused.
+- macOS: an unlisted Claude Code version now refuses state writes with
+  `provider version unproven (claude-code <version> on <platform>/<arch>)`,
+  definitively, instead of `latest provider receipt not proven`. With an
+  unproven version the merged SessionStart context record was read as the
+  latest receipt, so the message hid the cause and its route (seen live on
+  2.1.321). Only the reason changes: every such case refused before.
+- macOS: the SessionStart notice for an unproven running version also reads
+  the version from `AI_AGENT`. In stream-json mode (how Factory runs Claude) a
+  hook gets no `CLAUDE_CODE_EXECPATH`, so the notice never appeared there.
+- macOS: a state write for another workspace than the one the session started
+  in (for example `task --cwd <other worktree>`), or from a shell without the
+  SessionStart export, adds why to the refusal. It still refuses (#1916).
+
+## 1.0.7-sjotie.31 (fork, Factory #5241; 2026-11-09)
+
+- The hook that rewrites the session env file follows a symlink to its real
+  target, writes under an exclusive lock and reads its own content back before
+  it reports success. A lock older than 30 s is moved aside and cleaned up
+  without racing another writer; Windows renames are retried.
+
 ## 1.0.7-sjotie.30 (fork, Factory #5081; 2026-11-08)
 
 - Long temporary paths use a short private broker session directory instead

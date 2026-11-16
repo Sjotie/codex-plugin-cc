@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
+import { TRANSCRIPT_PATH_ENV } from "./claude-session-transfer.mjs";
 
 export const STATE_LOCK_ADMISSION_ENV = "CODEX_COMPANION_LOCK_ADMISSION";
 export const SESSION_START_COMMAND = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionStart';
@@ -59,10 +60,15 @@ function requireProvenVersion(version) {
 // symlink is not followed, because the launcher's target can be a newer binary
 // than the one running, and a notice here makes the receipt check refuse at
 // once. Any other executable gives no version and so no notice.
+// In stream-json mode (how Factory runs Claude) a hook gets no
+// CLAUDE_CODE_EXECPATH (2.1.308 and 2.1.321, measured in #5266), but AI_AGENT
+// (claude-code_2-1-321_harness), set from the version the running process
+// reports itself; that is the fallback.
 // Returns null when the running version is proven or unknown, otherwise a text
 // naming what refuses and the route to a fix.
-export function unprovenRunningVersionNotice(execPath = process.env.CLAUDE_CODE_EXECPATH) {
-  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(execPath ?? ""))?.[0];
+export function unprovenRunningVersionNotice(execPath = process.env.CLAUDE_CODE_EXECPATH, agent = process.env.AI_AGENT) {
+  const fromAgent = /^claude-code_(\d+)-(\d+)-(\d+)(?:_|$)/.exec(agent ?? "");
+  const version = /^\d+\.\d+\.\d+$/.exec(path.basename(execPath ?? ""))?.[0] ?? (fromAgent ? fromAgent.slice(1, 4).join(".") : undefined);
   if (!version) return null;
   const refuses = "so every Codex state write here (rescue, review, setup, job updates) refuses with 'admission refused'. Retrying does not help.";
   let elsewhere;
@@ -221,13 +227,16 @@ export function readSessionReceipt(locator, expected) {
   try { output = JSON.parse(a?.stdout); } catch { output = null; }
   const token = output?.codexStateLockAdmission ?? null;
   const ours = typeof token?.attemptId === "string" && token.attemptId === expected?.attemptId;
-  if (latest.type !== "attachment" || a?.type !== "hook_success" || a.hookEvent !== "SessionStart" || a.exitCode !== 0 || a.command !== SESSION_START_COMMAND) {
-    // Our own command failed or crashed. With this attempt's token the failure
-    // is this attempt's; without one it may belong to an earlier attempt.
-    if (!ours && latest.type === "attachment" && a?.command === SESSION_START_COMMAND) notYet("latest receipt belongs to an earlier attempt");
-    fail("latest provider receipt not proven");
-  }
+  const completed = latest.type === "attachment" && a?.type === "hook_success" && a.hookEvent === "SessionStart" && a.exitCode === 0 && a.command === SESSION_START_COMMAND;
+  // Our own command failed or crashed. With this attempt's token the failure
+  // is this attempt's; without one it may belong to an earlier attempt.
+  if (!completed && !ours && latest.type === "attachment" && a?.command === SESSION_START_COMMAND) notYet("latest receipt belongs to an earlier attempt");
+  // Every other path refuses an unlisted version anyway; name it, before the
+  // record is read as a receipt. The context skip above only knows proven
+  // shapes, so for an unproven version the merged context record is 'latest'
+  // and would read as "receipt not proven" (#5266).
   requireProvenVersion(latest.version);
+  if (!completed) fail("latest provider receipt not proven");
   if (latest.sessionId !== locator.sessionId || latest.isSidechain !== false ||
     !path.isAbsolute(latest.cwd ?? "") || fs.realpathSync(latest.cwd) !== locator.cwd) fail("latest provider receipt not proven");
   if (!ours) {
@@ -269,7 +278,79 @@ export function envelopeFor(locator, capability) {
 
 const ENVELOPE_KEYS = ["version", "sessionId", "bindingEpoch", "capabilityId", "root", "transcriptPath", "configRoot", "admission"];
 
-export function consumerSessionOptions(fencePath) {
+// What Claude recorded for this session's last run of our SessionStart hook,
+// for the refusal message only (#5266 r2): a timeout or the hook's own reason
+// (such as "state-lock stop-old"). Never part of an admission decision, so it
+// reads loosely and gives null on anything it cannot read.
+const OUTCOME_STDERR_MAX = 600;
+const OUTCOME_TRANSCRIPT_MAX = 64 * 1024 * 1024;
+function startHookOutcome() {
+  const file = process.env[TRANSCRIPT_PATH_ENV];
+  if (!file || !path.isAbsolute(file)) return null;
+  let text;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile()) return null;
+    if (st.size > OUTCOME_TRANSCRIPT_MAX) return `the hook's outcome was not read: the transcript ${file} is ${Math.round(st.size / 1048576)} MB, above the ${OUTCOME_TRANSCRIPT_MAX / 1048576} MB this message reads; its last SessionStart record of session-lifecycle-hook.mjs says what happened`;
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let last = null;
+  for (const line of text.split("\n")) {
+    if (!line.includes("session-lifecycle-hook.mjs")) continue;
+    let r;
+    try { r = JSON.parse(line); } catch { continue; }
+    const a = r?.attachment;
+    if (r?.type === "attachment" && a?.command === SESSION_START_COMMAND && a.hookEvent === "SessionStart" &&
+      (!process.env.CODEX_COMPANION_SESSION_ID || r.sessionId === process.env.CODEX_COMPANION_SESSION_ID)) last = r;
+  }
+  if (!last) return null;
+  const a = last.attachment;
+  const at = `Claude's last record of the hook (${typeof last.timestamp === "string" ? last.timestamp : "no time"}, ${a.hookName})`;
+  const ran = Number.isFinite(a.durationMs) ? ` after ${a.durationMs} ms` : "";
+  // A later run can clear the export and end without a record of its own.
+  if (a.type === "hook_success") return `${at} says it succeeded, but this shell holds no admission now (a later run may have cleared it without a record)`;
+  if (a.type === "hook_cancelled") {
+    return a.timedOut === true && Number.isFinite(a.timeoutMs)
+      ? `${at}: cancelled at its ${a.timeoutMs} ms timeout${ran}`
+      : `${at}: cancelled${ran}`;
+  }
+  const stderr = String(a.stderr ?? "");
+  const shown = stderr.length > OUTCOME_STDERR_MAX
+    ? `${stderr.slice(0, OUTCOME_STDERR_MAX)} [${stderr.length - OUTCOME_STDERR_MAX} more characters in the transcript record]`
+    : stderr;
+  return `${at}: ${a.type ?? "failed"} (exit ${a.exitCode ?? "unknown"})${ran}: ${shown || "no stderr recorded"}`;
+}
+
+// Why this consumer has no admission, for the refusal message only (#5266):
+// the lock itself then reports just "admission certificate missing". Names
+// the two causes seen in use; any other (a malformed or replaced envelope or
+// locator) keeps the lock's own reason. Reads, never repairs.
+function consumerRefusalHint(fencePath, target) {
+  try {
+    const raw = process.env[STATE_LOCK_ADMISSION_ENV];
+    if (!raw) return `no Codex state admission from this Claude session's SessionStart hook (${STATE_LOCK_ADMISSION_ENV} ${raw === "" ? `is empty: ${startHookOutcome() ?? "the hook did not complete"}` : "is not set"}); ` +
+      "resuming or restarting this Claude session runs the hook again; " +
+      "on macOS only a Bash call in a Claude session whose Codex SessionStart hook succeeded can write Codex state";
+    const envelope = JSON.parse(raw);
+    if (typeof envelope?.root !== "string") return null;
+    let requested = path.dirname(fencePath);
+    try { requested = fs.realpathSync(requested); } catch { /* a root never prepared has no directory yet */ }
+    if (envelope.root === requested) return null;
+    let started = envelope.root;
+    try { started = readSessionLocator(envelope.sessionId)?.cwd ?? started; } catch { /* the envelope's root names it too */ }
+    const route = target ? `for ${target}, start a Claude session in ${target}` : `${requested} belongs to another workspace or CLAUDE_PLUGIN_DATA; start a Claude session in that workspace`;
+    return `this Claude session's state admission belongs to the workspace this Claude session started in (${started}); ` +
+      `on macOS a session writes Codex state only for that workspace and CLAUDE_PLUGIN_DATA (#1916): ${route}`;
+  } catch {
+    return null;
+  }
+}
+
+// target: the workspace the caller asked for (null: only a state directory is
+// known), named in the refusal hint.
+export function consumerSessionOptions(fencePath, target = null) {
   let envelope = null;
   let locator = null;
   try {
@@ -289,6 +370,9 @@ export function consumerSessionOptions(fencePath) {
     locator = null;
   }
   return {
+    // Text only, for the refusal message (#5266): never an option of the lock.
+    // Built only when a refusal is reported.
+    refusalHint: envelope ? null : () => consumerRefusalHint(fencePath, target),
     consumeAdmission: envelope?.admission ?? null,
     consumeSessionAdmission: envelope ? { sessionId: envelope.sessionId, bindingEpoch: envelope.bindingEpoch, capabilityId: envelope.capabilityId,
       ...(Object.hasOwn(envelope, "attemptId") ? { attemptId: envelope.attemptId } : {}) } : null,
