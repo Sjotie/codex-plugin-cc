@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.7-sjotie.36 (fork, Factory #5266; 2026-11-16)
+
+- Fix: on macOS `codex:rescue` refused in a fresh session with "CODEX_COMPANION_LOCK_ADMISSION is
+  empty: the hook did not complete" when Claude Code cancelled the SessionStart hook at its 5 s
+  timeout (the upstream default). The hook scans processes twice and runs `lsof` per plugin process
+  it finds, and in a burst of session starts the other starting hooks are such processes: 8 at once
+  took 5.3-5.6 s each. The timeout is now 30 s. A cancelled hook still grants nothing.
+- The refusal now says what Claude recorded for that hook in the transcript: cancelled at its
+  timeout and how long it ran, or the hook's own failure and stderr (such as `state-lock stop-old`).
+  Text only; admission, refusal classes and the receipt check are unchanged.
+  Reviewed GO (GPT-6.1 Sol, high) on 77fc2e6; its P3 (wording after a last recorded success) is fixed
+  in the next commit.
+
 ## 1.0.7-sjotie.35 (fork, Factory #4212; 2026-11-15)
 
 - Fix: `task --resume-last` from a new workroot of the same Claude session no longer fails silently
