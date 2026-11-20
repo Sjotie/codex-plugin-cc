@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.7-sjotie.37 (fork, Factory #6484; 2026-11-21)
+
+- Claude Code 2.1.328 darwin/arm64 is a proven provider version: native receipt proof on that exact
+  binary (e8554719…), all 24 checks green, no proof in model input, latency manual compact 202 ms and
+  auto compact 170 ms (`docs/releases/claude-code-2.1.328-receipt-evidence.json`, Factory job
+  20261120-230456-receipt-2-1-328-fbb9). evidenceCommit 23eb972 (sjotie-integration) has the same
+  product and harness bytes as sjotie.36 (`git diff cbc8aaf 23eb972 -- plugins/ tests/fenced-lock/`
+  is empty). Since the Mac moved to 2.1.328 on 2026-11-19 (#6445) every macOS state write
+  (rescue, review, setup) refused.
+
 ## 1.0.7-sjotie.36 (fork, Factory #5266; 2026-11-16)
 
 - Fix: on macOS `codex:rescue` refused in a fresh session with "CODEX_COMPANION_LOCK_ADMISSION is
