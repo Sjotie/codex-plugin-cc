@@ -673,14 +673,17 @@ def main():
         return [e for e in read_jsonl(events_path) if (kind is None or e.get("kind") == kind) and (event is None or e.get("event") == event)]
 
     def unattributed_probes():
-        return [p for p in probes() if p.get("attempt") not in accepted_attempts]
+        # Every probe file belongs to an accepted attempt, and each accepted
+        # attempt has exactly one file (a late duplicate of the same call fails).
+        ids = [p.get("attempt") for p in probes()]
+        return [i for i in ids if i not in accepted_attempts] + [i for i in accepted_attempts if ids.count(i) != 1]
 
     def window_warning_seen():
         # Claude warns on screen when it does not use the requested
         # CLAUDE_CODE_AUTO_COMPACT_WINDOW (below its minimum or above its cap).
         for n in os.listdir(root):
             if n.startswith("pty") and n.endswith(".log"):
-                text = re.sub(rb"\x1b\[[0-9;?<>=]*[a-zA-Z~]|\x1b\][^\x07]*\x07|\s+", b"", open(os.path.join(root, n), "rb").read())
+                text = re.sub(rb"\x1b\[[0-9;?<>=]*[a-zA-Z~]|\s+", b"", open(os.path.join(root, n), "rb").read())
                 if b"CLAUDE_CODE_AUTO_COMPACT_WINDOW" in text:
                     return True
         return False
