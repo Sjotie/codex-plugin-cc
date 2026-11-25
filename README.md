@@ -38,7 +38,7 @@ only this hook route performs process proof. See the release checklist for
 native coverage; this candidate is not permission to publish or install it.
 On macOS this candidate accepts only the Claude Code versions listed with
 their proof in `plugins/codex/scripts/lib/provider-receipts.json` (now
-**2.1.301, 2.1.308, 2.1.321 and 2.1.328 on darwin/arm64**): another version, platform or process
+**2.1.301, 2.1.308, 2.1.321, 2.1.328 and 2.1.332 on darwin/arm64**): another version, platform or process
 architecture refuses with `provider version unproven`, definitively, also
 when the latest record is a context or failure record of that version. One
 exception keeps its earlier class: a failure of this plugin's own hook without
@@ -526,3 +526,16 @@ directory owned by that uid with mode 0700; symlinks and unsafe permissions
 are refused. Normal shutdown removes the session, and later starts sweep dead
 orphan sessions in this root too. If the fallback cannot be used, the error
 names the original socket path, byte count, limit and fallback failure.
+
+The generic admission fixture publishes one shared certificate atomically in
+the fixture fence. Consumers reuse it only while the fence/authority identities
+and sealed record hash match. Certificate reuse still acquires the real state
+lock; it avoids preparing admission again while another writer holds that lock.
+
+On macOS the runner executes two successive groups: generic tests, then the
+native lock/stress files (`state-lock-*` and `state-concurrency`) one file at a
+time. The generic group defaults to half the available cores, rounded down
+with a minimum of one; `CODEX_TEST_FILE_CONCURRENCY` overrides that value with
+a positive integer. Linux keeps Node's default file concurrency. No files are
+excluded. The 50-writer test still starts all 50 writers, and the product's
+lock deadline remains unchanged.

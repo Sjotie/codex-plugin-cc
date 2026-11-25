@@ -54,8 +54,10 @@ refuses at its start and names them. macOS and Linux only (flock).
 Without the flag the entry must already be listed, with this binary's hash.
 
 Options: --expect-version X.Y.Z (required; must equal `claude --version`),
---prepare-candidate, --auto-window TOKENS (default 20000), --max-fills N
-(default 60), --auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
+--prepare-candidate, --auto-window TOKENS (default and minimum 100000: from
+2.1.332 Claude Code reads a smaller CLAUDE_CODE_AUTO_COMPACT_WINDOW as 100k, so
+the window recorded is the one Claude uses), --max-fills N (default 150),
+--auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
 <fixture>/summary.json and prints its path; remove the directory when done.
 Exit status 0 only when every check passed. It stops only the Claude process
 it started itself. Each step waits for the turn's Stop hook before the next
@@ -406,12 +408,13 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 const [root, stateUrl] = [__ROOT__, __STATE__];
 const sha = (s) => s ? crypto.createHash("sha256").update(s).digest("hex").slice(0, 16) : null;
+const attempt = /^[0-9a-f]{16}$/.test(process.argv[2] ?? "") ? process.argv[2] : null;
 let envelope = null; try { envelope = JSON.parse(process.env.CODEX_COMPANION_LOCK_ADMISSION ?? "null"); } catch {}
 const state = await import(stateUrl);
 let acquired = false, wrote = false, error = null;
 try { const lock = state.openStateLock(root); const h = lock.acquire({ deadlineMs: 3000 }); acquired = true; lock.release(h); state.setConfig(root, "dProbeAt", Date.now()); wrote = true; }
 catch (e) { error = { code: e.code ?? null, reason: String(e.reason ?? e.message).slice(0, 160) }; }
-fs.writeFileSync(`${root}/probe-${Date.now()}.json`, JSON.stringify({ at: Date.now(), acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID), transcriptPath: process.env.CODEX_COMPANION_TRANSCRIPT_PATH ?? null }));
+fs.writeFileSync(`${root}/probe-${Date.now()}-${process.pid}.json`, JSON.stringify({ at: Date.now(), attempt, acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID), transcriptPath: process.env.CODEX_COMPANION_TRANSCRIPT_PATH ?? null }), { flag: "wx" });  // own name per process, never overwritten: a duplicate call stays visible
 console.log(acquired && wrote ? "PROBE OK" : "PROBE REFUSED");
 """
 
@@ -552,10 +555,14 @@ def main():
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
     ap.add_argument("--expect-version", required=True)
     ap.add_argument("--prepare-candidate", action="store_true")
-    ap.add_argument("--auto-window", type=int, default=20000)
-    ap.add_argument("--max-fills", type=int, default=60)
+    ap.add_argument("--auto-window", type=int, default=100000)
+    ap.add_argument("--max-fills", type=int, default=150)
     ap.add_argument("--auto-minutes", type=float, default=25)
     args = ap.parse_args()
+    # Claude Code 2.1.332 treats a window below 100k as 100k (it says so on
+    # screen); refuse such a value so summary.autoWindow is the effective one.
+    if args.auto_window < 100000:
+        ap.error("--auto-window must be at least 100000: Claude Code reads a smaller value as 100000")
     expected = args.expect_version
 
     assert sys.platform == "darwin", "native macOS only"
@@ -622,8 +629,13 @@ def main():
             f.write(f"filler line {i:04d} for the auto compact window of the D probe; it carries no instruction.\n")
     node = shutil.which("node")
     commands = os.path.join(plugin, "commands")
-    for name, line, what in (("d-probe", f"{shlex.quote(node)} {shlex.quote(probe)}", "the D admission probe"), ("d-worker", f"{shlex.quote(node)} {shlex.quote(worker)}", "the D background worker"), ("d-fill", f"cat {shlex.quote(filler)}", "the filler output")):
-        open(os.path.join(commands, f"{name}.md"), "w").write(f"---\ndescription: {what}\nallowed-tools: Bash(node:*), Bash(cat:*)\n---\nRun exactly this Bash command once, then say only OK. Do not run other commands.\n\n```bash\n{line}\n```\n")
+    # The command lines start with the absolute node path, which Bash(node:*)
+    # does not cover: under auto mode its classifier approved them, under
+    # dontAsk only a rule does, so the rules name that path.
+    allow = [f"Bash({node}:*)", "Bash(node:*)", "Bash(cat:*)"]
+    allow_tools = ", ".join(allow)
+    for name, line, what in (("d-probe", f"{shlex.quote(node)} {shlex.quote(probe)} $ARGUMENTS", "the D admission probe"), ("d-worker", f"{shlex.quote(node)} {shlex.quote(worker)}", "the D background worker"), ("d-fill", f"cat {shlex.quote(filler)}", "the filler output")):
+        open(os.path.join(commands, f"{name}.md"), "w").write(f"---\ndescription: {what}\nallowed-tools: {allow_tools}\n---\nRun exactly this Bash command once, then say only OK. Do not run other commands.\n\n```bash\n{line}\n```\n")
     settings = os.path.join(root, "settings.json")
     # Bash sandbox off: Claude gives plugin hooks CLAUDE_PLUGIN_DATA under
     # ~/.claude/plugins/data/<plugin>, outside the sandbox's write area, so a
@@ -635,7 +647,7 @@ def main():
     # has: Claude merges all hook context into one record (#1916), which the
     # receipt check must see through. It is not the product's hook.
     other_hook = node_file("other-context-hook.mjs", 'process.stdout.write(JSON.stringify({hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: "Another hook\'s context."}}) + "\\n");\n')
-    json.dump({"sandbox": {"enabled": False}, "enabledPlugins": {}, "permissions": {"allow": ["Bash(node:*)", "Bash(cat:*)"]},
+    json.dump({"sandbox": {"enabled": False}, "enabledPlugins": {}, "permissions": {"allow": allow},
                "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": f"{shlex.quote(node)} {shlex.quote(other_hook)}"}]}]}}, open(settings, "w"))
 
     # CLAUDE_CODE_CHILD_SESSION (set when this runs inside another Claude
@@ -644,7 +656,14 @@ def main():
     env = {k: v for k, v in os.environ.items() if not (k.startswith("CODEX_COMPANION_") or k in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "NODE_OPTIONS"))}
     env.update({"TERM": "xterm-256color", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "D_PROBE_ROOT": root, "CLAUDE_PLUGIN_DATA": os.path.join(root, "data"),
                 "NODE_OPTIONS": f"--import=file://{bootstrap}", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(args.auto_window)})
-    argv = [args.claude, "--plugin-dir", plugin, "--setting-sources", "", "--settings", settings, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash"]
+    argv = [args.claude, "--plugin-dir", plugin, "--setting-sources", "", "--settings", settings, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash",
+            # Not auto mode (the default from 2.1.332): its classifier refused a
+            # probe command the model had changed. dontAsk decides Bash by the
+            # permission rules only (the allow rules here plus Claude's built-in
+            # read-only commands) and refuses the rest without a prompt that
+            # would hang the turn. The lifecycle hooks and receipt checks run
+            # unchanged; the tool records in the transcript reflect this mode.
+            "--permission-mode", "dontAsk"]
 
     summary = {"root": root, "claudeVersion": version, "claudeBinarySha256": file_sha(claude_bin), "arch": platform.machine(), "repoHead": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip(),
                "sourceHashes": source_hashes, "harnessSha256": file_sha(__file__), "autoWindow": args.auto_window, "phases": [], "checks": {}}
@@ -652,6 +671,22 @@ def main():
 
     def events(kind=None, event=None):
         return [e for e in read_jsonl(events_path) if (kind is None or e.get("kind") == kind) and (event is None or e.get("event") == event)]
+
+    def unattributed_probes():
+        # Every probe file belongs to an accepted attempt, and each accepted
+        # attempt has exactly one file (a late duplicate of the same call fails).
+        ids = [p.get("attempt") for p in probes()]
+        return [i for i in ids if i not in accepted_attempts] + [i for i in accepted_attempts if ids.count(i) != 1]
+
+    def window_warning_seen():
+        # Claude warns on screen when it does not use the requested
+        # CLAUDE_CODE_AUTO_COMPACT_WINDOW (below its minimum or above its cap).
+        for n in os.listdir(root):
+            if n.startswith("pty") and n.endswith(".log"):
+                text = re.sub(rb"\x1b\[[0-9;?<>=]*[a-zA-Z~]|\s+", b"", open(os.path.join(root, n), "rb").read())
+                if b"CLAUDE_CODE_AUTO_COMPACT_WINDOW" in text:
+                    return True
+        return False
 
     def probes():
         return sorted((json.load(open(os.path.join(root, n))) for n in os.listdir(root) if n.startswith("probe-") and n.endswith(".json")), key=lambda p: p["at"])
@@ -720,7 +755,7 @@ def main():
             raise
         # Startup: Claude creates the transcript only with the first user turn,
         # so the time to its receipt line is the time to that turn, no latency.
-        timing = {"latencyHookExitToReceiptMs": round(seen["seenAt"] - start_exit["at"], 1)} if latency else {"receiptRecordedWithFirstTurn": True}
+        timing = {"latencyHookExitToReceiptMs": round(seen["seenAt"] - start_exit["at"], 1)} if latency else {"receiptRecordedWithFirstTurn": None if last_probe_retried else True}
         return {"source": start_exit["source"], "transcriptExistsAtExit": start_exit.get("transcriptExistsAtExit"), "attemptSha": sha(start_exit["attemptId"]), "capabilitySha": sha(start_exit["capabilityId"]), "hookExitCode": start_exit["code"],
                 **timing, "receiptType": seen["type"], "receiptExitCode": seen["exitCode"], "receiptDurationMs": seen["durationMs"], "receiptVersion": seen["version"]}
 
@@ -731,11 +766,36 @@ def main():
         wait(lambda: any(e["at"] > sent for e in events("hook-exit", "Stop")), f"{label} turn", timeout)
         return sent
 
+    accepted_attempts = []
+    last_probe_retried = False
+
     def run_probe(label):
-        before = len(probes())
-        turn("/d-probe", f"{label} probe")
-        wait(lambda: len(probes()) > before, f"{label} probe file")
-        p = dict(probes()[-1])
+        # The model can change the command (seen with 2.1.332: an invented
+        # prefix), which the permission rules then refuse; resend once, on
+        # record. Each turn passes its own random attempt id as the command's
+        # argument, so d-probe.mjs gets it in its argv and writes it into its
+        # file: only the file of the accepted attempt counts, and any other
+        # file (no id, a refused attempt's id arriving late) fails the run,
+        # here and in check probeFilesAttributed at the end.
+        nonlocal last_probe_retried
+        last_probe_retried = False
+        for attempt in range(2):
+            tag = os.urandom(8).hex()
+            turn(f"/codex:d-probe {tag}", f"{label} probe")
+            try:
+                wait(lambda: [p for p in probes() if p.get("attempt") == tag], f"{label} probe file", 30 if attempt == 0 else 120)
+                break
+            except RuntimeError as error:
+                if attempt == 1 or not str(error).endswith("timed out"):
+                    raise
+                last_probe_retried = True
+                summary.setdefault("probeRetries", []).append({"phase": label, "reason": str(error)})
+                persist()
+        accepted_attempts.append(tag)
+        mine = [p for p in probes() if p.get("attempt") == tag]
+        if len(mine) != 1 or unattributed_probes():
+            raise RuntimeError(f"{label}: a probe file belongs to no accepted attempt")
+        p = dict(mine[0])
         transcript = p.pop("transcriptPath", None)
         p["transcriptPathSha"] = sha(transcript)
         if transcript:
@@ -929,6 +989,8 @@ def main():
                 bool(positive_rows) and all(row["fieldTypes"] == want_fields and row["recordFields"] == want_record for row in positive_rows),
             "noProofInModelInput": leaks == 0,
             "contextMergedWithOtherHook": merged_context_seen(),
+            "probeFilesAttributed": not unattributed_probes(),
+            "autoWindowUsed": not window_warning_seen(),
         }
         summary["latencyMs"] = {label: s["latencyHookExitToReceiptMs"] for label, s in (("manual compact", manual), ("auto compact", auto)) if s}
         summary["passed"] = all(summary["checks"].values())

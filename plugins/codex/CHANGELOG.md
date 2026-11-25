@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.7-sjotie.38 (fork, Factory #7145; 2026-11-25)
+
+- Claude Code 2.1.332 darwin/arm64 is a proven provider version: native receipt proof on that exact
+  binary (5b8214f8…), all 26 checks green, no proof in model input, latency manual compact 131 ms and
+  auto compact 119 ms (`docs/releases/claude-code-2.1.332-receipt-evidence.json`, Factory job
+  20261125-200414-receipt-2-1-332-r7-bc38). evidenceCommit c9f594e is the parent of this release:
+  `plugins/` there is byte-identical to sjotie.37 (`git diff a5ee6e8 c9f594e -- plugins/` is empty);
+  since sjotie.37 only tests and the proof harness changed (#5091 test commits, this harness).
+- Proof harness (`tests/fenced-lock/macos-d-pty-probe.py`) for 2.1.332, which made auto mode the
+  default and reads an auto-compact window below 100k as 100k: Claude runs with
+  `--permission-mode dontAsk` and allow rules that name the absolute node path; a refused /d-probe is
+  resent once with a fresh attempt id passed as the command argument, recorded in
+  `summary.probeRetries`, and every probe file must belong to exactly one accepted attempt
+  (`probeFilesAttributed`); `--auto-window` defaults to and requires at least 100000 and
+  `autoWindowUsed` fails on Claude's window warning in the PTY logs; `--max-fills` defaults to 150.
+  Reviewed by GPT-6.2 Sol (5 rounds, GO on c9f594e).
+
 ## 1.0.7-sjotie.37 (fork, Factory #6484; 2026-11-21)
 
 - Claude Code 2.1.328 darwin/arm64 is a proven provider version: native receipt proof on that exact

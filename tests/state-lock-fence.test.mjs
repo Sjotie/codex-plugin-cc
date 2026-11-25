@@ -160,8 +160,18 @@ for (const impl of ["o1", "o2"]) {
     s.expose(old.pid);
     await s.wait("old.entered");
     fs.renameSync(fence, `${fence}.taken-away`); // its lock disappears (outside the protocol)
-    const w = s.start("w");
-    await new Promise((r) => setTimeout(r, 400));
+    const w = s.start("w", { gates: { attempt: "pause" } });
+    await s.wait("w.paused.attempt");
+    // Deterministically model a delayed writer, independent of host load.
+    const resume = setTimeout(() => s.signal("w.resume.attempt"), 650);
+    t.after(() => clearTimeout(resume));
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      try { if (fs.lstatSync(fence).isDirectory()) break; }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      assert.ok(Date.now() < deadline, `writer did not publish fence: ${s.errors().join("; ")}`);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
     assert.equal(fs.lstatSync(fence).isDirectory(), true, "the new writer published a fence");
     assert.equal(s.has("w.entered"), false, "but waits for the seal while the old owner lives");
     s.signal("old.release");
