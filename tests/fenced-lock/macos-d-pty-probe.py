@@ -408,12 +408,13 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 const [root, stateUrl] = [__ROOT__, __STATE__];
 const sha = (s) => s ? crypto.createHash("sha256").update(s).digest("hex").slice(0, 16) : null;
+let attempt = null; try { attempt = fs.readFileSync(`${root}/probe-attempt`, "utf8").trim() || null; } catch {}
 let envelope = null; try { envelope = JSON.parse(process.env.CODEX_COMPANION_LOCK_ADMISSION ?? "null"); } catch {}
 const state = await import(stateUrl);
 let acquired = false, wrote = false, error = null;
 try { const lock = state.openStateLock(root); const h = lock.acquire({ deadlineMs: 3000 }); acquired = true; lock.release(h); state.setConfig(root, "dProbeAt", Date.now()); wrote = true; }
 catch (e) { error = { code: e.code ?? null, reason: String(e.reason ?? e.message).slice(0, 160) }; }
-fs.writeFileSync(`${root}/probe-${Date.now()}.json`, JSON.stringify({ at: Date.now(), acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID), transcriptPath: process.env.CODEX_COMPANION_TRANSCRIPT_PATH ?? null }));
+fs.writeFileSync(`${root}/probe-${Date.now()}.json`, JSON.stringify({ at: Date.now(), attempt, acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID), transcriptPath: process.env.CODEX_COMPANION_TRANSCRIPT_PATH ?? null }));
 console.log(acquired && wrote ? "PROBE OK" : "PROBE REFUSED");
 """
 
@@ -652,9 +653,11 @@ def main():
                 "NODE_OPTIONS": f"--import=file://{bootstrap}", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(args.auto_window)})
     argv = [args.claude, "--plugin-dir", plugin, "--setting-sources", "", "--settings", settings, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash",
             # Not auto mode (the default from 2.1.332): its classifier refused a
-            # probe command the model had changed. dontAsk refuses every call
-            # the allow rule does not cover, without a prompt that would hang the
-            # turn, so Bash(node:*) / Bash(cat:*) alone decide.
+            # probe command the model had changed. dontAsk decides Bash by the
+            # permission rules only (the allow rules here plus Claude's built-in
+            # read-only commands) and refuses the rest without a prompt that
+            # would hang the turn. The lifecycle hooks and receipt checks run
+            # unchanged; the tool records in the transcript reflect this mode.
             "--permission-mode", "dontAsk"]
 
     summary = {"root": root, "claudeVersion": version, "claudeBinarySha256": file_sha(claude_bin), "arch": platform.machine(), "repoHead": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip(),
@@ -663,6 +666,9 @@ def main():
 
     def events(kind=None, event=None):
         return [e for e in read_jsonl(events_path) if (kind is None or e.get("kind") == kind) and (event is None or e.get("event") == event)]
+
+    def late_retried_probes():
+        return [p for p in probes() if p.get("attempt") in retried_attempts]
 
     def probes():
         return sorted((json.load(open(os.path.join(root, n))) for n in os.listdir(root) if n.startswith("probe-") and n.endswith(".json")), key=lambda p: p["at"])
@@ -698,6 +704,8 @@ def main():
                     raise RuntimeError("trust dialog: cursor is not on Yes; refusing to confirm")
                 term.send("\r")
                 trusted = True
+            if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" in re.sub(r"\s+", "", screen):
+                raise RuntimeError(f"{label}: Claude does not use the requested auto-compact window ({args.auto_window}); see its warning")
             if re.search(r"usage limit|rate limit|please log in|login required|reauthenticate", screen, re.I):
                 raise RuntimeError(f"{label}: provider login/quota boundary")
             if term.exited():
@@ -731,7 +739,7 @@ def main():
             raise
         # Startup: Claude creates the transcript only with the first user turn,
         # so the time to its receipt line is the time to that turn, no latency.
-        timing = {"latencyHookExitToReceiptMs": round(seen["seenAt"] - start_exit["at"], 1)} if latency else {"receiptRecordedWithFirstTurn": True}
+        timing = {"latencyHookExitToReceiptMs": round(seen["seenAt"] - start_exit["at"], 1)} if latency else {"receiptRecordedWithFirstTurn": not last_probe_retried}
         return {"source": start_exit["source"], "transcriptExistsAtExit": start_exit.get("transcriptExistsAtExit"), "attemptSha": sha(start_exit["attemptId"]), "capabilitySha": sha(start_exit["capabilityId"]), "hookExitCode": start_exit["code"],
                 **timing, "receiptType": seen["type"], "receiptExitCode": seen["exitCode"], "receiptDurationMs": seen["durationMs"], "receiptVersion": seen["version"]}
 
@@ -742,21 +750,37 @@ def main():
         wait(lambda: any(e["at"] > sent for e in events("hook-exit", "Stop")), f"{label} turn", timeout)
         return sent
 
+    retried_attempts = []
+    last_probe_retried = False
+
     def run_probe(label):
-        before = len(probes())
         # The model can change the command (seen with 2.1.332: an invented
-        # prefix), which the allow rule then refuses; resend once, on record.
+        # prefix), which the permission rules then refuse; resend once, on
+        # record. Each turn announces its own attempt id in probe-attempt and
+        # d-probe.mjs writes it into its file, so only this attempt's file
+        # counts: a late file of a refused attempt can neither stand in for the
+        # retry nor satisfy a later phase, and if it appears at all the run
+        # fails (here, and in check noLateRetriedProbe at the end).
+        nonlocal last_probe_retried
+        last_probe_retried = False
         for attempt in range(2):
+            tag = f"{label}#{attempt}#{time.time_ns()}"
+            open(os.path.join(root, "probe-attempt"), "w").write(tag)
             turn("/d-probe", f"{label} probe")
             try:
-                wait(lambda: len(probes()) > before, f"{label} probe file", 30 if attempt == 0 else 120)
+                wait(lambda: [p for p in probes() if p.get("attempt") == tag], f"{label} probe file", 30 if attempt == 0 else 120)
                 break
             except RuntimeError as error:
                 if attempt == 1 or not str(error).endswith("timed out"):
                     raise
+                retried_attempts.append(tag)
+                last_probe_retried = True
                 summary.setdefault("probeRetries", []).append({"phase": label, "reason": str(error)})
                 persist()
-        p = dict(probes()[-1])
+        mine = [p for p in probes() if p.get("attempt") == tag]
+        if len(mine) != 1 or late_retried_probes():
+            raise RuntimeError(f"{label}: probe files of this or a refused attempt are ambiguous")
+        p = dict(mine[0])
         transcript = p.pop("transcriptPath", None)
         p["transcriptPathSha"] = sha(transcript)
         if transcript:
@@ -950,6 +974,7 @@ def main():
                 bool(positive_rows) and all(row["fieldTypes"] == want_fields and row["recordFields"] == want_record for row in positive_rows),
             "noProofInModelInput": leaks == 0,
             "contextMergedWithOtherHook": merged_context_seen(),
+            "noLateRetriedProbe": not late_retried_probes(),
         }
         summary["latencyMs"] = {label: s["latencyHookExitToReceiptMs"] for label, s in (("manual compact", manual), ("auto compact", auto)) if s}
         summary["passed"] = all(summary["checks"].values())
