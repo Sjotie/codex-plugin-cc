@@ -414,7 +414,7 @@ const state = await import(stateUrl);
 let acquired = false, wrote = false, error = null;
 try { const lock = state.openStateLock(root); const h = lock.acquire({ deadlineMs: 3000 }); acquired = true; lock.release(h); state.setConfig(root, "dProbeAt", Date.now()); wrote = true; }
 catch (e) { error = { code: e.code ?? null, reason: String(e.reason ?? e.message).slice(0, 160) }; }
-fs.writeFileSync(`${root}/probe-${Date.now()}.json`, JSON.stringify({ at: Date.now(), attempt, acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID), transcriptPath: process.env.CODEX_COMPANION_TRANSCRIPT_PATH ?? null }));
+fs.writeFileSync(`${root}/probe-${Date.now()}-${process.pid}.json`, JSON.stringify({ at: Date.now(), attempt, acquired, wrote, error, envelopeVersion: envelope?.version ?? null, capabilitySha: sha(envelope?.capabilityId), sessionSha: sha(process.env.CLAUDE_CODE_SESSION_ID), transcriptPath: process.env.CODEX_COMPANION_TRANSCRIPT_PATH ?? null }), { flag: "wx" });  // own name per process, never overwritten: a duplicate call stays visible
 console.log(acquired && wrote ? "PROBE OK" : "PROBE REFUSED");
 """
 
