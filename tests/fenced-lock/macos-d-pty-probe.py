@@ -54,8 +54,10 @@ refuses at its start and names them. macOS and Linux only (flock).
 Without the flag the entry must already be listed, with this binary's hash.
 
 Options: --expect-version X.Y.Z (required; must equal `claude --version`),
---prepare-candidate, --auto-window TOKENS (default 20000), --max-fills N
-(default 60), --auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
+--prepare-candidate, --auto-window TOKENS (default and minimum 100000: from
+2.1.332 Claude Code reads a smaller CLAUDE_CODE_AUTO_COMPACT_WINDOW as 100k, so
+the window recorded is the one Claude uses), --max-fills N (default 150),
+--auto-minutes M (default 25), --claude PATH. It keeps its fixture directory as evidence, writes
 <fixture>/summary.json and prints its path; remove the directory when done.
 Exit status 0 only when every check passed. It stops only the Claude process
 it started itself. Each step waits for the turn's Stop hook before the next
@@ -552,10 +554,14 @@ def main():
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
     ap.add_argument("--expect-version", required=True)
     ap.add_argument("--prepare-candidate", action="store_true")
-    ap.add_argument("--auto-window", type=int, default=20000)
-    ap.add_argument("--max-fills", type=int, default=60)
+    ap.add_argument("--auto-window", type=int, default=100000)
+    ap.add_argument("--max-fills", type=int, default=150)
     ap.add_argument("--auto-minutes", type=float, default=25)
     args = ap.parse_args()
+    # Claude Code 2.1.332 treats a window below 100k as 100k (it says so on
+    # screen); refuse such a value so summary.autoWindow is the effective one.
+    if args.auto_window < 100000:
+        ap.error("--auto-window must be at least 100000: Claude Code reads a smaller value as 100000")
     expected = args.expect_version
 
     assert sys.platform == "darwin", "native macOS only"
@@ -644,7 +650,12 @@ def main():
     env = {k: v for k, v in os.environ.items() if not (k.startswith("CODEX_COMPANION_") or k in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "NODE_OPTIONS"))}
     env.update({"TERM": "xterm-256color", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "D_PROBE_ROOT": root, "CLAUDE_PLUGIN_DATA": os.path.join(root, "data"),
                 "NODE_OPTIONS": f"--import=file://{bootstrap}", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(args.auto_window)})
-    argv = [args.claude, "--plugin-dir", plugin, "--setting-sources", "", "--settings", settings, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash"]
+    argv = [args.claude, "--plugin-dir", plugin, "--setting-sources", "", "--settings", settings, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "Bash",
+            # Not auto mode (the default from 2.1.332): its classifier refused a
+            # probe command the model had changed. dontAsk refuses every call
+            # the allow rule does not cover, without a prompt that would hang the
+            # turn, so Bash(node:*) / Bash(cat:*) alone decide.
+            "--permission-mode", "dontAsk"]
 
     summary = {"root": root, "claudeVersion": version, "claudeBinarySha256": file_sha(claude_bin), "arch": platform.machine(), "repoHead": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip(),
                "sourceHashes": source_hashes, "harnessSha256": file_sha(__file__), "autoWindow": args.auto_window, "phases": [], "checks": {}}
@@ -733,8 +744,18 @@ def main():
 
     def run_probe(label):
         before = len(probes())
-        turn("/d-probe", f"{label} probe")
-        wait(lambda: len(probes()) > before, f"{label} probe file")
+        # The model can change the command (seen with 2.1.332: an invented
+        # prefix), which the allow rule then refuses; resend once, on record.
+        for attempt in range(2):
+            turn("/d-probe", f"{label} probe")
+            try:
+                wait(lambda: len(probes()) > before, f"{label} probe file", 30 if attempt == 0 else 120)
+                break
+            except RuntimeError as error:
+                if attempt == 1 or not str(error).endswith("timed out"):
+                    raise
+                summary.setdefault("probeRetries", []).append({"phase": label, "reason": str(error)})
+                persist()
         p = dict(probes()[-1])
         transcript = p.pop("transcriptPath", None)
         p["transcriptPathSha"] = sha(transcript)
